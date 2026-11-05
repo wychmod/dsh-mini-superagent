@@ -78,6 +78,26 @@ window.__ModuleLoader__.load({
       unknownError: '未知错误',
       noTitle: '（无标题）',
       dismiss: '关闭提示',
+      'filter.archived': '已归档',
+      archivedTag: '已归档',
+      archivedHint: '该子会话已归档，可能已不在会话列表里',
+      archiveErrorPrefix: '归档失败：',
+      archiveNow: '立即归档',
+      archiveConfirm: '确认归档',
+      archiveRunning: '归档中…',
+      archiveDone: '归档巡检：扫描 {scanned}，归档 {archived}，失败 {failed}',
+      workspaceAll: '全部工作区',
+      workspaceFilter: '按工作区筛选',
+      workspaceFallback: '跟随会话目录',
+      groupTag: '批次',
+      openFailed: '打不开子会话 {id}：{reason}',
+      noWorkerSession: '这个任务没有可打开的子会话',
+      noUiWorkspace: '会话导航服务不可用',
+      clickHint: '点击打开子会话',
+      justNow: '刚刚',
+      minutesAgo: '{n} 分钟前',
+      hoursAgo: '{n} 小时前',
+      daysAgo: '{n} 天前',
     }
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
@@ -120,6 +140,26 @@ window.__ModuleLoader__.load({
       unknownError: 'Unknown error',
       noTitle: '(untitled)',
       dismiss: 'Dismiss',
+      'filter.archived': 'Archived',
+      archivedTag: 'Archived',
+      archivedHint: 'That worker session was archived and may no longer be listed',
+      archiveErrorPrefix: 'Archive failed: ',
+      archiveNow: 'Archive now',
+      archiveConfirm: 'Confirm archive',
+      archiveRunning: 'Archiving…',
+      archiveDone: 'Archive sweep: scanned {scanned}, archived {archived}, failed {failed}',
+      workspaceAll: 'All workspaces',
+      workspaceFilter: 'Filter by workspace',
+      workspaceFallback: 'Follows session cwd',
+      groupTag: 'batch',
+      openFailed: 'Cannot open worker session {id}: {reason}',
+      noWorkerSession: 'This task has no worker session to open',
+      noUiWorkspace: 'session navigation is unavailable',
+      clickHint: 'Open the worker session',
+      justNow: 'just now',
+      minutesAgo: '{n} min ago',
+      hoursAgo: '{n} h ago',
+      daysAgo: '{n} d ago',
     }
 
     /** 当前翻译函数；attachLocale 成功后会替换成 locale 绑定的 t()。 */
@@ -181,20 +221,31 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    /** 三个过滤 chip 的定义。 */
+    /**
+     * 四个过滤 chip 的定义。
+     * 「全部」不含已归档：归档是历史，只在自己的 chip 里出现，否则列表会被历史淹没。
+     */
     const FILTERS = [
-      { id: 'all', labelKey: 'filter.all', match: function () { return true } },
+      { id: 'all', labelKey: 'filter.all', match: function (task) { return !task.archived_at } },
       {
         id: 'active',
         labelKey: 'filter.active',
-        match: function (task) { return task.status === 'running' || task.status === 'queued' },
+        match: function (task) {
+          return !task.archived_at && (task.status === 'running' || task.status === 'queued')
+        },
       },
       {
         id: 'attention',
         labelKey: 'filter.attention',
         match: function (task) {
-          return task.status === 'failed' || task.status === 'interrupted' || task.status === 'blocked'
+          return !task.archived_at
+            && (task.status === 'failed' || task.status === 'interrupted' || task.status === 'blocked')
         },
+      },
+      {
+        id: 'archived',
+        labelKey: 'filter.archived',
+        match: function (task) { return Boolean(task.archived_at) },
       },
     ]
 
@@ -255,6 +306,67 @@ window.__ModuleLoader__.load({
       return tr('unknownError')
     }
 
+    /** 模板占位替换：{name} -> vars.name。缺失的占位原样保留，方便发现漏配。 */
+    function fill(template, vars) {
+      if (typeof template !== 'string') return ''
+      return template.replace(/\{(\w+)\}/g, function (match, key) {
+        return vars && vars[key] !== undefined ? String(vars[key]) : match
+      })
+    }
+
+    /** 日期只用于很久以前的归档时间。 */
+    function formatDate(stamp) {
+      const date = new Date(stamp)
+      if (Number.isNaN(date.getTime())) return ''
+      return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0')
+    }
+
+    /** 相对时间：归档是历史，读「多久之前」比读时间戳省事。 */
+    function formatRelative(stamp, now) {
+      const time = typeof stamp === 'number' ? stamp : Date.parse(String(stamp))
+      if (!Number.isFinite(time)) return ''
+      const delta = Math.max(0, (typeof now === 'number' ? now : Date.now()) - time)
+      if (delta < 60000) return tr('justNow')
+      const minutes = Math.floor(delta / 60000)
+      if (minutes < 60) return fill(tr('minutesAgo'), { n: minutes })
+      const hours = Math.floor(minutes / 60)
+      if (hours < 24) return fill(tr('hoursAgo'), { n: hours })
+      const days = Math.floor(hours / 24)
+      if (days < 30) return fill(tr('daysAgo'), { n: days })
+      return formatDate(stamp)
+    }
+
+    /** 任务派到哪个工作区；未指定时说明它跟随会话自己的工作目录。 */
+    function workspaceTitleOf(task) {
+      if (task && typeof task.workspace_title === 'string' && task.workspace_title) return task.workspace_title
+      return tr('workspaceFallback')
+    }
+
+    /**
+     * 同批次（group 非空）的任务聚到一起。
+     * 以 group 在基序里第一次出现的位置为锚点，把同组任务整体挪过来：
+     * 服务端给的 running→queued→其余（updated_at 倒序）基序保留不变，
+     * 只是让同组行视觉相邻。无 group 的任务原地不动。
+     */
+    function clusterByGroup(tasks) {
+      const seen = new Set()
+      const out = []
+      for (let i = 0; i < tasks.length; i += 1) {
+        const task = tasks[i]
+        const group = task && typeof task.group === 'string' && task.group ? task.group : ''
+        if (!group) {
+          out.push(task)
+          continue
+        }
+        if (seen.has(group)) continue
+        seen.add(group)
+        for (let j = 0; j < tasks.length; j += 1) {
+          if (tasks[j] && tasks[j].group === group) out.push(tasks[j])
+        }
+      }
+      return out
+    }
+
     /* ───────────────────────── 网络 ───────────────────────── */
 
     /** 读整块看板；非 2xx 或形状不对都当失败，交给面板显示「暂时取不到」。 */
@@ -282,15 +394,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 写操作：POST {task_id}。Host 的错误体统一是 {ok:false,error:"中文原因"}，
+     * 写操作：POST 一个 JSON 体。Host 的错误体统一是 {ok:false,error:"中文原因"}，
      * 直接把 error 展示出来，不再翻译一遍。
      */
-    async function postAction(path, taskId, signal) {
+    async function postJson(path, body, signal) {
       const response = await fetch(API + path, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ task_id: taskId }),
+        body: JSON.stringify(body || {}),
         signal,
       })
       let payload = null
@@ -525,6 +637,52 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-interactive-bg-hover-accent, rgba(77,107,254,.12));
   color: var(--dsw-alias-brand-primary, #4d6bfe);
 }
+.dsh-sa-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.dsh-sa-select {
+  height: 26px;
+  max-width: 240px;
+  padding: 0 8px;
+  border-radius: var(--dsw-radius-sm, 6px);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12, 12px);
+}
+.dsh-sa-select:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 1px;
+}
+.dsh-sa-row-clickable { cursor: pointer; }
+.dsh-sa-row:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: -2px;
+}
+.dsh-sa-row-archived { opacity: .55; }
+.dsh-sa-workspace {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+.dsh-sa-tag-group,
+.dsh-sa-tag-archived {
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-btn-confirm { color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dsh-sa-strip-info {
+  color: var(--dsw-alias-label-secondary, inherit);
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08));
+}
 .dsh-sa-blank {
   display: flex;
   flex-direction: column;
@@ -606,10 +764,14 @@ window.__ModuleLoader__.load({
     /** 一条任务。props.handlers 由面板传下来，避免每行都闭包一份。 */
     function TaskRow(props) {
       const task = props.task
+      const archived = Boolean(task.archived_at)
       const meta = STATUS_META[task.status] || STATUS_FALLBACK
+      // 归档行是只读历史：整体降透明度、状态点转灰、不给取消/重试按钮。
+      const dotColor = archived ? 'var(--dsw-alias-label-tertiary, #8b8b8b)' : meta.color
+      const pulse = archived ? false : meta.pulse
       const statusText = tr('status.' + task.status)
       const elapsed = elapsedOf(task, props.now, props.fetchedAt)
-      const kind = actionOf(task.status)
+      const kind = archived ? null : actionOf(task.status)
       const busyKind = props.busy[task.task_id]
       const summary = task.last_report && typeof task.last_report.summary === 'string'
         ? task.last_report.summary
@@ -618,11 +780,23 @@ window.__ModuleLoader__.load({
       const attempt = num(task.attempt, 1)
       const reportCount = num(task.report_count, 0)
       const title = typeof task.title === 'string' && task.title ? task.title : tr('noTitle')
+      const group = typeof task.group === 'string' ? task.group : ''
+      const clickable = Boolean(task.worker_session_id)
       const tip = [
         task.task_id,
         task.cwd ? 'cwd: ' + task.cwd : '',
         task.worker_session_id ? 'worker: ' + task.worker_session_id : '',
-      ].filter(Boolean).join('\n')
+      ].filter(Boolean).join('\n') + (clickable ? '\n' + tr('clickHint') : '')
+
+      /** 整行可点（按钮除外）：打开这个任务的子会话。 */
+      function activate(event) {
+        if (!clickable) return
+        if (event) {
+          if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return
+          if (event.preventDefault) event.preventDefault()
+        }
+        props.handlers.open(task)
+      }
 
       const action = kind
         ? h(
@@ -633,7 +807,11 @@ window.__ModuleLoader__.load({
               className: 'dsh-sa-btn ' + (kind === 'cancel' ? 'dsh-sa-btn-danger' : 'dsh-sa-btn-primary'),
               disabled: Boolean(busyKind),
               title: kind === 'cancel' ? tr('cancel') : tr('retryTask'),
-              onClick: function () { props.handlers.act(kind, task) },
+              onClick: function (event) {
+                // 行本身可点，按钮必须吞掉冒泡，否则取消的同时还会去开子会话。
+                if (event && event.stopPropagation) event.stopPropagation()
+                props.handlers.act(kind, task)
+              },
             },
             busyKind === 'cancel'
               ? tr('cancelling')
@@ -647,17 +825,28 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { className: 'dsh-sa-row', role: 'listitem', 'data-status': task.status },
+        {
+          className: 'dsh-sa-row'
+            + (archived ? ' dsh-sa-row-archived' : '')
+            + (clickable ? ' dsh-sa-row-clickable' : ''),
+          role: 'listitem',
+          'data-status': task.status,
+          'data-archived': archived ? 'true' : undefined,
+          title: archived ? tip + '\n' + tr('archivedHint') : tip,
+          tabIndex: clickable ? 0 : undefined,
+          onClick: clickable ? activate : undefined,
+          onKeyDown: clickable ? activate : undefined,
+        },
         h(
           'div',
           { className: 'dsh-sa-line' },
           h('span', {
             key: 'dot',
-            className: 'dsh-sa-dot' + (meta.pulse ? ' dsh-sa-dot-pulse' : ''),
-            style: { color: meta.color },
+            className: 'dsh-sa-dot' + (pulse ? ' dsh-sa-dot-pulse' : ''),
+            style: { color: dotColor },
             'aria-hidden': 'true',
           }),
-          h('span', { key: 'status', className: 'dsh-sa-state', style: { color: meta.color } }, statusText),
+          h('span', { key: 'status', className: 'dsh-sa-state', style: { color: dotColor } }, statusText),
           h('span', { key: 'title', className: 'dsh-sa-title', title: tip }, title),
           attempt > 1
             ? h(
@@ -667,12 +856,32 @@ window.__ModuleLoader__.load({
               )
             : null,
           h('span', { key: 'grow', className: 'dsh-sa-grow' }),
+          group ? h('span', { key: 'group', className: 'dsh-sa-tag dsh-sa-tag-group' }, tr('groupTag')) : null,
+          archived
+            ? h(
+                'span',
+                { key: 'archived', className: 'dsh-sa-tag dsh-sa-tag-archived' },
+                tr('archivedTag'),
+              )
+            : null,
+          archived
+            ? h(
+                'span',
+                { key: 'archived-at', className: 'dsh-sa-meta' },
+                formatRelative(task.archived_at, props.now),
+              )
+            : null,
           elapsed ? h('span', { key: 'elapsed', className: 'dsh-sa-meta dsh-sa-elapsed' }, elapsed) : null,
           action,
         ),
         h(
           'div',
           { className: 'dsh-sa-sub' },
+          h(
+            'span',
+            { key: 'workspace', className: 'dsh-sa-workspace', title: task.workspace_title || '' },
+            workspaceTitleOf(task),
+          ),
           h('code', { key: 'id', className: 'dsh-sa-id' }, task.task_id),
           reportCount > 0
             ? h('span', { key: 'count', className: 'dsh-sa-meta' }, tr('reports') + ' ' + reportCount)
@@ -681,6 +890,13 @@ window.__ModuleLoader__.load({
         ),
         typeof task.error === 'string' && task.error
           ? h('div', { key: 'error', className: 'dsh-sa-errorline', title: task.error }, task.error)
+          : null,
+        typeof task.archive_error === 'string' && task.archive_error
+          ? h(
+              'div',
+              { key: 'archive-error', className: 'dsh-sa-errorline', title: task.archive_error },
+              tr('archiveErrorPrefix') + task.archive_error,
+            )
           : null,
       )
     }
@@ -700,11 +916,17 @@ window.__ModuleLoader__.load({
       const [snapshot, setSnapshot] = useState(null)
       const [fetchedAt, setFetchedAt] = useState(0)
       const [failure, setFailure] = useState(null)
+      /** 顶部提示条：{ tone: 'error'|'warn'|'info', text }，可关闭。 */
       const [notice, setNotice] = useState(null)
       const [filter, setFilter] = useState('all')
+      /** 工作区筛选；'' 表示全部工作区。与状态 chip 是「与」关系。 */
+      const [workspace, setWorkspace] = useState('')
       const [busy, setBusy] = useState({})
       const [generation, setGeneration] = useState(0)
       const [now, setNow] = useState(function () { return Date.now() })
+      /** 立即归档的两步确认：0 空闲，1 等待确认。 */
+      const [archiveStage, setArchiveStage] = useState(0)
+      const [archiving, setArchiving] = useState(false)
 
       /** 面板内所有写操作的 AbortController，卸载时统一中止。 */
       const inFlight = useRef(null)
@@ -743,6 +965,8 @@ window.__ModuleLoader__.load({
             if (disposed || current.signal.aborted) return
             setSnapshot(data)
             setFetchedAt(Date.now())
+            // 顺带推进 now：没有 running 任务时走表不开，归档行的相对时间靠每次取数刷新。
+            setNow(Date.now())
             setFailure(null)
           } catch (error) {
             if (disposed || current.signal.aborted || (error && error.name === 'AbortError')) return
@@ -811,6 +1035,22 @@ window.__ModuleLoader__.load({
         return function () { clearInterval(id) }
       }, [hasRunning])
 
+      /* 两步确认：进入确认态后 4 秒没搭理就退回，免得误触常驻。 */
+      useEffect(function () {
+        if (archiveStage !== 1) return undefined
+        const id = setTimeout(function () { setArchiveStage(0) }, 4000)
+        return function () { clearTimeout(id) }
+      }, [archiveStage])
+
+      /** 带中止控制的 POST，控制器统一登记，卸载时一并 abort。 */
+      const post = useCallback(function (path, body) {
+        const controller = new AbortController()
+        if (inFlight.current) inFlight.current.add(controller)
+        return postJson(path, body, controller.signal).finally(function () {
+          if (inFlight.current) inFlight.current.delete(controller)
+        })
+      }, [])
+
       /* 写操作：取消 / 重试。成功后立刻重新取一次快照。 */
       const act = useCallback(function (kind, task) {
         if (!task || !task.task_id) return
@@ -820,19 +1060,16 @@ window.__ModuleLoader__.load({
           next[task.task_id] = kind
           return next
         })
-        const controller = new AbortController()
-        if (inFlight.current) inFlight.current.add(controller)
-        postAction(kind === 'cancel' ? '/cancel' : '/retry', task.task_id, controller.signal)
+        post(kind === 'cancel' ? '/cancel' : '/retry', { task_id: task.task_id })
           .then(function () {
             setNotice(null)
             refresh()
           })
           .catch(function (error) {
             if (error && error.name === 'AbortError') return
-            setNotice(describeError(error))
+            setNotice({ tone: 'error', text: tr('actionFailed') + '：' + describeError(error) })
           })
           .finally(function () {
-            if (inFlight.current) inFlight.current.delete(controller)
             setBusy(function (value) {
               if (!(task.task_id in value)) return value
               const next = Object.assign({}, value)
@@ -840,23 +1077,98 @@ window.__ModuleLoader__.load({
               return next
             })
           })
-      }, [busy, refresh])
+      }, [busy, post, refresh])
 
-      const handlers = useMemo(function () { return { act: act } }, [act])
+      /**
+       * 点行打开子会话。openSession 可能抛 not-listed（子会话已不在会话目录里），
+       * 这里一律接住并提示，不白屏、不静默。已归档的先提醒一句，但仍然尝试打开。
+       */
+      const openWorker = useCallback(async function (task) {
+        const target = task && typeof task.worker_session_id === 'string' ? task.worker_session_id : ''
+        if (task && task.archived_at) setNotice({ tone: 'warn', text: tr('archivedHint') })
+        if (!target) {
+          setNotice({ tone: 'error', text: tr('noWorkerSession') })
+          return
+        }
+        let ui = null
+        try {
+          ui = appContext && typeof appContext.get === 'function'
+            ? appContext.get('uiWorkspace')
+            : appContext && appContext.uiWorkspace
+        } catch (error) {
+          ui = null
+        }
+        if (!ui || typeof ui.openSession !== 'function') {
+          setNotice({ tone: 'error', text: fill(tr('openFailed'), { id: target, reason: tr('noUiWorkspace') }) })
+          return
+        }
+        try {
+          await ui.openSession(target)
+          // 打开成功就把上一条失败提示清掉；归档行保留那句「可能已不在会话列表」的提醒。
+          if (!(task && task.archived_at)) setNotice(null)
+        } catch (error) {
+          setNotice({ tone: 'error', text: fill(tr('openFailed'), { id: target, reason: describeError(error) }) })
+        }
+      }, [])
+
+      /* 立即归档：会真的归档会话，不是预览，所以走两步确认。 */
+      const runArchive = useCallback(async function () {
+        if (archiving) return
+        setArchiveStage(0)
+        setArchiving(true)
+        try {
+          const result = await post('/archive', {})
+          const scanned = num(result && result.scanned, 0)
+          const archivedCount = num(result && result.archived, 0)
+          const failedCount = num(result && result.failed, 0)
+          setNotice({
+            tone: failedCount > 0 ? 'warn' : 'info',
+            text: fill(tr('archiveDone'), { scanned: scanned, archived: archivedCount, failed: failedCount }),
+          })
+          if (result && result.counts) {
+            // 先用返回的 counts 立刻更新顶部数字，再整块重取一次。
+            setSnapshot(function (current) {
+              if (!current) return current
+              return Object.assign({}, current, {
+                counts: Object.assign({}, current.counts, result.counts),
+              })
+            })
+          }
+          refresh()
+        } catch (error) {
+          if (error && error.name === 'AbortError') return
+          setNotice({ tone: 'error', text: tr('actionFailed') + '：' + describeError(error) })
+        } finally {
+          setArchiving(false)
+        }
+      }, [archiving, post, refresh])
+
+      const handlers = useMemo(function () {
+        return { act: act, open: openWorker }
+      }, [act, openWorker])
 
       const data = snapshot && Array.isArray(snapshot.tasks) ? snapshot : null
       const allTasks = data ? data.tasks.filter(function (task) { return task && typeof task === 'object' }) : []
       const counts = data && data.counts ? data.counts : {}
       const concurrency = data && data.concurrency ? data.concurrency : {}
+      const workspaces = data && Array.isArray(data.workspaces)
+        ? data.workspaces.filter(function (item) { return item && typeof item.id === 'string' })
+        : []
 
       const runningNow = num(concurrency.running, num(counts.running, 0))
       const maxWorkers = num(concurrency.max, 0)
       const queuedNow = num(counts.queued, 0)
-      const totalNow = num(counts.total, allTasks.length)
+      // 总计不含已归档：归档只在它自己的 chip 里计数，否则「全部」和总计对不上。
+      const archivedNow = num(counts.archived, allTasks.filter(function (task) { return Boolean(task.archived_at) }).length)
+      const totalNow = Math.max(0, num(counts.total, allTasks.length) - archivedNow)
       const failedNow = num(counts.failed, 0)
 
+      // 工作区筛选与状态 chip 取交集；同 group 的行再聚到一起。
+      const scopedTasks = workspace
+        ? allTasks.filter(function (task) { return task.workspace_id === workspace })
+        : allTasks
       const currentFilter = FILTERS.filter(function (item) { return item.id === filter })[0] || FILTERS[0]
-      const visibleTasks = allTasks.filter(currentFilter.match)
+      const visibleTasks = clusterByGroup(scopedTasks.filter(currentFilter.match))
 
       const header = h(
         'div',
@@ -877,7 +1189,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'dsh-sa-chips', role: 'group', 'aria-label': tr('title') },
           FILTERS.map(function (item) {
-            const count = allTasks.filter(item.match).length
+            const count = scopedTasks.filter(item.match).length
             return h(
               'button',
               {
@@ -891,6 +1203,46 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsh-sa-chip-count' }, String(count)),
             )
           }),
+        ),
+        h(
+          'div',
+          { className: 'dsh-sa-toolbar' },
+          h(
+            'select',
+            {
+              className: 'dsh-sa-select',
+              'aria-label': tr('workspaceFilter'),
+              title: tr('workspaceFilter'),
+              value: workspace,
+              onChange: function (event) {
+                setWorkspace(event && event.target ? event.target.value || '' : '')
+              },
+            },
+            h('option', { key: 'all', value: '' }, tr('workspaceAll')),
+            workspaces.map(function (item) {
+              return h('option', { key: item.id, value: item.id }, item.title || item.id)
+            }),
+          ),
+          h('span', { key: 'grow', className: 'dsh-sa-grow' }),
+          h(
+            'button',
+            {
+              key: 'archive',
+              type: 'button',
+              className: 'dsh-sa-btn' + (archiveStage === 1 ? ' dsh-sa-btn-confirm' : ''),
+              disabled: archiving,
+              title: archiveStage === 1 ? tr('archiveConfirm') : tr('archiveNow'),
+              onClick: function () {
+                if (archiving) return
+                if (archiveStage === 0) {
+                  setArchiveStage(1)
+                  return
+                }
+                void runArchive()
+              },
+            },
+            archiving ? tr('archiveRunning') : archiveStage === 1 ? tr('archiveConfirm') : tr('archiveNow'),
+          ),
         ),
       )
 
@@ -914,11 +1266,17 @@ window.__ModuleLoader__.load({
         strips.push(
           h(
             'div',
-            { key: 'notice', className: 'dsh-sa-strip dsh-sa-strip-error', role: 'alert' },
-            h('span', { className: 'dsh-sa-strip-text', title: notice }, tr('actionFailed') + '：' + notice),
+            {
+              key: 'notice',
+              className: 'dsh-sa-strip dsh-sa-strip-' + (notice.tone || 'info'),
+              role: notice.tone === 'error' ? 'alert' : 'status',
+              'aria-live': 'polite',
+            },
+            h('span', { className: 'dsh-sa-strip-text', title: notice.text }, notice.text),
             h('button', {
               type: 'button',
               className: 'dsh-sa-btn',
+              title: tr('dismiss'),
               onClick: function () { setNotice(null) },
             }, tr('dismiss')),
           ),
@@ -971,12 +1329,18 @@ window.__ModuleLoader__.load({
     /** 当前挂载中的面板清理函数；插件卸载时由 ctx.effect 兜底调用。 */
     let activePanelCleanup = null
 
+    /** 插件 Context；面板用它取 uiWorkspace 打开子会话（取不到时降级为提示，不抛错）。 */
+    let appContext = null
+
     /* ───────────────────────── 插件入口 ───────────────────────── */
 
     const name = 'dsh-mini-superagent'
     const inject = ['slots']
 
     function apply(ctx) {
+      // 面板点行要打开子会话，这里留一份 Context 供渲染期读取。
+      appContext = ctx
+
       // 可选：接上 Client locale。失败只是保持内置中文。
       attachLocale(ctx)
 
