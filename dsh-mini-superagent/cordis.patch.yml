@@ -1,0 +1,23 @@
+# dsh-mini-superagent bundle layer.
+#
+# 只插入一个 Host 插件行。插件是纯 ESM，无构建、无运行时依赖。
+# 下面每一项都可选；整段删掉也能工作（默认值见 src/constants.js 的 DEFAULTS）。
+- insert:
+    - id: dsh-mini-superagent
+      name: dsh-mini-superagent
+      config:
+        # 同时真正在跑（running）的子会话上限；超出的任务进入 queued，一有空位就被顶上来。
+        maxWorkers: 6
+        # 每个主会话最多累计派发多少个任务（防止递归派发失控）。
+        maxTasksPerSession: 64
+        # 子会话是否继承主会话的工作目录。
+        inheritWorkingDirectory: true
+        # 子会话的权限预设。留空表示继承 DSH 默认；
+        # 后台无人看管的场景可设 danger-full-access，避免子会话卡在审批上。
+        permissionPreset: ''
+        # 任务表落盘目录；留空表示 $DSH_HOME/dsh-mini-superagent。
+        stateDir: ''
+        # worker 回合结束后自动把最后输出回报给主会话。
+        reportOnTurnEnd: true
+        # 投给 worker 的任务简报最大字符数，超出截断。
+        maxBriefChars: 12000

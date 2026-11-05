@@ -1,8 +1,11 @@
 # 统一行尾，避免 Windows 上反复出现整个文件被改写。
 * text=auto
 
-.gitignore      text eol=lf
-.gitattributes  text eol=lf
+.gitignore       text eol=lf
+.gitattributes   text eol=lf
+.editorconfig    text eol=lf
+LICENSE          text eol=lf
+LICENSE.*        text eol=lf
 
 *.js    text eol=lf
 *.json  text eol=lf

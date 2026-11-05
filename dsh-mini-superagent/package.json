@@ -1,0 +1,50 @@
+{
+  "name": "dsh-mini-superagent",
+  "version": "0.2.0",
+  "description": "主会话把任务派给独立的后台子会话执行，子会话完成后把报告投递回主会话；支持并发上限、排队、追问、取消与阻塞等待。",
+  "icon": "icon.svg",
+  "author": "wychmod",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "src",
+    "docs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "bundle",
+    "agent",
+    "task",
+    "dispatch",
+    "subagent",
+    "orchestration"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "manifestVersion": 1
+  }
+}
