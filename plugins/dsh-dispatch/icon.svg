@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Task Dispatch">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1f2a44"/>
+      <stop offset="1" stop-color="#0d1424"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="url(#bg)" stroke="#33415c" stroke-width="1.5"/>
+  <!-- hub -->
+  <circle cx="17" cy="32" r="7.5" fill="url(#beam)"/>
+  <circle cx="17" cy="32" r="3" fill="#0d1424"/>
+  <!-- dispatch beams -->
+  <g stroke="url(#beam)" stroke-width="2.4" stroke-linecap="round" fill="none">
+    <path d="M25 26 L40 16"/>
+    <path d="M25 32 L42 32"/>
+    <path d="M25 38 L40 48"/>
+  </g>
+  <g fill="url(#beam)">
+    <path d="M40 16 l-6.4 1.1 3.3 5.5 z"/>
+    <path d="M42 32 l-6.4 3.1 6.4 3.1 z"/>
+    <path d="M40 48 l-6.4-1.1 3.3-5.5 z"/>
+  </g>
+  <!-- worker nodes -->
+  <g fill="#e2e8f0">
+    <circle cx="49" cy="14" r="4.6"/>
+    <circle cx="52" cy="32" r="5.2"/>
+    <circle cx="49" cy="50" r="4.6"/>
+  </g>
+  <g fill="#0d1424">
+    <circle cx="49" cy="14" r="1.7"/>
+    <circle cx="52" cy="32" r="1.9"/>
+    <circle cx="49" cy="50" r="1.7"/>
+  </g>
+</svg>

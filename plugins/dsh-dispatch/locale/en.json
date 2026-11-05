@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Task Dispatch",
+    "description": "A main session dispatches tasks to independent background worker sessions and receives their reports back; includes a concurrency cap, queueing, follow-ups, cancellation, and blocking waits."
+  }
+}
