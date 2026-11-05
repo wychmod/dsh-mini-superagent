@@ -1,0 +1,22 @@
+# ---- 第三方参考克隆 ----
+# DSH 官方原型，只用于研究架构，不属于本仓库的代码：
+# https://github.com/deepseek-ai/dsh-superagent-prototype
+/reference/
+
+# ---- 依赖与构建产物 ----
+node_modules/
+*.log
+
+# ---- 本机运行时状态 ----
+.dsh/
+*.tmp
+
+# ---- 冒烟测试产生的临时文件 ----
+dispatch-*.txt
+cancel-*.txt
+
+# ---- 编辑器 / 系统 ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
