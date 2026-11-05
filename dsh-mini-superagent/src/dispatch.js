@@ -16,6 +16,7 @@ import { workerPrompt } from './prompt.js'
 import { SessionGateway } from './sessions.js'
 import { readTaskFile, writeTaskFile } from './store.js'
 import { TaskTable, clip, lastAssistantText, oneLine } from './tasks.js'
+import { WorkspaceGateway, dayKey } from './workspaces.js'
 
 export class Dispatch {
   /**
@@ -27,7 +28,9 @@ export class Dispatch {
     this.config = { ...DEFAULTS, ...(config ?? {}) }
     this.table = new TaskTable(this.config.maxWorkers)
     this.sessions = new SessionGateway(ctx, this.config)
+    this.workspaces = new WorkspaceGateway(ctx, this.config)
     this.persistTimer = undefined
+    this.sweepTimer = undefined
     this.disposed = false
     const stateRoot = this.config.stateDir
       || join(process.env.DSH_HOME || join(homedir(), '.dsh'), STATE_DIR)
@@ -50,6 +53,19 @@ export class Dispatch {
     if (existing.length >= this.config.maxTasksPerSession) {
       throw new Error(`本会话已派发 ${existing.length} 个任务，达到上限 ${this.config.maxTasksPerSession}；请先收束旧任务`)
     }
+
+    // 目标工作区：显式指定就解析（可按需新建），没指定就跟随调用者的工作目录。
+    let target
+    if (input.workspace) {
+      const result = await this.workspaces.resolveOrCreate(input.workspace, { create: input.createWorkspace !== false })
+      target = result.workspace
+      if (!target) {
+        const candidates = this.workspaces.list().map(item => `${item.title}（${item.path}）`).join('；') || '（暂无工作区）'
+        throw new Error(`找不到工作区「${input.workspace}」，且允许新建被关闭。现有：${candidates}`)
+      }
+      if (result.created) this.log(`${LOG_PREFIX} 已新建工作区 %s（%s）`, target.title, target.path)
+    }
+
     const id = newTaskId()
     const task = {
       id,
@@ -65,7 +81,11 @@ export class Dispatch {
       lastReportAt: undefined,
       lastText: '',
       reports: [],
-      cwd: this.sessions.cwdFor(agent, input.cwd),
+      // 工作目录 = 目标工作区路径；没有目标就沿用调用者目录。
+      cwd: target?.path ?? this.sessions.cwdFor(agent, input.cwd),
+      workspaceId: target?.id,
+      workspaceTitle: target?.title,
+      ...(input.group ? { group: input.group } : {}),
       model: input.model,
       agentPreset: input.agentPreset,
       permissionPreset: input.permissionPreset,
@@ -75,6 +95,22 @@ export class Dispatch {
     this.schedulePersist()
     void this.pump()
     return task
+  }
+
+  /**
+   * 子会话放在哪个工作区。
+   * - `target` 模式且任务指定了目标 → 放进目标工作区（子会话混在项目里）
+   * - 其余情况 → 当天的【派发】工作区（侧边栏保持干净）
+   * @returns {Promise<{ workspaceId?: string, path: string }>}
+   */
+  async placementFor(task) {
+    const target = task.workspaceId ? this.workspaces.list().find(item => item.id === task.workspaceId) : undefined
+    if (this.config.workerWorkspace === 'target' && target) {
+      return { workspaceId: target.id, path: target.path }
+    }
+    const day = await this.workspaces.dayWorkspace(dayKey())
+    if (day) return { workspaceId: day.id, path: day.path }
+    return { path: task.cwd }
   }
 
   /** 按并发位依次启动排队中的任务。 */
@@ -103,6 +139,47 @@ export class Dispatch {
   settle(task, status) {
     this.table.settle(task, status)
     void this.pump()
+    void this.maybeSummarize(task)
+  }
+
+  /**
+   * 一批任务（同一个 `group`）全部结算后，发**一条**汇总，而不是 N 条流水。
+   * 组内任一成员带上 `groupClosed` 就说明已经汇总过，避免重复。
+   */
+  async maybeSummarize(task) {
+    const group = task.group
+    if (!group) return
+    const members = [...this.table.tasks.values()].filter(item => item.group === group)
+    if (!members.length) return
+    if (members.some(item => item.groupClosed)) return
+    if (members.some(item => !SETTLED.has(item.status))) return
+
+    for (const item of members) item.groupClosed = true
+    this.schedulePersist()
+
+    const tally = {}
+    for (const item of members) tally[item.status] = (tally[item.status] ?? 0) + 1
+    const summary = Object.entries(tally).map(([status, count]) => `${status} ${count}`).join(' / ')
+    const lines = members.map(item => {
+      const last = item.reports.at(-1)
+      const reason = item.error
+        ?? last?.summary
+        ?? item.lastText
+        ?? ''
+      const head = `- ${item.title} · ${item.status}${(item.attempt ?? 1) > 1 ? ` · 第 ${item.attempt} 次` : ''}`
+      return reason ? `${head}：${oneLine(reason, 120)}` : head
+    })
+
+    try {
+      await this.relay(
+        { parentSessionId: task.parentSessionId, id: group, workerSessionId: '' },
+        `[dispatch] 批次 ${group} 全部结束（${members.length} 个任务：${summary}）\n${lines.join('\n')}\n`
+        + '需要明细用 dispatch_inspect 按 task_id 查。',
+        true,
+      )
+    } catch (error) {
+      this.warn(`${LOG_PREFIX} 批次 %s 汇总投递失败: %s`, group, String(error))
+    }
   }
 
   /** 真正启动一个任务：建会话 → 投递简报。 */
@@ -111,10 +188,17 @@ export class Dispatch {
     task.startedAt = now()
     task.updatedAt = task.startedAt
     this.schedulePersist()
-    await this.sessions.createWorker(task.workerSessionId, task.cwd, `[派发] ${task.title}`, task)
+    const placement = await this.placementFor(task)
+    const agent = await this.sessions.createWorker(task.workerSessionId, placement.path, `[派发] ${task.title}`, {
+      agentPreset: task.agentPreset,
+      permissionPreset: task.permissionPreset,
+      workspaceId: placement.workspaceId,
+    })
+    // 会话住在【派发】工作区，但活要干在目标任务的工作区里。
+    if (task.cwd && task.cwd !== placement.path) await this.sessions.enterDirectory(agent, task.cwd)
     task.lastText = ''
     await this.sessions.deliver(task.workerSessionId, `${task.id}:start`, workerPrompt(task, this.config), 'queue')
-    this.log(`${LOG_PREFIX} 任务 %s 已启动，子会话 %s`, task.id, task.workerSessionId)
+    this.log(`${LOG_PREFIX} 任务 %s 已启动，子会话 %s（工作目录 %s）`, task.id, task.workerSessionId, task.cwd)
     return task
   }
 
@@ -138,7 +222,10 @@ export class Dispatch {
     this.schedulePersist()
 
     // progress 只在主会话正忙时顺带并入，不为了它把人叫醒。
-    await this.relay(task, this.reportText(task, entry), status !== 'progress')
+    // 批次内的终态报告只入库，等整批结束由 maybeSummarize 统一回流一条。
+    if (!task.group || status === 'progress') {
+      await this.relay(task, this.reportText(task, entry), status !== 'progress')
+    }
     return { recorded: true, task_id: task.id, status: task.status }
   }
 
@@ -200,6 +287,8 @@ export class Dispatch {
     this.settle(task, 'ended')
     this.schedulePersist()
     if (!this.config.reportOnTurnEnd) return
+    // 批次成员不单独回流：整批结束时有一条汇总，逐条发等于没汇总。
+    if (task.group) return
 
     const body = text ? clip(text, 5000) : '（worker 本轮没有输出文本）'
     await this.relay(task,
@@ -300,6 +389,8 @@ export class Dispatch {
       title: task.title,
       status: task.status,
       session_id: task.workerSessionId,
+      ...(task.workspaceTitle ? { workspace: task.workspaceTitle } : {}),
+      ...(task.archivedAt ? { archived_at: task.archivedAt } : {}),
       created_at: task.createdAt,
       updated_at: task.updatedAt,
       ...(task.lastReportAt ? { last_report_at: task.lastReportAt } : {}),
@@ -360,11 +451,85 @@ export class Dispatch {
     }
   }
 
+  /** 会话是否存在（活着的或已持久化的）。 */
+  async sessionExists(sessionId) {
+    try { await this.ctx.sessionController.inspect(sessionId); return true }
+    catch { return false }
+  }
+
+  /**
+   * 首次激活时准备默认工作区（mini-superagent）与其中的默认主会话。
+   * 幂等：工作区按路径复用，会话按固定 id 存在性判断。
+   * 失败只记日志——目录不可写或注册表不可用，都不该让插件起不来。
+   */
+  async provision() {
+    if (!this.config.provisionDefaultWorkspace) return
+    try {
+      const workspace = await this.workspaces.defaultWorkspace()
+      if (!workspace) return
+      this.defaultWorkspace = workspace
+      const leadId = String(this.config.leadSessionId || 'mas-lead')
+      this.leadSessionId = leadId
+      if (await this.sessionExists(leadId)) return
+      await this.ctx.sessionController.create({ sessionId: leadId, workspaceId: workspace.id })
+      try { await this.ctx.sessionController.rename({ sessionId: leadId, title: 'mini-superagent 主会话' }) }
+      catch { /* 标题非关键 */ }
+      this.log(`${LOG_PREFIX} 已创建默认工作区「%s」（%s）与主会话 %s`, workspace.title, workspace.path, leadId)
+    } catch (error) {
+      this.warn(`${LOG_PREFIX} 创建默认工作区失败（不影响派发）: %s`, String(error))
+    }
+  }
+
+  /** 启动归档巡检：结束超过 archiveAfterHours 的子会话自动归档，看板仍能查到。 */
+  startArchiveSweep() {
+    const minutes = Number(this.config.archiveSweepMinutes)
+    const hours = Number(this.config.archiveAfterHours)
+    if (!(minutes > 0) || !(hours > 0)) return
+    const tick = () => {
+      void this.archiveStale()
+      this.sweepTimer = setTimeout(tick, minutes * 60_000)
+      this.sweepTimer.unref?.()
+    }
+    // 启动后先等一会，避开初始化的忙乱。
+    this.sweepTimer = setTimeout(tick, 20_000)
+    this.sweepTimer.unref?.()
+  }
+
+  /** 归档已结算且超过保留期的子会话；失败原因记在任务上，下一次巡检重试。 */
+  async archiveStale() {
+    if (this.disposed) return { scanned: 0, archived: 0, failed: 0 }
+    const cutoff = Date.now() - Number(this.config.archiveAfterHours) * 3_600_000
+    let scanned = 0
+    let archived = 0
+    let failed = 0
+    for (const task of [...this.table.tasks.values()]) {
+      if (task.archivedAt || !SETTLED.has(task.status)) continue
+      const at = Date.parse(task.updatedAt ?? '')
+      if (!Number.isFinite(at) || at > cutoff) continue
+      scanned += 1
+      const result = await this.workspaces.archiveSession(task.workerSessionId)
+      if (result.ok) {
+        task.archivedAt = now()
+        task.archiveError = undefined
+        archived += 1
+        this.log(`${LOG_PREFIX} 已归档子会话 %s（任务 %s）`, task.workerSessionId, task.id)
+      } else {
+        task.archiveError = result.error
+        failed += 1
+        this.warn(`${LOG_PREFIX} 任务 %s 归档失败: %s`, task.id, result.error)
+      }
+    }
+    if (scanned) this.schedulePersist()
+    return { scanned, archived, failed }
+  }
+
   /** 插件卸载：收回注册的提示段、冲刷状态。运行中的子会话交给 DSH 自身管理。 */
   async dispose() {
     this.disposed = true
     if (this.persistTimer) clearTimeout(this.persistTimer)
     this.persistTimer = undefined
+    if (this.sweepTimer) clearTimeout(this.sweepTimer)
+    this.sweepTimer = undefined
     this.sessions.dispose()
     await this.persist()
   }

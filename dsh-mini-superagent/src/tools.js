@@ -5,7 +5,7 @@
  * 而靠“调用者是不是已登记的 worker Session”在 execute 里判定：
  * 主会话可以派发，worker 只能 dispatch_report。
  */
-import { SETTLED, VERSION } from './constants.js'
+import { SETTLED, VERSION, newTaskId } from './constants.js'
 
 /** 工具返回值的渲染：JSON 文本。 */
 const output = {
@@ -23,6 +23,7 @@ const TaskRefSchema = {
 export const TOOL_NAMES = [
   'dispatch_launch',
   'dispatch_launch_many',
+  'dispatch_workspaces',
   'dispatch_list',
   'dispatch_inspect',
   'dispatch_message',
@@ -61,7 +62,9 @@ export function toolDefinitions(dispatch) {
         properties: {
           title: { type: 'string', description: '任务短标题（不超过 120 字），用于列表与子会话标题。' },
           brief: { type: 'string', description: '完整任务简报：目标、约束、验收标准、相关文件路径、已知事实。子会话看不到本会话的历史，必须自包含。' },
-          cwd: { type: 'string', description: '可选。子会话工作目录的绝对路径；省略则继承本会话的工作目录。' },
+          cwd: { type: 'string', description: '可选。子会话工作目录的绝对路径；省略则用 workspace 的路径，再省略则继承本会话的工作目录。' },
+          workspace: { type: 'string', description: '可选。派发到哪个工作区：工作区 id、绝对路径、或工作区标题都可以。子会话会在这个目录里干活；省略则沿用本会话的工作目录。先用 dispatch_workspaces 看有哪些。' },
+          create_workspace: { type: 'boolean', description: '可选，默认 true。workspace 解析不到时是否自动新建：给的是绝对路径就在该路径建，给的是名字就在工作区根下建。' },
           model: { type: 'string', description: '可选。子会话使用的模型 id；省略则用 DSH 默认模型。' },
           agent_preset: { type: 'string', description: '可选。子会话使用的 agent preset id；省略则用部署默认 preset。' },
           permission_preset: { type: 'string', description: '可选。子会话的权限预设（如 danger-full-access）；省略则继承插件配置或 DSH 默认。' },
@@ -75,6 +78,8 @@ export function toolDefinitions(dispatch) {
           title: args.title,
           brief: args.brief,
           cwd: args.cwd,
+          workspace: args.workspace,
+          createWorkspace: args.create_workspace,
           model: args.model,
           agentPreset: args.agent_preset,
           permissionPreset: args.permission_preset,
@@ -99,6 +104,8 @@ export function toolDefinitions(dispatch) {
                 title: { type: 'string' },
                 brief: { type: 'string' },
                 cwd: { type: 'string' },
+                workspace: { type: 'string' },
+                create_workspace: { type: 'boolean' },
                 model: { type: 'string' },
                 agent_preset: { type: 'string' },
                 permission_preset: { type: 'string' },
@@ -113,6 +120,8 @@ export function toolDefinitions(dispatch) {
       },
       async execute(args, exec) {
         const agent = requireCaller(exec)
+        // 同一批任务共用一个 group：全部结算后由插件发一条汇总，而不是 N 条流水。
+        const group = `g-${newTaskId()}`
         const results = []
         for (const item of args.tasks) {
           try {
@@ -120,16 +129,41 @@ export function toolDefinitions(dispatch) {
               title: item.title,
               brief: item.brief,
               cwd: item.cwd,
+              workspace: item.workspace,
+              createWorkspace: item.create_workspace,
               model: item.model,
               agentPreset: item.agent_preset,
               permissionPreset: item.permission_preset,
+              group,
             })
             results.push({ task_id: task.id, title: task.title, status: task.status })
           } catch (error) {
             results.push({ title: item.title, error: String(error) })
           }
         }
-        return { launched: results }
+        return { group, launched: results, note: '全部结算后会收到一条批次汇总。' }
+      },
+    },
+    {
+      name: 'dispatch_workspaces',
+      description: '列出可用的工作区（DSH workspace），供 dispatch_launch 的 workspace 参数使用。'
+        + '每个工作区给出 id、标题、路径与会话数；派发时用 id 或标题都行。'
+        + '任务明显属于一个新项目、而列表里没有合适的工作区时，可以直接用绝对路径派发（会自动登记）。',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      async execute() {
+        const items = dispatch.workspaces.list().map(item => ({
+          workspace_id: item.id,
+          title: item.title,
+          path: item.path,
+          sessions: Array.isArray(item.sessionIds) ? item.sessionIds.length : 0,
+        }))
+        return {
+          root: dispatch.workspaces.root,
+          worker_workspace: dispatch.config.workerWorkspace,
+          archive_after_hours: dispatch.config.archiveAfterHours,
+          count: items.length,
+          workspaces: items,
+        }
       },
     },
     {

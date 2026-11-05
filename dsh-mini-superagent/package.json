@@ -1,7 +1,7 @@
 {
   "name": "dsh-mini-superagent",
-  "version": "0.3.0",
-  "description": "主会话把任务派给独立的后台子会话执行，子会话完成后把报告投递回主会话；带一个常驻侧边栏的任务看板，可看并发、进度与重试。",
+  "version": "0.4.0",
+  "description": "主会话把任务派给独立的后台子会话执行，子会话完成后把报告投递回主会话；带默认工作区、按工作区派发、常驻任务看板与自动归档。",
   "icon": "icon.svg",
   "author": "wychmod",
   "license": "MIT",

@@ -1,6 +1,6 @@
 # 任务看板
 
-0.3.0 新增的常驻面板。Host 半边 `src/board.js` 提供快照与两个写操作，浏览器半边 `client/index.js` 负责渲染。
+0.3.0 新增的常驻面板。Host 半边 `src/board.js` 提供快照与三个写操作（取消 / 重试 / 归档），浏览器半边 `client/index.js` 负责渲染。
 两边只通过同源 HTTP 通信，不共享内存、不走 Remote/RPC。
 
 ---
@@ -19,7 +19,7 @@
 
 - **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现图标。客户端模块在页面刷新后加载，插件激活本身不触发展示。
 - Host 侧依赖 `webServer` 服务。headless 形态没有它时，路由不注册，日志写
-  `dsh-mini-superagent: 没有 webServer，跳过任务看板路由`；派发与 8 个工具不受影响。
+  `dsh-mini-superagent: 没有 webServer，跳过任务看板路由`；派发与 9 个工具不受影响。
 - 看板显示**整个实例**的任务（所有会话派出的），不是当前会话的；要只看本会话用 `dispatch_list`。
 
 ---
@@ -72,8 +72,9 @@
 | GET | `/dsh-mini-superagent/board` | 返回整块快照，响应头 `cache-control: no-store` |
 | POST | `/dsh-mini-superagent/board/cancel` | body `{"task_id":"t-..."}`，取消任务 |
 | POST | `/dsh-mini-superagent/board/retry` | body `{"task_id":"t-..."}`，重试任务 |
+| POST | `/dsh-mini-superagent/board/archive` | 无 body，立即跑一次归档巡检 |
 
-请求体上限 64 KiB，必须是合法 JSON。
+请求体上限 64 KiB，必须是合法 JSON（`/archive` 不需要 body）。
 
 ### GET 快照
 
@@ -81,17 +82,19 @@
 
 ```json
 {
-  "version": "0.3.0",
-  "generatedAt": "2026-11-05T05:42:07.000Z",
+  "version": "0.4.0",
+  "generatedAt": "2026-11-05T10:42:07.000Z",
   "concurrency": { "running": 2, "queued": 1, "max": 6 },
-  "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0 },
+  "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0, "archived": 2 },
+  "workspaces": [ { "id": "ws-…", "title": "mini-superagent", "path": "C:\\Users\\…\\Documents\\mini-superagent" } ],
   "tasks": [ { "task_id": "t-m0abc-1", "…": "…" } ]
 }
 ```
 
-- `counts` 按**全量**任务统计；`tasks` 最多 200 条。
-- 排序：`running` → `queued` → 其余按 `updated_at` 倒序；同权重按 `updated_at` 倒序。
-- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.3.0`）。
+- `counts` 按**全量**任务统计；`archived` 是带 `archivedAt` 的任务数（不是状态）。
+- `workspaces` 是工作区注册表快照（`id` / `title` / `path`），注册表不可用时为空数组；面板当前没有用它渲染分组。
+- `tasks` 最多 200 条；排序：`running` → `queued` → 其余按 `updated_at` 倒序；同权重按 `updated_at` 倒序。
+- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.4.0`）。
 
 任务字段（`boardTask` 拍平后的形状）：
 
@@ -103,7 +106,12 @@
 | `attempt` | number | 第几次尝试，从 1 开始；旧任务缺省按 1 |
 | `parent_session_id` | string | 派发者会话 |
 | `worker_session_id` | string | 子会话 id（重试换会话后会变，形如 `dispatch-<taskId>-a2`） |
-| `cwd` | string | 子会话工作目录 |
+| `cwd` | string | 任务工作目录（指定 `workspace` 时为工作区路径） |
+| `workspace_id` | string \| null | 目标工作区 id，未指定时为 `null` |
+| `workspace_title` | string \| null | 目标工作区标题，未指定时为 `null` |
+| `archived_at` | ISO 8601 \| null | 子会话归档时间，未归档为 `null` |
+| `archive_error` | string | 仅归档失败的任务出现 |
+| `group` | string | 仅 `dispatch_launch_many` 派出的任务出现，批次 id |
 | `created_at` / `updated_at` | ISO 8601 | 创建 / 最近变更 |
 | `started_at` | ISO 8601 | 首次启动时间；从未启动（仍在 `queued`）时字段缺失 |
 | `turn_started_at` | ISO 8601 | 本轮开始时间；没有在跑回合时字段缺失 |
@@ -126,6 +134,17 @@
 | `404` | `task_id` 不存在 / 未知子路径 | `没有任务 t-xxx`、`未知的看板接口` |
 | `409` | 操作被任务状态拒绝 | `任务 t-xxx 正在运行，不需要重试；要打断它请用取消`、`任务 t-xxx 已被取消；要重新做请派发一个新任务` |
 | `500` | 处理器内部异常 | `看板接口内部错误`（日志里有前缀 `dsh-mini-superagent:` 的 warn） |
+
+`POST /archive` 是例外：它没有 `task_id`，成功固定 `200`：
+
+```json
+{ "ok": true, "scanned": 4, "archived": 4, "failed": 0, "counts": { "total": 7, "…": "…", "archived": 4 } }
+```
+
+- `scanned`：本次符合条件的候选数；全部已归档后再调返回 `scanned: 0`。
+- `archived` / `failed`：本次成功 / 失败数；失败原因记在对应任务的 `archive_error` 上。
+- `counts`：跑完后的最新计数（含 `archived`）。
+- 不会返回 404/409；`403`（跨站）与 `500`（内部异常）规则同其它 POST。
 
 ---
 
@@ -163,6 +182,20 @@
 看板的取消走 `Dispatch.cancel(task, '看板取消')`：先把任务移出排队队列，再 `agent.cancel({kind:'user'}, {keepInbox:false})`
 结束当前回合并清空收件箱，任务置 `cancelled`、释放并发位。已产生的工作不回滚。理由固定记为「看板取消」。
 
+### 归档
+
+`archived` **不是任务状态**，是任务上的 `archivedAt` 标记：
+
+- 后台巡检（`archiveSweepMinutes` / `archiveAfterHours`）把已结算且过期的子会话
+  `workspaceRegistry.archiveSession(id, {stopActivity:true})` 归档；
+- 成功记 `archived_at`，失败记 `archive_error`，下一次巡检重试；
+- 看板快照里多出 `counts.archived`，任务卡多出 `archived_at` / `archive_error`；
+- 归档只影响会话列表，任务仍在快照里、`status` 不变；
+- `POST /board/archive` 可手动触发一次巡检。
+
+当前面板（0.3.0 的 UI 代码）**没有**渲染归档字段，也没有归档按钮；要用就调接口或看快照 JSON。
+归档规则与排障见 [workspaces.md](workspaces.md)。
+
 ---
 
 ## 鉴权与暴露面
@@ -191,7 +224,8 @@
 
 ## 与 agent 工具的关系
 
-- 看板**没有**新增任何工具；agent 侧仍是 8 个 `dispatch_*`。
+- 看板**没有**新增工具；它只是调用 `Dispatch.cancel` / `Dispatch.retry` / `Dispatch.archiveStale`。
+  agent 侧的工具在 0.4.0 是 9 个（多了只读的 `dispatch_workspaces`），但看板本身不提供工具。
 - 看板的「取消」等价于 agent 调 `dispatch_cancel`（状态与并发位语义一致）。
 - 看板的「重试」是给人用的：能恢复就续跑（与 `dispatch_message` 同一条投递路径），不能恢复就新开会话重投简报。
 - 主会话要续跑一个任务，仍然用 `dispatch_message`；不要因为看板有按钮就以为多了一个工具。
@@ -209,6 +243,8 @@
 - **看板不按会话过滤**：它展示整个实例的任务；agent 侧要按会话看用 `dispatch_list`。
 - **POST 无 Origin 即放行**：见「鉴权与暴露面」，局域网部署要自己控制端口暴露。
 - **重试不做状态回滚**：续跑依赖 worker 自己的历史；它可能重复执行已经做过的步骤。
+- **归档字段只进快照**：`archived_at` / `archive_error` / `counts.archived` 有数据，但当前面板不显示；
+  也没有归档按钮，只能调 `POST /board/archive`。
 
 ---
 
@@ -223,3 +259,5 @@
 | 重试后 worker 会话 id 变了 | 正常 | 原会话不可恢复，换了 `dispatch-<taskId>-a<attempt>` |
 | 「第 N 次」一直是 1 | 是否真的点过重试；旧任务是否有 `attempt` | 旧任务缺省 1；重试成功后 +1 |
 | 远程 `curl` 读不到 | 403 是预期 | 用同源页面；或在 Host 本机访问 |
+| `counts.archived` 不涨 | `archiveAfterHours` 是否为 0；任务是否已结算；`updatedAt` 是否够旧 | 调小保留期，或 `POST /board/archive` 手动跑一次 |
+| `POST /board/archive` 返回 `failed > 0` | 任务卡的 `archive_error`；日志 `归档子会话 … 失败` | 宿主是否支持 `workspaceRegistry.archiveSession`；会话/目录是否还在。失败会在下次巡检重试 |

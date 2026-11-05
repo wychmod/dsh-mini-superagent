@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { VERSION } from '../src/constants.js'
 import { boardSnapshot, boardTask, createBoardHandler } from '../src/board.js'
 
 const BASE = '/dsh-mini-superagent/board'
@@ -147,7 +148,7 @@ test('boardSnapshot 最多返回 200 条，但计数按全量算', () => {
 
 test('boardSnapshot 带上版本号与生成时间', () => {
   const snap = boardSnapshot(fakeDispatch([]))
-  assert.equal(snap.version, '0.3.0')
+  assert.equal(snap.version, VERSION)
   assert.ok(!Number.isNaN(Date.parse(snap.generatedAt)))
   assert.deepEqual(snap.tasks, [])
   assert.equal(snap.concurrency.max, 6)
@@ -174,6 +175,11 @@ function fakeHost(tasks, { cancelThrows = false } = {}) {
       task.attempt = (task.attempt ?? 1) + 1
       return task
     },
+    workspaces: { list: () => [{ id: 'w-1', title: '项目 A', path: 'C:\\a' }] },
+    async archiveStale() {
+      calls.archive = (calls.archive ?? 0) + 1
+      return { scanned: 2, archived: 1, failed: 1 }
+    },
   }
   const ctx = { logger: { info() {}, warn() {} } }
   return { ctx, dispatch, calls, handler: createBoardHandler(ctx, dispatch) }
@@ -184,7 +190,7 @@ test('GET /board 返回快照且不缓存', async () => {
   const result = await call(handler, {})
   assert.equal(result.status, 200)
   assert.equal(result.headers['cache-control'], 'no-store')
-  assert.equal(result.json.version, '0.3.0')
+  assert.equal(result.json.version, VERSION)
   assert.equal(result.json.tasks.length, 1)
 })
 
@@ -267,4 +273,30 @@ test('取消失败返回 409 并带上原因', async () => {
   const result = await call(handler, { method: 'POST', url: `${BASE}/cancel`, body: { task_id: 'a' } })
   assert.equal(result.status, 409)
   assert.match(result.json.error, /不能取消/)
+})
+
+test('快照带工作区列表与归档计数', async () => {
+  const { handler } = fakeHost([
+    makeTask('a', { status: 'done', workspaceId: 'w-1', workspaceTitle: '项目 A' }),
+    makeTask('b', { status: 'done', archivedAt: '2026-01-02T00:00:00.000Z' }),
+  ])
+  const result = await call(handler, {})
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.json.workspaces, [{ id: 'w-1', title: '项目 A', path: 'C:\\a' }])
+  assert.equal(result.json.counts.archived, 1)
+  const [first, second] = result.json.tasks
+  assert.equal(first.workspace_id, 'w-1')
+  assert.equal(first.workspace_title, '项目 A')
+  assert.equal(second.archived_at, '2026-01-02T00:00:00.000Z')
+})
+
+test('POST /archive 触发一次归档巡检并回计数', async () => {
+  const { handler, calls } = fakeHost([makeTask('a', { status: 'done' })])
+  const result = await call(handler, { method: 'POST', url: `${BASE}/archive`, body: {} })
+  assert.equal(result.status, 200)
+  assert.equal(result.json.ok, true)
+  assert.equal(result.json.scanned, 2)
+  assert.equal(result.json.archived, 1)
+  assert.equal(calls.archive, 1)
+  assert.ok(result.json.counts, '要带一份最新计数')
 })

@@ -35,6 +35,10 @@ export function boardTask(task) {
     parent_session_id: task.parentSessionId,
     worker_session_id: task.workerSessionId,
     cwd: task.cwd,
+    workspace_id: task.workspaceId ?? null,
+    workspace_title: task.workspaceTitle ?? null,
+    archived_at: task.archivedAt ?? null,
+    ...(task.group ? { group: task.group } : {}),
     created_at: task.createdAt,
     updated_at: task.updatedAt,
     started_at: task.startedAt,
@@ -44,14 +48,18 @@ export function boardTask(task) {
     last_report: last ? { at: last.at, status: last.status, summary: last.summary } : null,
     last_text_preview: typeof task.lastText === 'string' ? task.lastText.slice(0, PREVIEW_CHARS) : '',
     ...(task.error ? { error: String(task.error) } : {}),
+    ...(task.archiveError ? { archive_error: String(task.archiveError) } : {}),
   }
 }
 
 /** 整块看板的数据。 */
 export function boardSnapshot(dispatch) {
   const all = [...dispatch.table.tasks.values()]
-  const counts = { total: all.length, running: 0, queued: 0, done: 0, blocked: 0, failed: 0, cancelled: 0, ended: 0, interrupted: 0 }
-  for (const task of all) if (task.status in counts) counts[task.status] += 1
+  const counts = { total: all.length, running: 0, queued: 0, done: 0, blocked: 0, failed: 0, cancelled: 0, ended: 0, interrupted: 0, archived: 0 }
+  for (const task of all) {
+    if (task.status in counts) counts[task.status] += 1
+    if (task.archivedAt) counts.archived += 1
+  }
   const tasks = all
     .sort((a, b) => (WEIGHT[a.status] ?? 2) - (WEIGHT[b.status] ?? 2)
       || String(b.updatedAt).localeCompare(String(a.updatedAt)))
@@ -61,6 +69,8 @@ export function boardSnapshot(dispatch) {
     generatedAt: new Date().toISOString(),
     concurrency: { running: counts.running, queued: counts.queued, max: dispatch.table.maxWorkers },
     counts,
+    // 工作区列表给看板做「按工作区分组 / 切工作区」用；注册表不可用时为空数组。
+    workspaces: (dispatch.workspaces?.list?.() ?? []).map(item => ({ id: item.id, title: item.title, path: item.path })),
     tasks: tasks.map(boardTask),
   }
 }
@@ -151,6 +161,12 @@ export function createBoardHandler(ctx, dispatch) {
       if (req.method === 'GET' && pathname === BASE) {
         if (!readAllowed(req)) return send(res, 403, { ok: false, error: '看板只对本机或同源页面开放' })
         return send(res, 200, boardSnapshot(dispatch))
+      }
+
+      if (req.method === 'POST' && pathname === `${BASE}/archive`) {
+        if (!sameOrigin(req)) return send(res, 403, { ok: false, error: '跨站请求被拒绝' })
+        const result = await dispatch.archiveStale()
+        return send(res, 200, { ok: true, ...result, counts: boardSnapshot(dispatch).counts })
       }
 
       if (req.method === 'POST' && (pathname === `${BASE}/cancel` || pathname === `${BASE}/retry`)) {

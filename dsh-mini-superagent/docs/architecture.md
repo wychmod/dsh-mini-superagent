@@ -9,25 +9,32 @@
 - Host 插件，纯 ESM，`main` 直接指向 `src/index.js`，无构建、无编译产物、无运行时依赖。
 - 单进程：没有队列服务、没有数据库、没有跨进程协调。状态是一个 JSON 文件。
 - 硬依赖 DSH 的三个服务：`tools`、`agents`、`sessionController`（`src/index.js` 的 `inject`）。
-  看板额外**可选**依赖 `webServer`：没有它时只跳过路由，不影响插件启动。
+  可选依赖四个：`webServer`（看板路由，缺失时跳过）、`workspaceRegistry`（工作区解析/创建/归档，缺失时退化）、
+  `workingDirectory`（把子会话工作目录切到目标目录，缺失时跳过）、`sessionController.inspect`（默认主会话存在性检查，失败按不存在处理）。
 - 任务的生命周期以「DSH Session」为单位；插件不自己维护子进程或工作线程。
 
 ## 数据流
 
 ```text
 主会话（Agent）
-  │  dispatch_launch(title, brief, [cwd/model/presets])
+  │  dispatch_launch(title, brief, [workspace/create_workspace/cwd/model/presets])
   ▼
-Dispatch.launch ── 登记 task（queued）── TaskTable
+Dispatch.launch
+  │  workspace 指定 → WorkspaceGateway.resolveOrCreate（id → 绝对路径 → 标题精确 → 标题包含，可按需新建）
+  │  任务 cwd = 目标工作区路径 ?? 调用者目录；登记 task（queued）── TaskTable
   │                       │
   │                       └── pump() 占并发位
   ▼
+Dispatch.start
+  │  placementFor(task) → day：当天【派发】工作区 / target：任务的目标工作区
+  ▼
 SessionGateway.createWorker
-  │  workspaceRegistry.resolveByPath / create → workspaceId
+  │  workspaceId 给定时直接用；否则 workspaceRegistry.resolveByPath / create
   │  sessionController.create({sessionId: dispatch-<taskId>, workspaceId|cwd, agentPreset?})
   │  sessionController.resolveAgent(sessionId) → Agent
   │  permissionPresets.set(agent.session, preset?)
   │  sessionController.rename({sessionId, title: "[派发] <title>"})
+  │  task.cwd ≠ placement.path → workingDirectory.set(agent, task.cwd)   ← 会话住【派发】，活干在目标目录
   ▼
 worker Session（独立跑一轮或多轮）
   │  dispatch_report(status, summary, detail)
@@ -47,32 +54,46 @@ SessionGateway.deliver(parent, 报告文本)
 - `agent/status`：worker 置 `running` 时记 `turnStartedAt`；置 `idle` 时触发自动回报（若本回合没给终态报告）。
 - `agent/disposed`：worker 会话被外部关闭时，把未结算任务标 `interrupted`。
 
-看板是第三条链路，按需触发：
+启动与归档是另外两条定时/一次性链路：
+
+```text
+apply()
+  ├─ restore()          读回 tasks.json
+  ├─ provision()        建 <workspaceRoot> + 默认工作区（mini-superagent）+ 默认主会话（mas-lead，幂等）
+  └─ startArchiveSweep() 首次 20s，之后每 archiveSweepMinutes
+                         └─ archiveStale()：已结算且 updatedAt 超过 archiveAfterHours 的任务
+                            → workspaceRegistry.archiveSession(id, {stopActivity:true})
+                            → 成功记 archivedAt，失败记 archiveError（看板快照可见）
+```
+
+看板是第三条按需链路：
 
 ```text
 浏览器面板（client/index.js）
   │  GET  /dsh-mini-superagent/board          （2s 轮询）
   │  POST /dsh-mini-superagent/board/cancel   （看板「取消」）
   │  POST /dsh-mini-superagent/board/retry    （看板「重试」）
+  │  POST /dsh-mini-superagent/board/archive  （手动跑一次归档巡检）
   ▼
-src/board.js ── boardSnapshot / Dispatch.cancel / Dispatch.retry ──▶ TaskTable
+src/board.js ── boardSnapshot / Dispatch.cancel / Dispatch.retry / Dispatch.archiveStale ──▶ TaskTable
 ```
 
-Host 与 Client 不共享内存：Client 只认这 3 个同源 HTTP 端点，Host 把任务表拍平成快照返回。
+Host 与 Client 不共享内存：Client 只认这 4 个同源 HTTP 端点，Host 把任务表拍平成快照返回。
 
 ## 模块与职责
 
 | 文件 | 职责 | 依赖 | 明确不做 |
 | --- | --- | --- | --- |
-| `src/index.js` | 插件入口：建 `Dispatch`、注册 8 个工具、接 `agent/status` 与 `agent/disposed`、注册看板路由、`ctx.effect` 清理 | `dispatch` / `tools` / `board` / `constants` | 不含业务逻辑 |
-| `src/constants.js` | 名称、版本、日志前缀、消息来源 kind、提示段名、状态集合、默认配置、任务 id 与消息 id 生成 | 无 | 不读文件、不碰 ctx |
+| `src/index.js` | 插件入口：建 `Dispatch`、`restore` + `provision`、注册 9 个工具、接宿主事件、注册看板路由、启动归档巡检、`ctx.effect` 清理 | `dispatch` / `tools` / `board` / `constants` | 不含业务逻辑 |
+| `src/constants.js` | 名称、版本、日志前缀、消息来源 kind、提示段名、状态集合、默认配置（含工作区/归档）、任务 id 与消息 id 生成 | 无 | 不读文件、不碰 ctx |
 | `src/tasks.js` | `TaskTable`：并发位、排队、结算、等待者；纯函数 `clip` / `oneLine` / `lastAssistantText` | `constants` | 不做 I/O，不调宿主 API |
 | `src/store.js` | `tasks.json` 读回与覆盖写；`{version, savedAt, tasks}` | Node 内置模块 | 不校验业务字段、不做迁移 |
-| `src/sessions.js` | `SessionGateway`：`freezeMessage` 懒加载、构造插件来源消息、双通道投递、按目录取 cwd、workspace 解析、建子会话、权限预设、系统提示注入 | `constants` / `prompt` | 不管任务状态 |
+| `src/sessions.js` | `SessionGateway`：`freezeMessage` 懒加载、构造插件来源消息、双通道投递、按目录取 cwd、workspace 解析、建子会话、权限预设、系统提示注入、`enterDirectory`（切工作目录） | `constants` / `prompt` | 不管任务状态 |
 | `src/prompt.js` | 给模型看的文本：主会话工作方式提示 `DISPATCH_HINT`、worker 首条消息 `workerPrompt` | `constants` / `tasks` | 不含判断逻辑 |
-| `src/tools.js` | 8 个工具定义、`TOOL_NAMES`、参数 schema、结果卡片拼装、归属校验 | `constants` | 不直接操作会话 |
-| `src/dispatch.js` | `Dispatch`：`launch` / `pump` / `settle` / `start` / `report` / `relay` / `message` / `cancel` / `retry`、视图 `card` / `detail`、落盘 `persist` / `restore` / `dispose` | 其余全部 | 不直接调 `sessionController` / `agent.*`（走 gateway） |
-| `src/board.js` | 看板 Host 半边：`boardTask` / `boardSnapshot`（拍平、计数、排序、200 条上限）、`createBoardHandler`（3 条路由 + 同源校验）、`registerBoardRoutes` | `constants` | 不自己改任务状态（取消/重试转调 `Dispatch`） |
+| `src/tools.js` | 9 个工具定义（含只读的 `dispatch_workspaces`）、`TOOL_NAMES`、参数 schema、结果卡片拼装、归属校验 | `constants` | 不直接操作会话 |
+| `src/dispatch.js` | `Dispatch`：`launch` / `pump` / `settle` / `start` / `report` / `relay` / `message` / `cancel` / `retry` / `placementFor` / `provision` / `startArchiveSweep` / `archiveStale`、视图 `card` / `detail`、落盘 `persist` / `restore` / `dispose` | 其余全部 | 不直接调 `sessionController` / `agent.*`（走 gateway） |
+| `src/board.js` | 看板 Host 半边：`boardTask` / `boardSnapshot`（拍平、计数、排序、200 条、工作区列表）、`createBoardHandler`（4 条路由 + 同源校验）、`registerBoardRoutes` | `constants` | 不自己改任务状态（取消/重试/归档转调 `Dispatch`） |
+| `src/workspaces.js` | 工作区网关：`defaultRoot` / `rootOf` / `dayKey` / `dayTitle` / `safeDirName`、`WorkspaceGateway`（`ensure` / `defaultWorkspace` / `dayWorkspace` / `createNamed` / `list` / `resolve` / `resolveOrCreate` / `archiveSession`） | `constants` | 不碰任务表、不投递消息 |
 | `client/index.js` | 看板浏览器半边：ModuleLoader 包、`sidebar.panellist` 图标 + `main` 面板、2s 轮询、取消/重试按钮、主题 token | 无（`require('react')` + 同源 `fetch`） | 不 import Host 代码、不共享内存、不打包 |
 
 ### 依赖方向
@@ -81,16 +102,17 @@ Host 与 Client 不共享内存：Client 只认这 3 个同源 HTTP 端点，Hos
 index ──▶ dispatch ──▶ sessions ──▶ prompt ──▶ tasks ──▶ constants
   │            │            │
   │            ├──▶ store   │
-  │            └──▶ prompt  │
+  │            ├──▶ prompt  │
+  │            └──▶ workspaces ──▶ constants
   ├──▶ tools ──▶ constants  │
   └──▶ board ──▶ constants  │
-       (接收 dispatch 实例，不 import dispatch)
+       (接收 dispatch 实例，不 import dispatch；读工作区列表也只调 gateway)
 
 client/index.js ──HTTP(同源)──▶ src/board.js 的路由
 ```
 
-单向、无环。`tasks.js` 与 `store.js` 不 import 任何 `@deepseek-ai/*`，所以能脱离 DSH 单测。
-`index.js` 只 import 四个模块，把「谁会碰到宿主 API」限制在 `sessions.js` 一个文件里；看板 Host 半边只碰
+单向、无环。`tasks.js`、`store.js`、`workspaces.js` 不 import 任何 `@deepseek-ai/*`，所以能脱离 DSH 单测。
+`index.js` 只 import 四个模块，把「谁会碰到宿主 API」限制在 `sessions.js` 与 `workspaces.js` 两个文件里；看板 Host 半边只碰
 `webServer.register` 与 `Dispatch` 的公开方法。Client 是独立半边：没有 import 关系，只通过 HTTP 契约对齐
 （路由前缀与快照字段在两边各有一份，改一处要改两处）。
 
@@ -163,7 +185,7 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 没有用 `agent.ctx.tools.register` + `restrict` 做隔离，原因：
 
 - `restrict` 只能过滤「继承来的」工具，且必须在 scoped ctx 上调用；要给每个会话分别装配，复杂度不成比例。
-- 8 个工具在全局层注册一次，worker 的身份用「它是不是某个任务的 `workerSessionId`」反查（`TaskTable.byWorker`）就够了。
+- 9 个工具在全局层注册一次，worker 的身份用「它是不是某个任务的 `workerSessionId`」反查（`TaskTable.byWorker`）就够了。
 
 代价与兜底：
 
@@ -263,6 +285,41 @@ React 从 `require('react')` 取。理由：
 
 代价：没有 JSX、没有类型检查；1017 行单文件，改结构时靠测试与人工审查。
 
+### 17. 会话住在【派发】，活干在目标目录
+
+`workerWorkspace: day`（默认）时，子会话挂到当天【派发】工作区；但任务的 `cwd` 是目标工作区路径。
+两者不同就调 `workingDirectory.set(agent, task.cwd)`。
+
+理由：
+
+- 侧边栏按会话的 workspace 分组。如果每个项目都往自己的工作区里塞子会话，项目工作区会被派发会话淹没；
+  统一收进当天的【派发】，用完归档，列表就干净。
+- 工作目录决定子会话实际读写哪里。把它切到目标目录，shell、读写工具、相对路径全都落在正确位置，
+  效果等价于「在目标目录里开了一个会话」。
+- 代价：会话归属与工作目录分离，排查时要分清 `workspace_title` 与 `cwd`；`workingDirectory` 不可用或 `set` 失败时
+  子会话会落在【派发】目录里（只记 warn，任务照跑）。
+- 不指定 `workspace` 时：`cwd` 仍取调用者目录，但会话仍进【派发】。这是 0.4.0 相对 0.3.0 的行为变化。
+
+### 18. 归档用 `archiveSession`，不删会话
+
+归档动作是 `workspaceRegistry.archiveSession(sessionId, {stopActivity:true})`，不是删会话。理由：
+
+- 归档只是从会话列表收起，会话历史还在；误归档可以恢复，删了就没有了。
+- 任务表、报告、看板都引用 `workerSessionId`。删会话会让 `dispatch_inspect` / 重试 / 审计断链；
+  归档后这些引用仍然有效。
+- `stopActivity: true` 顺手停掉还在跑的活动，避免归档一个仍在执行的会话。
+
+代价：归档不释放磁盘；`<workspaceRoot>/派发/<日期>` 下的文件也不会自动清理。
+失败原因记在任务上（`archiveError`）而不是静默跳过，因为「以为归档了其实没有」会让看板越来越长。
+
+### 19. 启动准备幂等，失败不阻塞
+
+`provision()` 在每次激活时都跑：`mkdir -p` → 按路径注册工作区（宿主对同路径返回已有实体）→ 默认主会话按固定 id
+`sessionController.inspect` 判断存在性。任何一步失败都只 warn，插件继续启动。
+
+理由：工作区是「让侧边栏更好用」的增强，不是派发的前置条件。目录不可写、注册表缺失、默认会话创建失败，
+都不该让 9 个工具跟着不可用。代价是失败只在日志里，需要 `dispatch_workspaces` 或看板自己确认。
+
 ## 模块拆分轴
 
 拆分前是单文件 853 行。0.2.0 按「谁最容易变」切开：
@@ -279,9 +336,10 @@ React 从 `require('react')` 取。理由：
 | 事件接线 | `index.js` | 低 |
 | 看板 Host 半边（路由/快照形状） | `board.js` | 中（0.3.0 新增） |
 | 看板浏览器半边（UI/轮询） | `client/index.js` | 高（样式与交互会改；0.3.0 新增） |
+| 工作区（目录/解析/归档） | `workspaces.js` | 中（0.4.0 新增） |
 
 这样 DSH 升级时优先改 `sessions.js`；调整提示词不碰业务逻辑；任务表规则可以脱离宿主跑测试；
-看板 UI 改动不碰任务状态机，Host 路由改动不碰面板。
+看板 UI 改动不碰任务状态机，Host 路由改动不碰面板；工作区规则不碰派发状态机。
 
 ## 失败与降级路径
 
@@ -303,6 +361,11 @@ React 从 `require('react')` 取。理由：
 | 看板 POST 跨站 | `403 {"ok":false,"error":"跨站请求被拒绝"}`，不产生副作用 | `board.js` `sameOrigin()` |
 | 看板操作被状态拒绝 | `409`，中文原因（取消/重试的前置条件） | `dispatch.js` `retry()` / `cancel()` |
 | 看板 handler 内部异常 | `500` + warn 日志 | `board.js` `createBoardHandler()` |
+| 默认工作区准备失败 | 只 warn，插件继续启动，派发按调用者目录工作 | `dispatch.js` `provision()` |
+| 显式 `workspace` 解析/新建失败 | `dispatch_launch` 抛错，带现有工作区清单 | `workspaces.js` `resolveOrCreate()` |
+| 切换子会话工作目录失败 | 只 warn；子会话留在【派发】目录，任务照跑 | `sessions.js` `enterDirectory()` |
+| 子会话归档失败 | 任务记 `archiveError`，日志 warn，下次巡检重试 | `dispatch.js` `archiveStale()` / `workspaces.js` `archiveSession()` |
+| 宿主不支持 `archiveSession` | 每次归档都失败并记录 `宿主没有 workspaceRegistry.archiveSession` | `workspaces.js` `archiveSession()` |
 
 ## 可测试性
 
@@ -310,11 +373,13 @@ React 从 `require('react')` 取。理由：
 - 看板测试 `test/board.test.js`（19 个用例）：8 个快照用例（拍平、`last_report`、截断、计数、排序、200 条上限、版本/时间），
   11 个路由用例（GET 200/404/403/同源 200、cancel、retry、跨站 403、同源 POST、任务不存在 404、坏 JSON 400、失败 409）。
   路由用假的 `req`/`res` 直接调 handler，不需要起 HTTP 服务。
-- `npm test` 跑 `node --test`，全量 32 个用例。
-- 宿主相关行为（建会话、投递、事件顺序、真实 HTTP 连接、浏览器渲染）没有单元测试，靠 README 的实测记录覆盖；
+- 工作区测试 `test/workspaces.test.js`（11 个用例）：日期键、`【派发】`标题、安全目录名（非法字符/空白/长度）、
+  根目录优先级，以及解析顺序（id、绝对路径、标题精确、标题包含、找不到、无注册表）；用假注册表，只在 `ensure` 之外不碰磁盘。
+- `npm test` 跑 `node --test`，全量 43 个用例。
+- 宿主相关行为（建会话、投递、事件顺序、真实 HTTP 连接、浏览器渲染、真实 mkdir/归档）没有单元测试，靠 README 的实测记录覆盖；
   其中看板 UI 的浏览器渲染尚未实测（见 README「验证记录」）。
 - 想手工验证：`dispatch_list` 看 `version` 与 `max_workers`；`dispatch_inspect` 看 `cwd`、`recent_reports`、`last_worker_text`；
-  看板看 `GET /dsh-mini-superagent/board` 的 JSON。
+  `dispatch_workspaces` 看工作区；看板看 `GET /dsh-mini-superagent/board` 的 JSON。
 
 ## 兼容性与风险
 
@@ -324,3 +389,6 @@ React 从 `require('react')` 取。理由：
 - `sessionController.create` 换号、`resolveAgent` 的 `agent-busy`、`tools.register` 的层级语义，都在取证文档里列了出处。
 - 看板的 `webServer.register` 与 `ctx.slots` 依赖宿主版本：宿主没有对应服务时分别表现为「路由不注册」与「客户端模块不加载」，
   不会让 Host 插件本身启动失败。
+- `workspaceRegistry.create(path, title)` 要求目录已存在，且按路径幂等；`resolveByPath` 只查不建。
+  这两条是 `workspaces.js` 先 `mkdir -p` 再注册的原因，也是「默认工作区创建失败不阻塞派发」的依据。
+- `workspaceRegistry.archiveSession(id, {stopActivity})` 用于归档；宿主不提供时归档失败但任务与看板不受影响。

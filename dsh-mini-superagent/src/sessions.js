@@ -55,7 +55,7 @@ export class SessionGateway {
   }
 
   /**
-   * 把一条文本投递给另一个 Session。
+   * 把一条消息投递给另一个 Session。
    * @param {string} sessionId 目标会话
    * @param {string} requestId 去重用的稳定 id（同 id 重复投递会被宿主拒绝）
    * @param {string} text 内容
@@ -112,8 +112,14 @@ export class SessionGateway {
    * workspaceId 与 cwd 互斥，二者只能给一个。
    */
   async createWorker(sessionId, cwd, title, options) {
-    const workspace = await this.workspaceFor(cwd)
-    const request = { sessionId, ...(workspace ? { workspaceId: workspace.id } : { cwd }) }
+    // 显式给了 workspaceId 就直接用（子会话住在【派发】工作区）；否则按目录反查/登记。
+    let request
+    if (options.workspaceId) {
+      request = { sessionId, workspaceId: options.workspaceId }
+    } else {
+      const workspace = await this.workspaceFor(cwd)
+      request = { sessionId, ...(workspace ? { workspaceId: workspace.id } : { cwd }) }
+    }
     if (options.agentPreset) request.agentPreset = options.agentPreset
     await this.ctx.sessionController.create(request)
 
@@ -131,6 +137,21 @@ export class SessionGateway {
     try { await this.ctx.sessionController.rename({ sessionId, title }) }
     catch { /* 忽略 */ }
     return agent
+  }
+
+  /**
+   * 把会话的工作目录切到别处。
+   * 子会话住在【派发】工作区（侧边栏干净），但活要干在目标任务的工作区里。
+   * 失败只记 warn：目录切不过去时子会话仍能跑，只是落在自己的目录里。
+   */
+  async enterDirectory(agent, directory) {
+    const working = this.ctx.get('workingDirectory')
+    if (typeof working?.set !== 'function') return
+    try {
+      await working.set(agent, directory)
+    } catch (error) {
+      this.warn(`${LOG_PREFIX} 切换子会话工作目录到 %s 失败: %s`, directory, String(error))
+    }
   }
 
   /**

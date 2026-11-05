@@ -111,6 +111,6 @@ plugin_manager(action="list_bundles")
 ## 不要做
 
 - **不要手改 `tasks.json` 当数据库**：它只是展示用快照，写坏了启动会读不回来。
-- **不要同时安装 `dsh-dispatch` 和 `dsh-mini-superagent`**：8 个工具同名，同一全局层重复注册会抛错。
+- **不要同时安装 `dsh-dispatch` 和 `dsh-mini-superagent`**：旧插件的 8 个工具名在新插件里都存在，同一全局层重复注册会抛错。
 - **不要把 `dispatch_wait` 当 sleep**：它占着当前 step，期间什么也做不了。
 - **不要删完子会话还指望任务继续**：`agent/disposed` 会把任务标 `interrupted`，恢复不了就重新派发。

@@ -14,6 +14,9 @@
 从 0.3.0 起附带一个常驻侧边栏的**任务看板**：Host 侧注册同源 HTTP 路由提供快照，浏览器侧是一个不打包、不编译的
 ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直接取消/重试。它不占模型上下文，也不需要 agent 调工具。
 
+从 0.4.0 起有**工作区**：启动时准备一个默认工作区与固定主会话；每天一个【派发】工作区收拢子会话；
+派发时可以用 `workspace` 指定目标工作区（id / 绝对路径 / 标题）；结束超过保留期的子会话会自动归档。
+
 ---
 
 ## 它解决什么
@@ -55,7 +58,7 @@ ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直�
 
 把这句话交给 DSH 里的任意会话：
 
-> 用 plugin_manager 的 install_bundle，把 `dsh-mini-superagent` 这个目录安装成 bundle，装完确认 8 个 `dispatch_*` 工具已注册。
+> 用 plugin_manager 的 install_bundle，把 `dsh-mini-superagent` 这个目录安装成 bundle，装完确认 9 个 `dispatch_*` 工具已注册。
 
 ### 方式二：手动
 
@@ -69,15 +72,15 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.3.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.4.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 是 `0.3.0` 说明跑的是这一版；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 是 `0.4.0` 说明跑的是这一版；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「任务看板」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
 
-> **迁移注意**：不要和旧插件 `dsh-dispatch` 同时安装。两者注册同名的 8 个工具，同一全局层重复注册会直接抛错。
+> **迁移注意**：不要和旧插件 `dsh-dispatch` 同时安装。两者共有 8 个同名工具，同一全局层重复注册会直接抛错。
 > 先 `plugin_manager` 的 `remove_bundle` 移除旧 bundle（准确的 id 以 `list_bundles` 为准），再装这个。
 
 旧任务表可选迁移（不迁也能用，只是历史列表为空）：
@@ -91,12 +94,13 @@ Copy-Item "$env:DSH_HOME\dsh-dispatch\tasks.json" "$env:DSH_HOME\dsh-mini-supera
 
 ---
 
-## 8 个工具
+## 9 个工具
 
 | 工具 | 谁用 | 做什么 |
 | --- | --- | --- |
-| `dispatch_launch` | 主会话 | 派发一个任务，立即返回 `task_id` + 子会话 id。并发位满时进 `queued` |
-| `dispatch_launch_many` | 主会话 | 一次派发 1–16 个互相独立的任务 |
+| `dispatch_launch` | 主会话 | 派发一个任务，立即返回 `task_id` + 子会话 id。可指定 `workspace`；并发位满时进 `queued` |
+| `dispatch_launch_many` | 主会话 | 一次派发 1–16 个互相独立的任务；整批结算后收到一条汇总 |
+| `dispatch_workspaces` | 主会话 / worker | 列出工作区（id、标题、路径、会话数）与当前工作区配置，供 `workspace` 参数使用 |
 | `dispatch_list` | 主会话 | 看本会话派出的任务与状态 |
 | `dispatch_inspect` | 主会话 | 看单个任务的详情：简报、最近报告、worker 最后输出 |
 | `dispatch_message` | 主会话 | 给子会话追问、纠偏、下发下一步；任务重新变 `running` |
@@ -106,6 +110,7 @@ Copy-Item "$env:DSH_HOME\dsh-dispatch\tasks.json" "$env:DSH_HOME\dsh-mini-supera
 
 工具注册在插件根 context，**对所有会话可见**；权限不靠注册作用域，而是在 `execute` 里判断
 「调用者是不是已登记的 worker」：`dispatch_report` 只接受 worker，其余工具只操作本会话派出的任务。
+`dispatch_workspaces` 是纯只读，不要求调用者是 Agent，也不受任务归属限制。
 worker 调用 `dispatch_launch` 不会被拦（只受 `maxTasksPerSession` 限制），所以系统提示里明确要求 worker 别调；
 见[已知限制](#已知限制)。
 
@@ -217,6 +222,9 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - 原因：插件注册的具名路由排在 DSH 页面鉴权之前。若全放开，把 Web 暴露到局域网时任何人都能读到任务标题、工作目录与报告摘要。
   代价是远程访问只能用同源页面，远程 `curl` 读不到看板。
 
+看板快照从 0.4.0 起还带 `counts.archived` 与 `workspaces`，任务卡带 `workspace_*` / `archived_*` 字段；
+`POST /dsh-mini-superagent/board/archive` 可手动跑一次归档巡检。当前面板代码未改，不显示这些字段，也没有归档按钮。
+
 **重试语义**（看板按钮，不是新工具）：
 
 - 任务的 `attempt` 从 1 开始，每次重试 +1，看板显示「第 N 次」。
@@ -229,6 +237,63 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 
 ---
 
+## 工作区
+
+0.4.0 起，插件自己管理一小组 DSH 工作区，目标是：子会话不把侧边栏塞满，同时活干在正确的项目目录里。
+
+### 默认工作区与主会话
+
+启动时（`provisionDefaultWorkspace: true`，默认）插件做两件幂等的事：
+
+1. 建目录并注册工作区：`<workspaceRoot>`，标题 `mini-superagent`。
+   `workspaceRoot` 留空时是 `<用户文档目录>/mini-superagent`（Windows 上通常是 `C:\Users\<你>\Documents\mini-superagent`）。
+2. 在其中建一个**固定 id 的默认主会话** `mas-lead`，标题「mini-superagent 主会话」；已存在就跳过。
+
+失败只记日志（`创建默认工作区失败（不影响派发）`），不影响派发。`dispatch_workspaces` 可以看到这个工作区与会话数。
+
+### 每天一个【派发】工作区
+
+子会话默认（`workerWorkspace: day`）挂到**当天的**工作区：
+
+```text
+<workspaceRoot>/派发/<YYYY-MM-DD>      标题：【派发】YYYY-MM-DD
+```
+
+于是侧边栏里子会话按天收拢，而不是散落在每个项目下。想按项目看会话就设 `workerWorkspace: target`。
+
+**会话住【派发】，活干在目标目录**：建完会话后插件会调 `workingDirectory.set` 把工作目录切到任务的目标路径，
+所以子会话的会话归属与 `Get-Location` 不是一回事。切目录失败只记 warn，任务照跑。
+
+### 派发到哪个工作区
+
+`dispatch_launch` / `dispatch_launch_many` 支持：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `workspace` | — | 工作区 id / 绝对路径 / 标题，三者都可以 |
+| `create_workspace` | `true` | 解析不到时是否新建（绝对路径就在该路径建，名字就在工作区根下建） |
+
+解析顺序：**id → 绝对路径（只查不建）→ 标题精确（大小写不敏感）→ 标题包含**。
+解析不到且允许新建时：绝对路径直接建在该路径；名字建在 `<workspaceRoot>/<安全目录名>`。
+解析不到且 `create_workspace: false` → 报错并列出已有工作区。
+
+同时给 `workspace` 和 `cwd` 时**工作区路径优先**，`cwd` 被忽略。完全不指定 `workspace` 时沿用调用者的工作目录。
+先用 `dispatch_workspaces` 看有哪些工作区。
+
+### 自动归档
+
+- 每 `archiveSweepMinutes`（默认 10 分钟，首次延迟 20 秒）巡检一次；
+- 把「已结算且 `updatedAt` 早于 `archiveAfterHours`（默认 24 小时）」的任务对应子会话
+  `workspaceRegistry.archiveSession(id, {stopActivity:true})` 归档；
+- 成功记 `archivedAt`，失败记 `archiveError`（看板快照的 `archive_error` 可见），下次巡检重试；
+- 归档只收起会话列表，不动任务表、报告与看板；已取消任务也能归档；
+- `archiveAfterHours: 0` 关闭自动归档，`archiveSweepMinutes: 0` 关闭巡检；
+- 看板有 `POST /dsh-mini-superagent/board/archive` 可手动跑一次巡检。
+
+细节见 [docs/workspaces.md](docs/workspaces.md)。
+
+---
+
 ## 配置
 
 全部可选，写在 bundle 的 `cordis.patch.yml` 的 `config` 里（默认值见 `src/constants.js` 的 `DEFAULTS`）：
@@ -237,13 +302,20 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 | --- | --- | --- |
 | `maxWorkers` | `6` | **全局**同时 `running` 的上限；超出的进 `queued`，有空位自动开始（按登记顺序） |
 | `maxTasksPerSession` | `64` | 每个主会话累计派发上限（防递归派发失控） |
-| `inheritWorkingDirectory` | `true` | 子会话继承主会话的工作目录 |
+| `inheritWorkingDirectory` | `true` | 子会话继承主会话的工作目录（指定了 `workspace` 时以工作区路径为准） |
 | `permissionPreset` | `''` | 子会话权限预设。后台无人看管时建议 `danger-full-access`，否则可能卡在审批上 |
 | `stateDir` | `''` | 任务表落盘目录；空表示 `$DSH_HOME/dsh-mini-superagent`（`DSH_HOME` 未设时用 `~/.dsh`） |
 | `reportOnTurnEnd` | `true` | worker 回合结束自动回报 |
 | `maxBriefChars` | `12000` | 投给 worker 的任务简报最大字符数 |
+| `workspaceRoot` | `''` | 工作区根；空表示 `<用户文档目录>/mini-superagent` |
+| `provisionDefaultWorkspace` | `true` | 启动时创建默认工作区与默认主会话（失败只记日志） |
+| `workerWorkspace` | `day` | 子会话放哪：`day` = 当天【派发】工作区；`target` = 任务指定的目标工作区 |
+| `archiveAfterHours` | `24` | 子会话结束多少小时后自动归档；`0` 表示不归档 |
+| `archiveSweepMinutes` | `10` | 归档巡检间隔（分钟）；`0` 表示不巡检 |
+| `leadSessionId` | `mas-lead` | 默认主会话的固定 id；改值等于换一个新默认主会话 |
 
-单个任务还可以在 `dispatch_launch` / `dispatch_launch_many` 时覆盖 `cwd` / `model` / `agent_preset` / `permission_preset`。
+单个任务还可以在 `dispatch_launch` / `dispatch_launch_many` 时覆盖 `cwd` / `workspace` / `create_workspace` /
+`model` / `agent_preset` / `permission_preset`。
 
 ---
 
@@ -255,6 +327,7 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - 子会话本身是普通 DSH Session，内容由 DSH 自己持久化，在侧边栏里可以直接打开。
 - 每个任务最多保留 50 条报告；简报落盘时截到 2000 字符（完整简报在 worker 首条消息里）。
 - 任务新增 `attempt` 字段（默认 1，重试 +1），随任务表落盘；旧任务读回时按 1 处理，看板不会误显示「第 0 次」。
+- 工作区相关字段也随任务落盘：`workspaceId` / `workspaceTitle` / `archivedAt` / `archiveError`（以及批次 `group`），重启后看板仍能显示工作区与归档状态。
 
 ---
 
@@ -282,6 +355,11 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 - **看板最多返回 200 条**：计数按全量算，列表只截前 200；没有分页、没有历史归档。
 - **远程访问受限**：非回环地址只能通过同源页面看看板，远程 `curl` 会被 403；这是有意的（见「任务看板」的安全取舍）。
 - **重试有边界**：`running` / `queued` / `cancelled` 不能重试；重试沿用同一个任务 id，只把 `attempt` +1（会话无法恢复时换一个 worker 会话）。
+- **工作区目录必须可写**：`workspaceRegistry.create` 要求目录已存在，插件会先 `mkdir`；目录不可写时默认工作区创建失败（只记日志），
+  显式指定 `workspace` 的派发会直接报错。没有 `workspaceRegistry` 时，`day` 模式退化为按任务 cwd 建会话。
+- **`workspace` 优先于 `cwd`**：两者同时给时，任务工作目录取工作区路径，`cwd` 被忽略。
+- **未指定 `workspace` 时**：工作目录沿用调用者（旧行为），但子会话仍挂在当天【派发】工作区（0.3.0 的会话归属是「按目录反查工作区」）。
+- **归档只收起会话**：不删目录、不删任务、不删报告；归档失败会每轮巡检重试，失败原因只在看板快照的 `archive_error` 里，`dispatch_list` 看不到。
 - **看板 UI 的浏览器实测缺失**：面板渲染、侧边栏图标位置、明暗对比度、窄宽度截断、轮询暂停都只做了代码审查，未在真实 GUI 里点验（原因见验证记录）。
 
 ---
@@ -307,16 +385,21 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 | 看板快照：`GET /dsh-mini-superagent/board` | 0.3.0 | ✅ 200、`cache-control: no-store`、`version: 0.3.0`、返回 3 条任务 |
 | 看板重试：对失败任务 `POST /board/retry` | 0.3.0 | ✅ 200、`attempt` 1→2、任务转 `running`；worker 恢复会话后再次 `dispatch_report`，第 2 次汇报已回流 |
 | 全量单测（`npm test`） | 0.3.0 | ✅ 32 pass / 0 fail（`tasks.test.js` 13 + `board.test.js` 19） |
+| 工作区自动准备 | 0.4.0 | ✅ `dispatch_workspaces` 返回默认工作区且 `sessions: 1`；磁盘上 `<workspaceRoot>` 已创建 |
+| 子会话住【派发】、活干在目标目录 | 0.4.0 | ✅ 子会话 `Get-Location` 返回目标工作区根（`…\Documents\mini-superagent`），而它的会话挂在【派发】工作区下 |
+| 自动归档 | 0.4.0 | ✅ 临时 `archiveAfterHours=0.001` / `archiveSweepMinutes=0.05`，约 20 秒后 4 个任务归档（`counts.archived: 4`）；`POST /board/archive` 200，再次调用返回 `scanned: 0`；配置已改回 24h / 10min |
 
 0.2.0 那组最后一条（并发排队）同时是修复验证：0.1.0 只在派发与插件加载时推进队列，结算后不会补 `pump()`，
 并发位满时后面的任务会一直 `queued`。这个问题是整理代码时被测出来的，修法与依据见 [docs/architecture.md](docs/architecture.md) 的「pump 的触发点」。
+
+0.4.0 的全量单测是 **43 pass / 0 fail**（`tasks.test.js` 13 + `board.test.js` 19 + `workspaces.test.js` 11）。
 
 **未实测**（0.3.0）：看板在浏览器里的实际渲染——侧边栏图标位置、点击切换、明暗对比度、窄宽度截断、面板高度、轮询暂停。
 原因：客户端模块要在页面刷新后才会加载，而 GUI 页面有鉴权，无法代刷；接口层与快照形状已被上面两条实测与 19 个用例覆盖。
 读者只需知道：**装完/更新后刷新一次 GUI 页面**。
 
-`test/tasks.test.js` 覆盖任务表纯逻辑，`test/board.test.js` 覆盖快照与路由（用假的 req/res，不需要起 HTTP 服务）；
-两者都不是端到端实测的替代。
+`test/tasks.test.js` 覆盖任务表纯逻辑，`test/board.test.js` 覆盖快照与路由（用假的 req/res，不需要起 HTTP 服务），
+`test/workspaces.test.js` 覆盖日期键、安全目录名、根目录与工作区解析顺序（用假注册表）；它们都不是端到端实测的替代。
 
 ---
 
@@ -324,12 +407,13 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 
 | 文件 | 内容 |
 | --- | --- |
-| [docs/tools.md](docs/tools.md) | 8 个工具的参数、返回、错误、何时用/何时别用 |
+| [docs/tools.md](docs/tools.md) | 9 个工具的参数、返回、错误、何时用/何时别用 |
 | [docs/architecture.md](docs/architecture.md) | 模块职责、数据流、设计取舍与依据 |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 排障表、日志前缀与恢复动作 |
+| [docs/workspaces.md](docs/workspaces.md) | 工作区模型、目录约定、解析规则、自动归档、限制与排障 |
 | [docs/board.md](docs/board.md) | 任务看板：入口、面板结构、HTTP 接口、重试语义、鉴权、已知限制 |
 | [docs/api-contracts.md](docs/api-contracts.md) | DSH 主机 API 契约取证（消息/Agent/事件/会话控制器/工具作用域） |
-| [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0 的差异 |
+| [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0、0.4.0 的差异 |
 
 ---
 
@@ -340,27 +424,30 @@ dsh-mini-superagent/
   package.json        # name/version、engines、dsh.bundle.patch、dsh.client 声明
   cordis.patch.yml    # 插入插件行 + 默认配置（可整段删掉，靠代码默认值）
   src/
-    index.js          # 入口：建 Dispatch、注册工具、接宿主事件与看板路由
+    index.js          # 入口：建 Dispatch、注册工具、接宿主事件、看板路由、启动准备
     constants.js      # 名称/版本/日志前缀/source kind/默认配置/状态集合
     tasks.js          # TaskTable（并发位/排队/结算/等待）+ 纯函数
     store.js          # tasks.json 读写
-    sessions.js       # DSH 适配：建会话、取 Agent、权限预设、提示注入、投递
+    sessions.js       # DSH 适配：建会话、取 Agent、权限预设、提示注入、投递、切工作目录
     prompt.js         # 给模型的文本：工作方式提示 + worker 首条简报
-    tools.js          # 8 个工具定义
-    dispatch.js       # Dispatch 服务：launch/pump/settle/start/report/relay/message/cancel/retry
+    tools.js          # 9 个工具定义
+    dispatch.js       # Dispatch 服务：launch/pump/settle/start/report/relay/message/cancel/retry/归档
     board.js          # 看板 Host 半边：快照 + GET/POST 路由 + 同源校验
+    workspaces.js     # 工作区：根/日期/安全目录名/解析/按需新建/归档
   client/
     index.js          # 浏览器半边：侧边栏图标 + 主面板（不打包、不编译）
   test/
     tasks.test.js     # TaskTable 单测（13）
     board.test.js     # 快照与路由单测（19）
+    workspaces.test.js  # 工作区纯逻辑与解析顺序单测（11）
   locale/{zh,en}.json # 管理面板里的标题与描述
   icon.svg
   LICENSE             # MIT
   docs/
     architecture.md   # 模块职责、数据流、设计取舍
-    tools.md          # 8 个工具的参数/返回/错误
+    tools.md          # 9 个工具的参数/返回/错误
     troubleshooting.md  # 排障表与日志前缀
+    workspaces.md     # 工作区模型、解析、归档
     board.md          # 任务看板：面板、接口、重试、鉴权
     api-contracts.md  # DSH 主机 API 契约取证
   CHANGELOG.md

@@ -29,6 +29,8 @@ export const inject = ['tools', 'agents', 'sessionController']
 export async function apply(ctx, config) {
   const dispatch = new Dispatch(ctx, config)
   await dispatch.restore()
+  // 默认工作区与默认主会话：幂等，失败只记日志。
+  await dispatch.provision()
   registerTools(ctx, dispatch)
 
   // worker 回合开始：记下 turnStartedAt，用于判断本回合是否已经给过终态报告。
@@ -61,6 +63,8 @@ export async function apply(ctx, config) {
   ctx.effect(() => () => { void dispatch.dispose() })
 
   void dispatch.pump()
+  // 过期子会话自动归档（archiveAfterHours / archiveSweepMinutes 都为 0 时不起）。
+  dispatch.startArchiveSweep()
   ctx.logger?.info?.('%s 已加载：maxWorkers=%d', LOG_PREFIX, dispatch.table.maxWorkers)
 }
 

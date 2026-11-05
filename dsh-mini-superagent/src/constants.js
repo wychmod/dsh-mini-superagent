@@ -7,7 +7,7 @@
 export const NAME = 'dsh-mini-superagent'
 
 /** 插件版本，会出现在 dispatch_list 与看板快照里，便于确认“跑的是哪一版”。 */
-export const VERSION = '0.3.0'
+export const VERSION = '0.4.0'
 
 /** 日志前缀。 */
 export const LOG_PREFIX = `${NAME}:`
@@ -41,6 +41,22 @@ export const DEFAULTS = {
   reportOnTurnEnd: true,
   /** 注入 worker 的首条消息里，任务简报的最大字符数。 */
   maxBriefChars: 12000,
+  /** 工作区根目录；空字符串表示 `<用户文档目录>/mini-superagent`。 */
+  workspaceRoot: '',
+  /** 首次激活时创建默认工作区（mini-superagent）与其中的默认主会话。 */
+  provisionDefaultWorkspace: true,
+  /** 子会话结束多少小时后自动归档；0 表示不归档。 */
+  archiveAfterHours: 24,
+  /** 归档巡检间隔（分钟）；0 表示不巡检。 */
+  archiveSweepMinutes: 10,
+  /**
+   * 子会话放在哪个工作区：
+   * - `day`：每天的【派发】工作区（默认，侧边栏保持干净）
+   * - `target`：任务指定的目标工作区（子会话混在项目里）
+   */
+  workerWorkspace: 'day',
+  /** 默认主会话的固定 id；改成别的值等于换一个新默认会话。 */
+  leadSessionId: 'mas-lead',
 }
 
 /** 已结算：不再占并发位、不再等它。 */

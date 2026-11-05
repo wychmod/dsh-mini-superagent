@@ -1,24 +1,25 @@
-# 8 个工具
+# 9 个工具
 
 全部工具注册在插件根 context，因此**对所有会话可见**。可调用性由 `execute` 里的判断决定，不靠注册作用域。
 
 ## 通用规则
 
-- 所有工具都要求调用方处于某个 Agent 中；拿不到 `exec.agent` 就抛
+- 除 `dispatch_workspaces` 外，所有工具都要求调用方处于某个 Agent 中；拿不到 `exec.agent` 就抛
   `该工具只能在某个会话（Agent）中调用`。
 - 返回值统一按 JSON 文本渲染（`output.render` = `JSON.stringify(value, null, 2)`），所以你在工具结果里看到的是格式化 JSON。
-- 参数用 snake_case（`agent_preset`、`permission_preset`），配置项用 camelCase（`maxWorkers`、`maxBriefChars`）。两套拼写别混。
+- 参数用 snake_case（`agent_preset`、`permission_preset`、`create_workspace`），配置项用 camelCase（`maxWorkers`、`workspaceRoot`）。两套拼写别混。
 - `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` 只允许操作 `parentSessionId === 调用者 id` 的任务，跨会话访问直接报错。
 - 错误一律 `throw`，没有「部分成功」的返回值；`dispatch_launch_many` 是唯一会把单项失败收进结果数组的工具。
-- 8 个工具名是固定的（`src/tools.js` 的 `TOOL_NAMES`），不做别名。
+- 9 个工具名是固定的（`src/tools.js` 的 `TOOL_NAMES`），不做别名。
 
 ### 调用矩阵
 
 | 角色 | 应该调用 | 调了会怎样 |
 | --- | --- | --- |
-| 主会话（派发者） | `dispatch_launch` / `dispatch_launch_many` / `dispatch_list` / `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` / `dispatch_wait` | 正常 |
+| 主会话（派发者） | `dispatch_launch` / `dispatch_launch_many` / `dispatch_workspaces` / `dispatch_list` / `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` / `dispatch_wait` | 正常 |
 | 主会话 | `dispatch_report` | 抛错：当前会话不属于任何派发任务 |
 | worker | `dispatch_report` | 正常 |
+| worker | `dispatch_workspaces` | 正常（只读，不要求 Agent，也不受任务归属限制） |
 | worker | `dispatch_list` / `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` | 看不到父会话的任务；对父任务会报「不属于本会话」 |
 | worker | `dispatch_launch` | 不拦，会以 worker 自己为派发者新建任务；只受 `maxTasksPerSession` 限制。系统提示禁止这样做 |
 
@@ -35,7 +36,9 @@
 | `task_id` | string | `t-<时间36>-<序号36>` |
 | `title` | string | 派发时的标题（单行，≤120 字符） |
 | `status` | string | `queued` / `running` / `done` / `blocked` / `failed` / `cancelled` / `ended` / `interrupted` |
-| `session_id` | string | 子会话 id，固定为 `dispatch-<task_id>` |
+| `session_id` | string | 子会话 id，固定为 `dispatch-<task_id>`（重试换会话后为 `dispatch-<task_id>-a<attempt>`） |
+| `workspace` | string | 目标工作区标题，仅指定了 `workspace` 时出现 |
+| `archived_at` | ISO 8601 | 子会话已归档时才出现 |
 | `created_at` / `updated_at` | ISO 8601 | 创建 / 最近变更时间 |
 | `last_report_at` | ISO 8601 | 有报告时才出现 |
 | `reports` | integer | 报告条数（上限 50），有报告时才出现 |
@@ -47,7 +50,7 @@
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `brief` | string | 简报，≤2000 字符（落盘同样截到 2000） |
-| `cwd` | string | 子会话实际工作目录 |
+| `cwd` | string | 子会话实际工作目录（指定 `workspace` 时为工作区路径） |
 | `recent_reports` | array | 最近 5 条 `{at, status, summary, detail?}` |
 | `last_worker_text` | string | worker 最后一条 assistant 文本，≤3000 字符 |
 
@@ -63,7 +66,9 @@
 | --- | --- | --- | --- |
 | `title` | string | 是 | 任务短标题，超过 120 字符会被截断；用于列表与子会话标题 `[派发] <title>` |
 | `brief` | string | 是 | 自包含简报：目标、约束、验收、已知事实。子会话看不到主会话历史 |
-| `cwd` | string | 否 | 子会话工作目录的绝对路径；省略则继承主会话目录，再不行用进程 cwd |
+| `cwd` | string | 否 | 子会话工作目录的绝对路径；省略则继承主会话目录，再不行用进程 cwd。给了 `workspace` 时被工作区路径覆盖 |
+| `workspace` | string | 否 | 工作区 id / 绝对路径 / 标题；解析顺序见 [workspaces.md](workspaces.md) |
+| `create_workspace` | boolean | 否 | 默认 `true`；`workspace` 解析不到时是否新建（绝对路径就地建，名字在工作区根下建） |
 | `model` | string | 否 | 子会话模型 id；省略用 DSH 默认 |
 | `agent_preset` | string | 否 | 子会话 agent preset id；省略用部署默认 |
 | `permission_preset` | string | 否 | 子会话权限预设（如 `danger-full-access`）；省略用插件配置，再省略用 DSH 默认 |
@@ -73,10 +78,13 @@
 ### 行为
 
 1. 校验本会话累计派发数，超过 `maxTasksPerSession`（默认 64）抛错。
-2. 生成任务 id 与子会话 id（`dispatch-<task_id>`），登记为 `queued`。
-3. 首次从这个会话派发时，把 `[dsh-mini-superagent 工作方式]` 注入该会话系统提示（只一次）。
-4. `pump()` 有空位就立刻建会话、投递简报、置 `running`；没空位就留在 `queued`。
-5. 返回，不等结果。
+2. 给了 `workspace` 就先解析（id → 绝对路径 → 标题精确 → 标题包含）；解析不到且 `create_workspace !== false` 时按需新建，
+   仍失败则抛错并列出已有工作区。任务 `cwd` 取工作区路径；没给 `workspace` 时 `cwd` 沿用调用者目录。
+3. 生成任务 id 与子会话 id（`dispatch-<task_id>`），登记为 `queued`。
+4. 首次从这个会话派发时，把 `[dsh-mini-superagent 工作方式]` 注入该会话系统提示（只一次）。
+5. `pump()` 有空位就立刻建会话、投递简报、置 `running`；没空位就留在 `queued`。
+   子会话按 `workerWorkspace` 放到当天【派发】工作区或目标工作区，再把工作目录切到任务 `cwd`。
+6. 返回，不等结果。
 
 ### 返回
 
@@ -107,21 +115,25 @@
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `tasks` | array | 是 | 1–16 项；每项字段与 `dispatch_launch` 完全相同（`title` / `brief` 必填） |
+| `tasks` | array | 是 | 1–16 项；每项字段与 `dispatch_launch` 完全相同（`title` / `brief` 必填，可选 `cwd` / `workspace` / `create_workspace` / `model` / `agent_preset` / `permission_preset`） |
 
 ### 行为
 
 - 顺序逐项调用 `launch`，每项单独 try/catch：某一项失败（比如撞上派发上限）不会中断其它项。
 - 不是原子操作：前几项已经登记成功，后面某项失败时，前面的任务照常执行。
+- 整批任务共用一个 `group`（`g-<taskId>`）。等这一组全部结算后，插件给派发者发**一条**批次汇总，
+  而不是 N 条流水；组内任一成员带 `groupClosed` 标记后不会重复汇总。
 
 ### 返回
 
 ```json
 {
+  "group": "g-t-m0abc-0",
   "launched": [
     { "task_id": "t-m0abc-1", "title": "重构 auth 模块", "status": "running" },
     { "title": "重构 billing 模块", "error": "Error: 本会话已派发 64 个任务，达到上限 64；请先收束旧任务" }
-  ]
+  ],
+  "note": "全部结算后会收到一条批次汇总。"
 }
 ```
 
@@ -132,6 +144,42 @@
 - 用：「把这 5 个模块分别重构」这类互不依赖的批量工作。
 - 别用：任务数超过 16，拆成多次调用。
 - 别用：想让这一批全部成功或全部不派——没有这种保证。
+
+---
+
+## dispatch_workspaces
+
+只读列出工作区，供 `dispatch_launch` 的 `workspace` 参数使用。不要求调用者是 Agent。
+
+### 参数
+
+无（`additionalProperties: false`）。
+
+### 返回
+
+```json
+{
+  "root": "C:\\Users\\…\\Documents\\mini-superagent",
+  "worker_workspace": "day",
+  "archive_after_hours": 24,
+  "count": 3,
+  "workspaces": [
+    { "workspace_id": "ws-…", "title": "mini-superagent", "path": "C:\\Users\\…\\Documents\\mini-superagent", "sessions": 1 }
+  ]
+}
+```
+
+- `root`：工作区根（`workspaceRoot` 或默认值）。
+- `worker_workspace`：当前 `workerWorkspace` 配置。
+- `archive_after_hours`：当前归档保留期。
+- `sessions`：该工作区的会话数，不是任务数。
+- 注册表不可用时返回 `count: 0`、空数组。
+
+### 何时用 / 何时别用
+
+- 用：派发前确认目标工作区的 id / 标题 / 路径。
+- 用：排查「为什么子会话不在项目里」——先看 `worker_workspace`。
+- 别用：它不是任务列表；看任务用 `dispatch_list` / 看板。
 
 ---
 
@@ -150,7 +198,7 @@
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.4.0",
   "total": 3,
   "running": 2,
   "max_workers": 6,
@@ -353,6 +401,7 @@ worker 向派发者汇报。主会话不要调用。
 | `任务 <id> 已取消；请重新 dispatch_launch 一个新任务` | 对 `cancelled` 任务 `dispatch_message` | 重新派发 |
 | `无法解析子会话 <id>: <code>` | 建会话后 `resolveAgent` 失败，任务置 `failed`，原因在 `dispatch_inspect().error` | 看 code（如 `session/not-found`、`session/writer-held`）；修正后重新派发 |
 | `子会话 <id> 不可用：<code>` | worker 会话无法恢复（如 `session/not-found`） | 看 code；必要时重新派发该任务 |
+| `找不到工作区「<ref>」，且允许新建被关闭。现有：<标题>（<路径>）；…` | `workspace` 解析不到且 `create_workspace: false`；或宿主没有 `workspaceRegistry` | 用 `dispatch_workspaces` 取正确 id；去掉 `create_workspace: false`；或改用绝对路径 |
 
 宿主 schema 层还会拒绝：`launch_many` 超过 16 项、`timeout_ms` 越界、`limit` 越界、`status`/`mode` 不在枚举内、多传未知字段。
 这类错误在执行前就返回，不会留下半截任务。
