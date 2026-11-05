@@ -1,13 +1,14 @@
 # deepseek-harness 插件工作区
 
 这个仓库只做一件事：维护 DeepSeek Harness（DSH）的**任务派发**插件 `dsh-mini-superagent`。
-主会话把任务派给独立的后台子会话，子会话完成后把报告投回主会话；没有监听器、没有工单、没有数据库、没有管理面板、没有构建步骤。
+主会话把任务派给独立的后台子会话，子会话完成后把报告投回主会话；没有监听器、没有工单系统、没有数据库、没有构建步骤。
+0.3.0 起附带一个常驻侧边栏的任务看板（Host HTTP + 浏览器面板）。
 
 ## 仓库内容
 
 | 路径 | 内容 |
 | --- | --- |
-| [`dsh-mini-superagent/`](dsh-mini-superagent/) | 插件包本体（0.2.0）：`src/` 源码、`test/`、`locale/`、bundle patch、文档 |
+| [`dsh-mini-superagent/`](dsh-mini-superagent/) | 插件包本体（0.3.0）：`src/` 源码、`client/` 浏览器面板、`test/`、`locale/`、bundle patch、文档 |
 | [`notes/`](notes/) | 本机 DSH 环境的排查记录（会话失败检查、环境修复），不是插件文档 |
 | `reference/` | DSH 官方 `dsh-superagent-prototype` 的本地克隆，只作架构参考；已在 `.gitignore` 里，不属于本仓库代码 |
 | `.editorconfig` / `.gitattributes` / `.gitignore` | 编码、行尾（LF）与忽略规则 |
@@ -32,10 +33,10 @@ plugin_manager(action="install_bundle", target="<本仓库路径>/dsh-mini-super
 
 ```text
 dispatch_list()
-→ {"version":"0.2.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.3.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-要求与详细步骤见 [`dsh-mini-superagent/README.md`](dsh-mini-superagent/README.md)。
+**装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「任务看板」图标。要求与详细步骤见 [`dsh-mini-superagent/README.md`](dsh-mini-superagent/README.md)。
 
 ## 插件速览
 
@@ -44,6 +45,7 @@ dispatch_list()
 - 派发立即返回；报告作为插件来源的消息回流，主会话空闲时被唤醒。
 - 全局并发上限 `maxWorkers=6`，超出的任务排队，有空位自动开始。
 - 任务表落盘 JSON，重启后恢复历史；未结算任务标 `interrupted`，不假装还活着。
+- 任务看板：侧边栏「任务看板」面板，看并发/排队/耗时/报告摘要，按同源 HTTP 取数，可直接取消与重试。
 
 ## 文档
 
@@ -53,8 +55,9 @@ dispatch_list()
 | [`dsh-mini-superagent/docs/tools.md`](dsh-mini-superagent/docs/tools.md) | 工具参数、返回、错误、何时用/何时别用 |
 | [`dsh-mini-superagent/docs/architecture.md`](dsh-mini-superagent/docs/architecture.md) | 模块职责、数据流、设计取舍与依据 |
 | [`dsh-mini-superagent/docs/troubleshooting.md`](dsh-mini-superagent/docs/troubleshooting.md) | 排障表、日志前缀、恢复动作 |
+| [`dsh-mini-superagent/docs/board.md`](dsh-mini-superagent/docs/board.md) | 任务看板：入口、面板结构、HTTP 接口、重试语义、鉴权 |
 | [`dsh-mini-superagent/docs/api-contracts.md`](dsh-mini-superagent/docs/api-contracts.md) | DSH 主机 API 契约取证：消息构造、Agent、事件、会话控制器、工具作用域 |
-| [`dsh-mini-superagent/CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）与 0.2.0 |
+| [`dsh-mini-superagent/CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0 |
 
 ## 开发
 

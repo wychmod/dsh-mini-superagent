@@ -1,7 +1,7 @@
 {
   "name": "dsh-mini-superagent",
-  "version": "0.2.0",
-  "description": "主会话把任务派给独立的后台子会话执行，子会话完成后把报告投递回主会话；支持并发上限、排队、追问、取消与阻塞等待。",
+  "version": "0.3.0",
+  "description": "主会话把任务派给独立的后台子会话执行，子会话完成后把报告投递回主会话；带一个常驻侧边栏的任务看板，可看并发、进度与重试。",
   "icon": "icon.svg",
   "author": "wychmod",
   "license": "MIT",
@@ -9,12 +9,14 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./client/index.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
     "src",
+    "client",
     "docs",
     "cordis.patch.yml",
     "locale/*.json",
@@ -35,7 +37,8 @@
     "task",
     "dispatch",
     "subagent",
-    "orchestration"
+    "orchestration",
+    "task-board"
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
@@ -44,6 +47,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
     },
     "manifestVersion": 1
   }

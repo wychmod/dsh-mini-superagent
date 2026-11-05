@@ -58,6 +58,7 @@ export class Dispatch {
       parentSessionId: agent.id,
       workerSessionId: `dispatch-${id}`,
       status: 'queued',
+      attempt: 1,
       createdAt: now(),
       updatedAt: now(),
       turnStartedAt: undefined,
@@ -235,6 +236,58 @@ export class Dispatch {
     task.cancelReason = reason
     this.settle(task, 'cancelled')
     this.schedulePersist()
+    return task
+  }
+
+  /**
+   * 重试一个已结算的任务（看板上的「重试」按钮走这里）。
+   *
+   * 分两种情况：
+   * - 子会话还活着/还能 resume（blocked、ended、failed 的常见情况）→ 续跑同一会话，
+   *   它自己的历史还在，不用重讲背景；
+   * - 会话随进程没了（interrupted，或创建失败）→ 换一个新的 attempt 会话，重投原始简报。
+   */
+  async retry(task) {
+    if (task.status === 'running' || task.status === 'queued') {
+      throw new Error(`任务 ${task.id} 正在运行，不需要重试；要打断它请用取消`)
+    }
+    if (task.status === 'cancelled') {
+      throw new Error(`任务 ${task.id} 已被取消；要重新做请派发一个新任务`)
+    }
+
+    task.attempt = (task.attempt ?? 1) + 1
+    task.error = undefined
+    task.lastReportAt = undefined
+    task.updatedAt = now()
+
+    const existing = this.ctx.agents.get(task.workerSessionId)
+    let resumable = !!existing
+    if (!resumable) {
+      const resolved = await this.ctx.sessionController.resolveAgent(task.workerSessionId).catch(() => undefined)
+      resumable = !!resolved && !resolved.error
+    }
+
+    if (resumable) {
+      // 已完成的任务被重试，语义是「再执行一次」，不是「接着没做完的地方」。
+      const instruction = task.status === 'done'
+        ? `主会话要求把原任务再执行一次（第 ${task.attempt} 次）。上一轮已报过 done；`
+          + '请重新核对当前状态与要求是否仍然满足，按需补做，然后照常用 dispatch_report 汇报结论。'
+        : `主会话要求重试（第 ${task.attempt} 次尝试）。上一轮没有正常完成或被打断；`
+          + '请从中断处继续完成原任务，完成后照常调用 dispatch_report 汇报。'
+      this.log(`${LOG_PREFIX} 重试任务 %s：续跑子会话 %s`, task.id, task.workerSessionId)
+      await this.message(task, instruction, 'queue')
+      return task
+    }
+
+    // 会话不在了：换一个 worker 会话，把原始简报重投一遍。
+    task.workerSessionId = `dispatch-${task.id}-a${task.attempt}`
+    task.turnStartedAt = undefined
+    task.lastText = ''
+    task.status = 'queued'
+    this.table.add(task)
+    this.schedulePersist()
+    this.log(`${LOG_PREFIX} 重试任务 %s：新开子会话 %s`, task.id, task.workerSessionId)
+    void this.pump()
     return task
   }
 

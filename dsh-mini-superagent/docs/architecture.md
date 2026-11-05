@@ -8,7 +8,8 @@
 
 - Host 插件，纯 ESM，`main` 直接指向 `src/index.js`，无构建、无编译产物、无运行时依赖。
 - 单进程：没有队列服务、没有数据库、没有跨进程协调。状态是一个 JSON 文件。
-- 只依赖 DSH 的三个服务：`tools`、`agents`、`sessionController`（`src/index.js` 的 `inject`）。
+- 硬依赖 DSH 的三个服务：`tools`、`agents`、`sessionController`（`src/index.js` 的 `inject`）。
+  看板额外**可选**依赖 `webServer`：没有它时只跳过路由，不影响插件启动。
 - 任务的生命周期以「DSH Session」为单位；插件不自己维护子进程或工作线程。
 
 ## 数据流
@@ -46,18 +47,33 @@ SessionGateway.deliver(parent, 报告文本)
 - `agent/status`：worker 置 `running` 时记 `turnStartedAt`；置 `idle` 时触发自动回报（若本回合没给终态报告）。
 - `agent/disposed`：worker 会话被外部关闭时，把未结算任务标 `interrupted`。
 
+看板是第三条链路，按需触发：
+
+```text
+浏览器面板（client/index.js）
+  │  GET  /dsh-mini-superagent/board          （2s 轮询）
+  │  POST /dsh-mini-superagent/board/cancel   （看板「取消」）
+  │  POST /dsh-mini-superagent/board/retry    （看板「重试」）
+  ▼
+src/board.js ── boardSnapshot / Dispatch.cancel / Dispatch.retry ──▶ TaskTable
+```
+
+Host 与 Client 不共享内存：Client 只认这 3 个同源 HTTP 端点，Host 把任务表拍平成快照返回。
+
 ## 模块与职责
 
 | 文件 | 职责 | 依赖 | 明确不做 |
 | --- | --- | --- | --- |
-| `src/index.js` | 插件入口：建 `Dispatch`、注册 8 个工具、接 `agent/status` 与 `agent/disposed`、`ctx.effect` 清理 | `dispatch` / `tools` / `constants` | 不含业务逻辑 |
+| `src/index.js` | 插件入口：建 `Dispatch`、注册 8 个工具、接 `agent/status` 与 `agent/disposed`、注册看板路由、`ctx.effect` 清理 | `dispatch` / `tools` / `board` / `constants` | 不含业务逻辑 |
 | `src/constants.js` | 名称、版本、日志前缀、消息来源 kind、提示段名、状态集合、默认配置、任务 id 与消息 id 生成 | 无 | 不读文件、不碰 ctx |
 | `src/tasks.js` | `TaskTable`：并发位、排队、结算、等待者；纯函数 `clip` / `oneLine` / `lastAssistantText` | `constants` | 不做 I/O，不调宿主 API |
 | `src/store.js` | `tasks.json` 读回与覆盖写；`{version, savedAt, tasks}` | Node 内置模块 | 不校验业务字段、不做迁移 |
 | `src/sessions.js` | `SessionGateway`：`freezeMessage` 懒加载、构造插件来源消息、双通道投递、按目录取 cwd、workspace 解析、建子会话、权限预设、系统提示注入 | `constants` / `prompt` | 不管任务状态 |
 | `src/prompt.js` | 给模型看的文本：主会话工作方式提示 `DISPATCH_HINT`、worker 首条消息 `workerPrompt` | `constants` / `tasks` | 不含判断逻辑 |
 | `src/tools.js` | 8 个工具定义、`TOOL_NAMES`、参数 schema、结果卡片拼装、归属校验 | `constants` | 不直接操作会话 |
-| `src/dispatch.js` | `Dispatch`：`launch` / `pump` / `settle` / `start` / `report` / `relay` / `message` / `cancel`、视图 `card` / `detail`、落盘 `persist` / `restore` / `dispose` | 其余全部 | 不直接调 `sessionController` / `agent.*`（走 gateway） |
+| `src/dispatch.js` | `Dispatch`：`launch` / `pump` / `settle` / `start` / `report` / `relay` / `message` / `cancel` / `retry`、视图 `card` / `detail`、落盘 `persist` / `restore` / `dispose` | 其余全部 | 不直接调 `sessionController` / `agent.*`（走 gateway） |
+| `src/board.js` | 看板 Host 半边：`boardTask` / `boardSnapshot`（拍平、计数、排序、200 条上限）、`createBoardHandler`（3 条路由 + 同源校验）、`registerBoardRoutes` | `constants` | 不自己改任务状态（取消/重试转调 `Dispatch`） |
+| `client/index.js` | 看板浏览器半边：ModuleLoader 包、`sidebar.panellist` 图标 + `main` 面板、2s 轮询、取消/重试按钮、主题 token | 无（`require('react')` + 同源 `fetch`） | 不 import Host 代码、不共享内存、不打包 |
 
 ### 依赖方向
 
@@ -66,12 +82,17 @@ index ──▶ dispatch ──▶ sessions ──▶ prompt ──▶ tasks ─
   │            │            │
   │            ├──▶ store   │
   │            └──▶ prompt  │
-  └──▶ tools ──▶ constants  │
+  ├──▶ tools ──▶ constants  │
+  └──▶ board ──▶ constants  │
        (接收 dispatch 实例，不 import dispatch)
+
+client/index.js ──HTTP(同源)──▶ src/board.js 的路由
 ```
 
 单向、无环。`tasks.js` 与 `store.js` 不 import 任何 `@deepseek-ai/*`，所以能脱离 DSH 单测。
-`index.js` 只 import 三个模块，把「谁会碰到宿主 API」限制在 `sessions.js` 一个文件里。
+`index.js` 只 import 四个模块，把「谁会碰到宿主 API」限制在 `sessions.js` 一个文件里；看板 Host 半边只碰
+`webServer.register` 与 `Dispatch` 的公开方法。Client 是独立半边：没有 import 关系，只通过 HTTP 契约对齐
+（路由前缀与快照字段在两边各有一份，改一处要改两处）。
 
 ## 关键设计决策
 
@@ -208,6 +229,40 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 日志前缀、来源 kind、提示段名、状态目录都从 `constants.js` 取。改名字时只改一处，
 `docs/` 与排障表里的字符串也只需跟着改一遍。
 
+### 14. 看板走 HTTP，不走 Remote/RPC
+
+看板是同源页面里的一次普通 `fetch`：Host 用 `ctx.get('webServer').register({kind:'prefix', path, handler})` 注册，
+Client 直接请求。理由：
+
+- 只为「读快照 + 两个按钮」定义一套跨进程 Remote 契约（类型、版本、序列化）不划算；HTTP + JSON 已经够用。
+- 同源页面本来就带浏览器上下文，普通 `fetch` 自动带 `Origin`，鉴权判断能直接做在 handler 里。
+- 路由是 prefix 注册，路径、方法、状态码都在一个文件里，排障时看日志就能对上。
+
+代价：契约是「手写的两端一致」——路由前缀 `BASE` 与快照字段在 `src/board.js` 和 `client/index.js` 各有一份，
+改一处要同步另一处；没有类型检查兜底。
+
+### 15. 看板准入：回环放行，其余同源
+
+插件注册的具名路由排在 DSH 页面鉴权之前，所以看板自己做了准入：
+
+- `GET`：`Host` 是回环名（`127.0.0.1` / `localhost` / `::1`）放行；否则要求 `Origin` 与 `Host` 一致。
+- `POST`：带 `Origin` 时必须与 `Host` 一致；不带 `Origin` 的（curl/脚本）放行。
+
+这是「不把任务标题、工作目录、报告摘要泄露给任意网页」的最低成本方案，不是完整鉴权。
+代价：远程 curl 读不到快照；不带 Origin 的 POST 在端口暴露时仍可取消/重试，需要自己控制网络暴露面。
+细节与状态码见 [board.md](board.md)。
+
+### 16. 客户端不打包、不编译
+
+`client/index.js` 是一个 plain ModuleLoader 包：`window.__ModuleLoader__.load({id, factory(require){…}})`，
+React 从 `require('react')` 取。理由：
+
+- 仓库的硬约束是「无构建」；为一个面板引入打包器会破坏「clone 下来就能装」。
+- ModuleLoader 的 `factory` 里可以直接 `require` 宿主已提供的 React，不需要自己带运行时。
+- 样式随面板 `<style>` 卸载，只用 `var(--dsw-alias-*, fallback)`，不维护明暗两套。
+
+代价：没有 JSX、没有类型检查；1017 行单文件，改结构时靠测试与人工审查。
+
 ## 模块拆分轴
 
 拆分前是单文件 853 行。0.2.0 按「谁最容易变」切开：
@@ -222,8 +277,11 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 | 工具 schema | `tools.js` | 中 |
 | 标识与默认值 | `constants.js` | 低 |
 | 事件接线 | `index.js` | 低 |
+| 看板 Host 半边（路由/快照形状） | `board.js` | 中（0.3.0 新增） |
+| 看板浏览器半边（UI/轮询） | `client/index.js` | 高（样式与交互会改；0.3.0 新增） |
 
-这样 DSH 升级时优先改 `sessions.js`；调整提示词不碰业务逻辑；任务表规则可以脱离宿主跑测试。
+这样 DSH 升级时优先改 `sessions.js`；调整提示词不碰业务逻辑；任务表规则可以脱离宿主跑测试；
+看板 UI 改动不碰任务状态机，Host 路由改动不碰面板。
 
 ## 失败与降级路径
 
@@ -240,12 +298,23 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 | 读历史失败 | 只 warn，启动继续 | `dispatch.js` `restore()` |
 | 设置权限预设失败 | 只 warn，任务继续 | `sessions.js` `createWorker()` |
 | 提示注入失败 | 只 warn | `sessions.js` `hint()` |
+| 没有 `webServer`（headless） | 不注册看板路由，记一条 info；工具与派发不受影响 | `board.js` `registerBoardRoutes()` |
+| 看板 GET 非本机且非同源 | `403 {"ok":false,"error":"看板只对本机或同源页面开放"}` | `board.js` `readAllowed()` |
+| 看板 POST 跨站 | `403 {"ok":false,"error":"跨站请求被拒绝"}`，不产生副作用 | `board.js` `sameOrigin()` |
+| 看板操作被状态拒绝 | `409`，中文原因（取消/重试的前置条件） | `dispatch.js` `retry()` / `cancel()` |
+| 看板 handler 内部异常 | `500` + warn 日志 | `board.js` `createBoardHandler()` |
 
 ## 可测试性
 
-- `TaskTable`、`clip`、`oneLine`、`lastAssistantText` 都是纯逻辑，测试在 `test/tasks.test.js`，`npm test` 跑 `node --test`（13 个用例）。
-- 宿主相关行为（建会话、投递、事件顺序）没有单元测试，靠 README 里的实测记录覆盖。
-- 想手工验证：`dispatch_list` 看 `version` 与 `max_workers`；`dispatch_inspect` 看 `cwd`、`recent_reports`、`last_worker_text`。
+- 纯逻辑测试 `test/tasks.test.js`（13 个用例）：`TaskTable`、`clip`、`oneLine`、`lastAssistantText`。
+- 看板测试 `test/board.test.js`（19 个用例）：8 个快照用例（拍平、`last_report`、截断、计数、排序、200 条上限、版本/时间），
+  11 个路由用例（GET 200/404/403/同源 200、cancel、retry、跨站 403、同源 POST、任务不存在 404、坏 JSON 400、失败 409）。
+  路由用假的 `req`/`res` 直接调 handler，不需要起 HTTP 服务。
+- `npm test` 跑 `node --test`，全量 32 个用例。
+- 宿主相关行为（建会话、投递、事件顺序、真实 HTTP 连接、浏览器渲染）没有单元测试，靠 README 的实测记录覆盖；
+  其中看板 UI 的浏览器渲染尚未实测（见 README「验证记录」）。
+- 想手工验证：`dispatch_list` 看 `version` 与 `max_workers`；`dispatch_inspect` 看 `cwd`、`recent_reports`、`last_worker_text`；
+  看板看 `GET /dsh-mini-superagent/board` 的 JSON。
 
 ## 兼容性与风险
 
@@ -253,3 +322,5 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 - 依据主要来自编译产物的静态取证（asar 内没有 `.d.ts`），不是官方 API 文档。风险与兜底见同目录的
   `api-contracts.md` §8；与本插件最相关的是「`source.kind` 未知值在持久化/回放层是否宽容」。
 - `sessionController.create` 换号、`resolveAgent` 的 `agent-busy`、`tools.register` 的层级语义，都在取证文档里列了出处。
+- 看板的 `webServer.register` 与 `ctx.slots` 依赖宿主版本：宿主没有对应服务时分别表现为「路由不注册」与「客户端模块不加载」，
+  不会让 Host 插件本身启动失败。

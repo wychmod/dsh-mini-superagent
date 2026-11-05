@@ -2,6 +2,56 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 0.3.0 — 2026-11-05
+
+新增常驻侧边栏的**任务看板**（Host HTTP + 浏览器面板）与**看板重试**。工具面不变，仍是 8 个 `dispatch_*`。
+
+### 新增
+
+- `src/board.js`（Host，约 200 行）：看板快照与三个同源 HTTP 路由——
+  `GET /dsh-mini-superagent/board`（快照，`cache-control: no-store`）、
+  `POST /dsh-mini-superagent/board/cancel`、`POST /dsh-mini-superagent/board/retry`。
+  快照包含 `version`、`generatedAt`、`concurrency`、`counts` 与最多 200 条拍平任务；
+  排序 `running` → `queued` → 其余按 `updated_at` 倒序。
+- `client/index.js`（浏览器，1017 行）：plain ModuleLoader 包（`window.__ModuleLoader__.load(...)`，React 从 `require('react')` 取）。
+  向 `sidebar.panellist` 注册「任务看板」图标（`id` = `dsh-mini-superagent.board`，`order 60`），向 `main` 注册同名面板。
+  2 秒轮询、页面隐藏暂停并 abort、`prefers-reduced-motion` 关闭脉动、颜色走 `var(--dsw-alias-*, fallback)`。
+- `Dispatch.retry(task)`：看板「重试」的服务端实现。`attempt` 从 1 开始、每次 +1；
+  会话可恢复则续跑同一会话（`done` 的指令是「再执行一次」），不可恢复则换 `dispatch-<taskId>-a<attempt>` 并重投原始简报。
+  `running` / `queued` / `cancelled` 拒绝重试（409）。
+- `test/board.test.js`：19 个用例（快照 8 + 路由 11，用假 `req`/`res`）；全量单测 13 → **32**，全过。
+- `docs/board.md`：看板入口、面板结构、接口契约、重试语义、鉴权与限制。
+- `package.json`：`exports` 增加 `./client`，`files` 加入 `client`，新增 `dsh.client` 清单
+  （`platform: web`、`immediately: true`、注入 layout/sidebar 两个客户端包）。
+
+### 变更
+
+- 版本 `0.2.0` → `0.3.0`；`dispatch_list` 与看板快照里的 `version` 同步。
+- 任务对象新增 `attempt` 字段（默认 1），随任务表落盘；旧任务读回按 1 处理。
+- README 增加「任务看板」小节与升级后刷新页面的说明。
+
+### 安全
+
+- `GET`：本机回环（`127.0.0.1` / `localhost` / `::1`）放行；非回环必须是同源页面（`Origin` 与 `Host` 一致），否则 403。
+- `POST`：带 `Origin` 时必须与 `Host` 一致，跨站 403 且不产生副作用；不带 `Origin` 的客户端（curl/脚本）放行。
+- 原因：插件注册的具名路由排在 DSH 页面鉴权之前；全放开会在 Web 暴露到局域网时泄露任务标题、工作目录与报告摘要。
+  代价：远程 `curl` 读不到快照；远程只能通过同源页面使用看板。
+
+### 验证
+
+- ✅ `GET /dsh-mini-superagent/board` 返回 200、`cache-control: no-store`、`version: 0.3.0`、3 条任务。
+- ✅ 对失败任务 `POST /board/retry` 返回 200，`attempt` 从 1 变 2，任务转 `running`；worker 恢复会话后再次
+  `dispatch_report`，第 2 次汇报已回流主会话。
+- ✅ `npm test`：32 pass / 0 fail。
+- ⚠️ **未实测**：面板在浏览器里的实际渲染（侧边栏图标位置、点击切换、明暗对比度、窄宽度截断、面板高度、轮询暂停）。
+  原因：客户端模块需页面刷新后才加载，而 GUI 页面有鉴权，无法代刷。装完/升级后需手动刷新一次 GUI 页面。
+
+### 兼容性
+
+- 8 个工具名、参数 schema、配置键与默认值不变；看板不新增工具。
+- Host 侧依赖 `webServer`：headless 形态没有该服务时跳过路由注册，派发与工具不受影响。
+- 升级后需刷新一次 GUI 页面，侧边栏才会出现「任务看板」图标。
+
 ## 0.2.0 — 2026-11-05
 
 改名 + 多模块重构。功能面与 0.1.0 一致，修掉一个队列推进缺陷。

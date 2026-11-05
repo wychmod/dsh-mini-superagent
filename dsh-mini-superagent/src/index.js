@@ -11,6 +11,7 @@
  * 入口只做三件事：建 Dispatch、注册工具、接两条宿主事件。
  */
 import { LOG_PREFIX, NAME, SETTLED, now } from './constants.js'
+import { registerBoardRoutes } from './board.js'
 import { Dispatch } from './dispatch.js'
 import { registerTools } from './tools.js'
 
@@ -51,6 +52,10 @@ export async function apply(ctx, config) {
     dispatch.settle(task, 'interrupted')
     dispatch.schedulePersist()
   })
+
+  // 任务看板的 HTTP 路由（宿主没有 webServer 时安静跳过）。
+  const disposeBoard = registerBoardRoutes(ctx, dispatch)
+  if (disposeBoard) ctx.effect(() => disposeBoard)
 
   // 卸载时冲刷状态；运行中的子会话归 DSH 自己管。
   ctx.effect(() => () => { void dispatch.dispose() })

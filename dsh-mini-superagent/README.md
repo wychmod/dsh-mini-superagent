@@ -8,8 +8,11 @@
 而不是卡在等结果上。
 
 能力模型参考 DSH 官方 [dsh-superagent 原型](https://github.com/deepseek-ai/dsh-superagent-prototype)，
-但只保留派发这一件事：**没有** GitHub/飞书监听、没有工单与授权策略、没有管理面板、没有数据库、没有构建步骤。
+但只保留派发这一件事：**没有** GitHub/飞书监听、没有工单与授权策略、没有数据库、没有构建步骤。
 纯 ESM，零运行时依赖。
+
+从 0.3.0 起附带一个常驻侧边栏的**任务看板**：Host 侧注册同源 HTTP 路由提供快照，浏览器侧是一个不打包、不编译的
+ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直接取消/重试。它不占模型上下文，也不需要 agent 调工具。
 
 ---
 
@@ -38,6 +41,7 @@
 | DSH | `>=0.2.1-rc.2` | `package.json` 的 `engines.dsh` |
 | Node | `^22.19.0 \|\| >=24.0.0` | `package.json` 的 `engines.node` |
 | 依赖 / 构建 | 无 | `dependencies` 为空，`main` 直接指向 `src/index.js` |
+| 任务看板 | 仅 Web 形态 | 需要宿主 `webServer` 与浏览器页面；headless 形态没有看板，派发与工具照常 |
 
 实测环境：DSH `0.2.1-rc.5`，`desktop` profile。
 
@@ -65,10 +69,13 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.2.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.3.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 是 `0.2.0` 说明跑的是这一版；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 是 `0.3.0` 说明跑的是这一版；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+
+> **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「任务看板」图标。
+> 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
 
 > **迁移注意**：不要和旧插件 `dsh-dispatch` 同时安装。两者注册同名的 8 个工具，同一全局层重复注册会直接抛错。
 > 先 `plugin_manager` 的 `remove_bundle` 移除旧 bundle（准确的 id 以 `list_bundles` 为准），再装这个。
@@ -183,6 +190,45 @@ worker 回合结束（`agent/status` → `idle`）时，如果它这一轮没给
 
 ---
 
+## 任务看板
+
+Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panellist`，`order 60`）；点开是常驻主面板（`main` 槽），
+数据来自 Host 的同源 HTTP 路由 `GET /dsh-mini-superagent/board`，每 2 秒轮询一次。
+
+**装完/升级后必须刷新一次 GUI 页面**，图标才会出现——客户端模块在页面刷新后加载，插件已激活不影响这一点。
+
+面板从上到下：
+
+- **顶部指标**：并发 `N/max`、排队、总计、失败（有失败时红字）；右侧「更新于 HH:MM:SS」。
+- **三个过滤 chip**：全部 / 进行中（running + queued）/ 需要处理（failed + interrupted + blocked），各带计数。
+- **任务行**：状态点（只有 running 脉动，`prefers-reduced-motion` 下关闭）、状态文字、标题、**第 N 次**（attempt > 1 才显示）、
+  走表耗时（running 每秒走表，其余用服务端算好的值）、报告摘要首行，以及一个按钮；
+  第二行是 `task_id`、报告数、摘要（悬停标题里带 `cwd` 与 worker 会话 id）。失败任务额外显示一行错误。
+- **占位与提示**：加载中 / 空列表 / 筛选后为空 / 取不到数据（保留上次成功快照并提示）；取消/重试失败用顶部红条显示原因。
+- **按钮**：`running` / `queued` 只给「取消」；`failed` / `interrupted` / `ended` / `blocked` 给「重试」；
+  `done` / `cancelled` 没有按钮。按钮请求期间置灰并显示「取消中…/重试中…」，成功后立即重取快照。
+- **刷新节奏**：页面隐藏时停表并中止在途请求，切回来立刻重取；面板卸载时清掉定时器与所有在途请求。
+- **主题**：颜色全部走 `var(--dsw-alias-*, fallback)`，不写死明暗两套。
+
+安全取舍（细节见 [docs/board.md](docs/board.md)）：
+
+- `GET`：本机回环（`127.0.0.1` / `localhost` / `::1`）放行；非回环必须是同源页面（`Origin` 与 `Host` 一致）。
+- `POST`：带 `Origin` 时必须同源，跨站请求 403；不带 `Origin` 的非浏览器客户端（curl/脚本）放行。
+- 原因：插件注册的具名路由排在 DSH 页面鉴权之前。若全放开，把 Web 暴露到局域网时任何人都能读到任务标题、工作目录与报告摘要。
+  代价是远程访问只能用同源页面，远程 `curl` 读不到看板。
+
+**重试语义**（看板按钮，不是新工具）：
+
+- 任务的 `attempt` 从 1 开始，每次重试 +1，看板显示「第 N 次」。
+- 子会话还活着或能 `resolveAgent` 恢复（`blocked` / `ended` / `failed` 的常见情况）→ **续跑同一会话**，历史保留。
+- 会话没了（`interrupted`，或建会话就失败）→ **新开** `dispatch-<taskId>-a<attempt>`，重投原始简报。
+- 判定以「能否拿到活 Agent 或 `resolveAgent` 成功」为准，不是任务状态本身。
+- `done` 的任务被重试时指令是「再执行一次」，不是「接着做」。
+- `running` / `queued` 不能重试（先取消）；`cancelled` 不能重试（要重做请新派发）。
+- agent 侧没有新增工具：主会话续跑仍然用 `dispatch_message`。
+
+---
+
 ## 配置
 
 全部可选，写在 bundle 的 `cordis.patch.yml` 的 `config` 里（默认值见 `src/constants.js` 的 `DEFAULTS`）：
@@ -208,6 +254,7 @@ worker 回合结束（`agent/status` → `idle`）时，如果它这一轮没给
 - 插件重启后读回历史任务；进程之间没有活的 worker，所以**未结算的一律标 `interrupted`**，不假装还活着。
 - 子会话本身是普通 DSH Session，内容由 DSH 自己持久化，在侧边栏里可以直接打开。
 - 每个任务最多保留 50 条报告；简报落盘时截到 2000 字符（完整简报在 worker 首条消息里）。
+- 任务新增 `attempt` 字段（默认 1，重试 +1），随任务表落盘；旧任务读回时按 1 处理，看板不会误显示「第 0 次」。
 
 ---
 
@@ -231,6 +278,11 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 - **`dispatch_wait` 阻塞当前 step**：只适合「没有它就真的没法继续」。系统提示也会劝模型别用。
 - **状态文件是单写的**：多个 Harness 实例共用同一个 `DSH_HOME` 时可能互相覆盖；`stateDir` 可指到别处。
 - **报告与简报有截断**：单任务 50 条报告；`dispatch_inspect` 只展示最近 5 条、简报 2000 字符、最后输出 3000 字符。
+- **看板依赖 `webServer`**：headless 形态没有这个服务时不注册路由（日志会写「没有 webServer，跳过任务看板路由」），面板取不到数据；工具与派发不受影响。
+- **看板最多返回 200 条**：计数按全量算，列表只截前 200；没有分页、没有历史归档。
+- **远程访问受限**：非回环地址只能通过同源页面看看板，远程 `curl` 会被 403；这是有意的（见「任务看板」的安全取舍）。
+- **重试有边界**：`running` / `queued` / `cancelled` 不能重试；重试沿用同一个任务 id，只把 `attempt` +1（会话无法恢复时换一个 worker 会话）。
+- **看板 UI 的浏览器实测缺失**：面板渲染、侧边栏图标位置、明暗对比度、窄宽度截断、轮询暂停都只做了代码审查，未在真实 GUI 里点验（原因见验证记录）。
 
 ---
 
@@ -252,11 +304,19 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 | 重装 0.2.0、8 个工具注册 | 0.2.0 重验 | ✅ `dispatch_list` 返回 `version: 0.2.0` |
 | 派发 → 执行 → `dispatch_report` → 回流 | 0.2.0 重验 | ✅ |
 | 并发排队：`maxWorkers=1` 派一慢一快两个任务 | 0.2.0 | ✅ A 慢任务 `running`、B 快任务 `queued`；A 结算后约 4 秒 B 自动 `running`（13:05:53 → 13:05:57），期间无新派发 |
+| 看板快照：`GET /dsh-mini-superagent/board` | 0.3.0 | ✅ 200、`cache-control: no-store`、`version: 0.3.0`、返回 3 条任务 |
+| 看板重试：对失败任务 `POST /board/retry` | 0.3.0 | ✅ 200、`attempt` 1→2、任务转 `running`；worker 恢复会话后再次 `dispatch_report`，第 2 次汇报已回流 |
+| 全量单测（`npm test`） | 0.3.0 | ✅ 32 pass / 0 fail（`tasks.test.js` 13 + `board.test.js` 19） |
 
-最后一条同时是 0.2.0 的修复验证：0.1.0 只在派发与插件加载时推进队列，结算后不会补 `pump()`，
+0.2.0 那组最后一条（并发排队）同时是修复验证：0.1.0 只在派发与插件加载时推进队列，结算后不会补 `pump()`，
 并发位满时后面的任务会一直 `queued`。这个问题是整理代码时被测出来的，修法与依据见 [docs/architecture.md](docs/architecture.md) 的「pump 的触发点」。
 
-`test/tasks.test.js` 另外覆盖任务表的纯逻辑（`npm test`），但那不是上面这些端到端实测的替代。
+**未实测**（0.3.0）：看板在浏览器里的实际渲染——侧边栏图标位置、点击切换、明暗对比度、窄宽度截断、面板高度、轮询暂停。
+原因：客户端模块要在页面刷新后才会加载，而 GUI 页面有鉴权，无法代刷；接口层与快照形状已被上面两条实测与 19 个用例覆盖。
+读者只需知道：**装完/更新后刷新一次 GUI 页面**。
+
+`test/tasks.test.js` 覆盖任务表纯逻辑，`test/board.test.js` 覆盖快照与路由（用假的 req/res，不需要起 HTTP 服务）；
+两者都不是端到端实测的替代。
 
 ---
 
@@ -267,8 +327,9 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 | [docs/tools.md](docs/tools.md) | 8 个工具的参数、返回、错误、何时用/何时别用 |
 | [docs/architecture.md](docs/architecture.md) | 模块职责、数据流、设计取舍与依据 |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 排障表、日志前缀与恢复动作 |
+| [docs/board.md](docs/board.md) | 任务看板：入口、面板结构、HTTP 接口、重试语义、鉴权、已知限制 |
 | [docs/api-contracts.md](docs/api-contracts.md) | DSH 主机 API 契约取证（消息/Agent/事件/会话控制器/工具作用域） |
-| [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）与 0.2.0 的差异 |
+| [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0 的差异 |
 
 ---
 
@@ -276,18 +337,23 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 
 ```text
 dsh-mini-superagent/
-  package.json        # name/version、engines、dsh.bundle.patch 声明
+  package.json        # name/version、engines、dsh.bundle.patch、dsh.client 声明
   cordis.patch.yml    # 插入插件行 + 默认配置（可整段删掉，靠代码默认值）
   src/
-    index.js          # 入口：建 Dispatch、注册工具、接宿主事件
+    index.js          # 入口：建 Dispatch、注册工具、接宿主事件与看板路由
     constants.js      # 名称/版本/日志前缀/source kind/默认配置/状态集合
     tasks.js          # TaskTable（并发位/排队/结算/等待）+ 纯函数
     store.js          # tasks.json 读写
     sessions.js       # DSH 适配：建会话、取 Agent、权限预设、提示注入、投递
     prompt.js         # 给模型的文本：工作方式提示 + worker 首条简报
     tools.js          # 8 个工具定义
-    dispatch.js       # Dispatch 服务：launch/pump/settle/start/report/relay/message/cancel
-  test/tasks.test.js  # TaskTable 单测
+    dispatch.js       # Dispatch 服务：launch/pump/settle/start/report/relay/message/cancel/retry
+    board.js          # 看板 Host 半边：快照 + GET/POST 路由 + 同源校验
+  client/
+    index.js          # 浏览器半边：侧边栏图标 + 主面板（不打包、不编译）
+  test/
+    tasks.test.js     # TaskTable 单测（13）
+    board.test.js     # 快照与路由单测（19）
   locale/{zh,en}.json # 管理面板里的标题与描述
   icon.svg
   LICENSE             # MIT
@@ -295,6 +361,7 @@ dsh-mini-superagent/
     architecture.md   # 模块职责、数据流、设计取舍
     tools.md          # 8 个工具的参数/返回/错误
     troubleshooting.md  # 排障表与日志前缀
+    board.md          # 任务看板：面板、接口、重试、鉴权
     api-contracts.md  # DSH 主机 API 契约取证
   CHANGELOG.md
 ```
