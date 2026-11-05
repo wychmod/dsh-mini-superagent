@@ -1,12 +1,15 @@
 # 统一行尾，避免 Windows 上反复出现整个文件被改写。
 * text=auto
 
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
 *.js    text eol=lf
 *.json  text eol=lf
 *.md    text eol=lf
 *.yml   text eol=lf
 *.yaml  text eol=lf
-*.svg   text
+*.svg   text eol=lf
 
 # Windows 脚本保持 CRLF，否则某些宿主会报错。
 *.ps1   text eol=crlf
