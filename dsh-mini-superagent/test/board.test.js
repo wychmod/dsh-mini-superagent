@@ -176,6 +176,15 @@ function fakeHost(tasks, { cancelThrows = false } = {}) {
       return task
     },
     workspaces: { list: () => [{ id: 'w-1', title: '项目 A', path: 'C:\\a' }] },
+    targets: new Map(),
+    async setTarget(sessionId, workspace) {
+      calls.target = { sessionId, workspace }
+      if (!workspace) { dispatch.targets.delete(sessionId); return undefined }
+      if (workspace === 'nope') throw new Error('找不到工作区「nope」')
+      const target = { workspace_id: 'w-1', title: '项目 A', path: 'C:\\a' }
+      dispatch.targets.set(sessionId, target)
+      return target
+    },
     async archiveStale() {
       calls.archive = (calls.archive ?? 0) + 1
       return { scanned: 2, archived: 1, failed: 1 }
@@ -299,4 +308,50 @@ test('POST /archive 触发一次归档巡检并回计数', async () => {
   assert.equal(result.json.archived, 1)
   assert.equal(calls.archive, 1)
   assert.ok(result.json.counts, '要带一份最新计数')
+})
+
+test('POST /target 设置派发目标工作区', async () => {
+  const { handler, calls } = fakeHost([])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/target`,
+    body: { session_id: 's1', workspace: 'w-1' },
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.json.ok, true)
+  assert.equal(result.json.target.workspace_id, 'w-1')
+  assert.deepEqual(calls.target, { sessionId: 's1', workspace: 'w-1' })
+})
+
+test('POST /target 传空字符串表示清除', async () => {
+  const { handler } = fakeHost([])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/target`,
+    body: { session_id: 's1', workspace: '' },
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.json.target, null)
+})
+
+test('POST /target 缺 session_id 返回 400', async () => {
+  const { handler } = fakeHost([])
+  const result = await call(handler, { method: 'POST', url: `${BASE}/target`, body: { workspace: 'w-1' } })
+  assert.equal(result.status, 400)
+  assert.match(result.json.error, /session_id/)
+})
+
+test('POST /target 解析失败返回 409 并带候选', async () => {
+  const { handler } = fakeHost([])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/target`,
+    body: { session_id: 's1', workspace: 'nope' },
+  })
+  assert.equal(result.status, 409)
+  assert.match(result.json.error, /nope/)
+})
+
+test('快照带每个会话的派发目标', async () => {
+  const { handler, dispatch } = fakeHost([makeTask('a')])
+  dispatch.targets.set('s1', { workspace_id: 'w-1', title: '项目 A', path: 'C:\\a' })
+  const result = await call(handler, {})
+  assert.deepEqual(result.json.targets, { s1: { workspace_id: 'w-1', title: '项目 A', path: 'C:\\a' } })
 })

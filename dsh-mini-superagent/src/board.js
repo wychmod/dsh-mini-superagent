@@ -71,6 +71,8 @@ export function boardSnapshot(dispatch) {
     counts,
     // 工作区列表给看板做「按工作区分组 / 切工作区」用；注册表不可用时为空数组。
     workspaces: (dispatch.workspaces?.list?.() ?? []).map(item => ({ id: item.id, title: item.title, path: item.path })),
+    // 每个主会话当前选的「派发目标工作区」；没选的不出现。
+    targets: Object.fromEntries(dispatch.targets ?? []),
     tasks: tasks.map(boardTask),
   }
 }
@@ -167,6 +169,21 @@ export function createBoardHandler(ctx, dispatch) {
         if (!sameOrigin(req)) return send(res, 403, { ok: false, error: '跨站请求被拒绝' })
         const result = await dispatch.archiveStale()
         return send(res, 200, { ok: true, ...result, counts: boardSnapshot(dispatch).counts })
+      }
+
+      if (req.method === 'POST' && pathname === `${BASE}/target`) {
+        if (!sameOrigin(req)) return send(res, 403, { ok: false, error: '跨站请求被拒绝' })
+        let body
+        try { body = await readJson(req) }
+        catch (error) { return send(res, 400, { ok: false, error: String(error?.message ?? error) }) }
+        const sessionId = String(body?.session_id ?? '').trim()
+        if (!sessionId) return send(res, 400, { ok: false, error: '需要 session_id' })
+        try {
+          const target = await dispatch.setTarget(sessionId, body?.workspace)
+          return send(res, 200, { ok: true, target: target ?? null })
+        } catch (error) {
+          return send(res, 409, { ok: false, error: String(error?.message ?? error) })
+        }
       }
 
       if (req.method === 'POST' && (pathname === `${BASE}/cancel` || pathname === `${BASE}/retry`)) {

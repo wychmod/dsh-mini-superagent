@@ -14,7 +14,7 @@ import {
 } from './constants.js'
 import { workerPrompt } from './prompt.js'
 import { SessionGateway } from './sessions.js'
-import { readTaskFile, writeTaskFile } from './store.js'
+import { readState, writeState } from './store.js'
 import { TaskTable, clip, lastAssistantText, oneLine } from './tasks.js'
 import { WorkspaceGateway, dayKey } from './workspaces.js'
 
@@ -32,6 +32,11 @@ export class Dispatch {
     this.persistTimer = undefined
     this.sweepTimer = undefined
     this.disposed = false
+    /**
+     * 每个主会话的「派发目标工作区」：会话 id → `{ workspace_id, title, path }`。
+     * 输入框里的工作区选择器写这里，dispatch_launch 没显式给 workspace 时读这里。
+     */
+    this.targets = new Map()
     const stateRoot = this.config.stateDir
       || join(process.env.DSH_HOME || join(homedir(), '.dsh'), STATE_DIR)
     this.stateFile = join(stateRoot, 'tasks.json')
@@ -42,11 +47,40 @@ export class Dispatch {
 
   // ---------------------------------------------------------------- 任务
 
+  /** 读一个会话的派发目标工作区；没有就是 undefined（= 沿用调用者目录）。 */
+  targetFor(sessionId) {
+    return this.targets.get(sessionId)
+  }
+
+  /**
+   * 设置或清除一个会话的派发目标工作区。
+   * @param {string} sessionId 主会话 id
+   * @param {string} ref 工作区 id / 路径 / 标题；空字符串表示清除
+   * @returns {Promise<object | undefined>} 解析后的目标，清除时为 undefined
+   */
+  async setTarget(sessionId, ref) {
+    const value = String(ref ?? '').trim()
+    if (!value) {
+      this.targets.delete(sessionId)
+      this.schedulePersist()
+      return undefined
+    }
+    const workspace = await this.workspaces.resolve(value)
+    if (!workspace) {
+      const candidates = this.workspaces.list().map(item => `${item.title}（${item.id}）`).join('；') || '（暂无工作区）'
+      throw new Error(`找不到工作区「${value}」。现有：${candidates}`)
+    }
+    const target = { workspace_id: workspace.id, title: workspace.title, path: workspace.path }
+    this.targets.set(sessionId, target)
+    this.schedulePersist()
+    return target
+  }
+
   /**
    * 派发一个任务：登记 → 排队 → 由 pump 按并发位启动。
    * 立即返回，不等子会话干活。
    * @param {object} agent 调用者（主会话）
-   * @param {{title: string, brief: string, cwd?: string, model?: string, agentPreset?: string, permissionPreset?: string}} input
+   * @param {{title: string, brief: string, cwd?: string, workspace?: string, createWorkspace?: boolean, model?: string, agentPreset?: string, permissionPreset?: string, group?: string}} input
    */
   async launch(agent, input) {
     const existing = this.table.ofSession(agent.id)
@@ -54,16 +88,25 @@ export class Dispatch {
       throw new Error(`本会话已派发 ${existing.length} 个任务，达到上限 ${this.config.maxTasksPerSession}；请先收束旧任务`)
     }
 
-    // 目标工作区：显式指定就解析（可按需新建），没指定就跟随调用者的工作目录。
+    // 显式 workspace 优先；否则用输入框里选的「派发目标工作区」（如果有）。
+    const sticky = this.targetFor(agent.id)
+    const ref = input.workspace ?? sticky?.workspace_id
     let target
-    if (input.workspace) {
-      const result = await this.workspaces.resolveOrCreate(input.workspace, { create: input.createWorkspace !== false })
+    if (ref) {
+      // 只有显式指定时才允许按需新建；来自选择器的目标失效则忽略，避免凭空建目录。
+      const result = await this.workspaces.resolveOrCreate(ref, {
+        create: !!input.workspace && input.createWorkspace !== false,
+      })
       target = result.workspace
       if (!target) {
-        const candidates = this.workspaces.list().map(item => `${item.title}（${item.path}）`).join('；') || '（暂无工作区）'
-        throw new Error(`找不到工作区「${input.workspace}」，且允许新建被关闭。现有：${candidates}`)
+        if (input.workspace) {
+          const candidates = this.workspaces.list().map(item => `${item.title}（${item.path}）`).join('；') || '（暂无工作区）'
+          throw new Error(`找不到工作区「${input.workspace}」，且允许新建被关闭。现有：${candidates}`)
+        }
+        this.warn(`${LOG_PREFIX} 会话 %s 的派发目标工作区已不存在，按调用者目录派发`, agent.id)
+      } else if (result.created) {
+        this.log(`${LOG_PREFIX} 已新建工作区 %s（%s）`, target.title, target.path)
       }
-      if (result.created) this.log(`${LOG_PREFIX} 已新建工作区 %s（%s）`, target.title, target.path)
     }
 
     const id = newTaskId()
@@ -426,17 +469,18 @@ export class Dispatch {
   async persist() {
     try {
       const tasks = [...this.table.tasks.values()].map(task => ({ ...task, brief: clip(task.brief, 2000) }))
-      await writeTaskFile(this.stateFile, tasks, now())
+      const targets = Object.fromEntries(this.targets)
+      await writeState(this.stateFile, { tasks, targets }, now())
     } catch (error) {
       this.warn(`${LOG_PREFIX} 状态落盘失败: %s`, String(error))
     }
   }
 
-  /** 启动时读回任务表；进程之间没有活的 worker，所以未结算的一律标为 interrupted。 */
+  /** 启动时读回任务表与派发目标；进程之间没有活的 worker，所以未结算的一律标为 interrupted。 */
   async restore() {
     try {
-      const saved = await readTaskFile(this.stateFile)
-      for (const item of saved) {
+      const state = await readState(this.stateFile)
+      for (const item of state.tasks) {
         if (!item?.id || !item?.workerSessionId) continue
         const task = { ...item, reports: Array.isArray(item.reports) ? item.reports : [] }
         if (!SETTLED.has(task.status)) {
@@ -445,9 +489,12 @@ export class Dispatch {
         }
         this.table.tasks.set(task.id, task)
       }
-      this.log(`${LOG_PREFIX} 读回 %d 个历史任务（%s）`, this.table.tasks.size, this.stateFile)
+      for (const [sessionId, target] of Object.entries(state.targets)) {
+        if (target?.workspace_id) this.targets.set(sessionId, target)
+      }
+      this.log(`${LOG_PREFIX} 读回 %d 个历史任务、%d 个派发目标（%s）`, this.table.tasks.size, this.targets.size, this.stateFile)
     } catch (error) {
-      this.warn(`${LOG_PREFIX} 读取历史任务失败: %s`, String(error))
+      this.warn(`${LOG_PREFIX} 读取历史状态失败: %s`, String(error))
     }
   }
 
