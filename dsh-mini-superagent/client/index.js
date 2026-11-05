@@ -122,6 +122,10 @@ window.__ModuleLoader__.load({
       targetSetFailed: '设置派发目标失败：{reason}',
       targetPortalUnavailable: '弹层不可用',
       targetSection: '工作区',
+      targetAuto: '自动选择',
+      targetAutoHint: '按关键词自动匹配一个工作区',
+      targetAutoHit: '自动：{title}',
+      targetAutoMiss: '自动：没有匹配的工作区',
     }
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
@@ -195,6 +199,10 @@ window.__ModuleLoader__.load({
       targetSetFailed: 'Could not set the dispatch target: {reason}',
       targetPortalUnavailable: 'Menu unavailable',
       targetSection: 'Workspaces',
+      targetAuto: 'Auto-select',
+      targetAutoHint: 'Pick a workspace from the typed keywords',
+      targetAutoHit: 'Auto: {title}',
+      targetAutoMiss: 'Auto: no workspace matches',
     }
 
     /** 当前翻译函数；attachLocale 成功后会替换成 locale 绑定的 t()。 */
@@ -526,6 +534,42 @@ window.__ModuleLoader__.load({
       }, signal)
       const next = payload && payload.target && typeof payload.target === 'object' ? payload.target : null
       return next
+    }
+
+    /**
+     * 按关键词给工作区打分，用于 @ 菜单里的「自动选择」。
+     *
+     * 打分只看用户能看见的东西（标题、目录名、路径），不做语义猜测——
+     * 猜错比不猜更烦人。返回按分数降序的候选，分数 0 的不要。
+     */
+    function rankWorkspaces(pool, query) {
+      const needle = String(query || '').trim().toLowerCase()
+      const words = needle.split(/[\s,，、]+/).filter(Boolean)
+      const scored = []
+      for (const item of pool) {
+        const title = String(item.title || item.id || '')
+        const path = String(item.path || '')
+        const tail = path.split(/[\\/]/).filter(Boolean).pop() || ''
+        const haystack = (title + '\n' + tail + '\n' + path).toLowerCase()
+        let score = 0
+        // 没有关键词时：全部同分，靠注册表顺序兜底（最近用过的通常在前）。
+        if (!words.length) score = 1
+        else {
+          for (const word of words) {
+            if (title.toLowerCase() === word) score += 100          // 标题完全相等
+            else if (title.toLowerCase().includes(word)) score += 40 // 标题包含
+            else if (tail.toLowerCase() === word) score += 30        // 目录名相等
+            else if (tail.toLowerCase().includes(word)) score += 15  // 目录名包含
+            else if (haystack.includes(word)) score += 5             // 路径里沾边
+          }
+        }
+        if (score > 0) scored.push({ item, score, title })
+      }
+      scored.sort(function (a, b) {
+        if (b.score !== a.score) return b.score - a.score
+        return a.title.localeCompare(b.title)
+      })
+      return scored
     }
 
     /** 目标变更广播：@ 选中之后，输入框里的控件也要跟着刷新，不能两个入口各说各话。 */
@@ -1302,14 +1346,30 @@ window.__ModuleLoader__.load({
           if (signal && signal.aborted) return []
           const pool = pickWorkspaces(data)
           for (const item of pool) workspaceTitles.set(item.id, item.title || item.id)
-          const needle = String(request && request.query ? request.query : '').trim().toLowerCase()
+          const needle = String(request && request.query ? request.query : '').trim()
+          const lower = needle.toLowerCase()
           const rows = []
+
+          // 顶部固定一条「自动选择」：按关键词打分挑最优，不用手动翻列表。
+          // 没有匹配时也显示，点下去会提示没有可选项，而不是静默什么都不做。
+          const ranked = rankWorkspaces(pool, needle)
+          const best = ranked.length ? ranked[0] : null
+          rows.push({
+            name: best
+              ? fill(tr('targetAutoHit'), { title: best.title })
+              : (pool.length ? tr('targetAutoMiss') : tr('targetMenuEmpty')),
+            description: tr('targetAutoHint'),
+            section: tr('targetAuto'),
+            value: best ? best.item.id : '',
+            auto: true,
+          })
+
           for (const item of pool) {
             const title = item.title || item.id
             const path = typeof item.path === 'string' ? item.path : ''
-            if (needle) {
+            if (lower) {
               const hay = (title + '\n' + path + '\n' + item.id).toLowerCase()
-              if (!hay.includes(needle)) continue
+              if (!hay.includes(lower)) continue
             }
             rows.push({ name: title, description: path, section: tr('targetSection'), value: item.id })
           }
@@ -1317,9 +1377,22 @@ window.__ModuleLoader__.load({
         },
         onPick(pick) {
           const candidate = pick ? pick.candidate : null
-          const id = candidate && typeof candidate.value === 'string' ? candidate.value : ''
+          let id = candidate && typeof candidate.value === 'string' ? candidate.value : ''
+          const auto = Boolean(candidate && candidate.auto)
+          const query = pick && pick.query ? String(pick.query) : ''
+
+          // 「自动选择」这一条：用输入过的关键词重新排一次，取第一名。
+          if (auto && !id) {
+            const pool = Array.from(workspaceTitles.keys()).map(function (key) {
+              return { id: key, title: workspaceTitles.get(key) }
+            })
+            const ranked = rankWorkspaces(pool, query)
+            if (ranked.length) id = ranked[0].item.id
+          }
           if (!id) return undefined
-          const title = typeof candidate.name === 'string' && candidate.name ? candidate.name : id
+          const title = auto && workspaceTitles.has(id)
+            ? workspaceTitles.get(id)
+            : (typeof candidate.name === 'string' && candidate.name ? candidate.name : id)
           const sessionId = pick && pick.session && typeof pick.session.sessionId === 'string'
             ? pick.session.sessionId
             : ''

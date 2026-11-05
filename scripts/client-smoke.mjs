@@ -505,18 +505,45 @@ const atSource = registeredSources[0]
 const signal = new AbortController().signal
 
 const rows = await atSource.candidates({ sessionId: 'session-a' }, { query: '', quoted: false, drilled: false, signal })
-check('候选返回全部工作区', Array.isArray(rows) && rows.length === 2, Array.isArray(rows) ? String(rows.length) : 'not-array')
-check('候选带「工作区」分组', Boolean(rows && rows[0] && rows[0].section === '工作区'), rows && rows[0] && String(rows[0].section))
-check('候选项形状正确', Boolean(rows && rows[0] && rows[0].value === 'ws-1' && rows[0].name === '主工作区'),
+// 顶部固定一条「自动选择」，其后才是全部工作区。
+check('候选 = 自动选择 + 全部工作区', Array.isArray(rows) && rows.length === 3, Array.isArray(rows) ? String(rows.length) : 'not-array')
+check('首条是「自动选择」', Boolean(rows && rows[0] && rows[0].section === '自动选择' && rows[0].auto === true),
   rows && rows[0] && JSON.stringify(rows[0]))
+check('自动选择在无关键词时也会指向一个真实工作区',
+  Boolean(rows && rows[0] && (rows[0].value === 'ws-1' || rows[0].value === 'ws-2')),
+  rows && rows[0] && String(rows[0].value))
+check('候选带「工作区」分组', Boolean(rows && rows[1] && rows[1].section === '工作区'), rows && rows[1] && String(rows[1].section))
+check('候选项形状正确', Boolean(rows && rows[1] && rows[1].value === 'ws-1' && rows[1].name === '主工作区'),
+  rows && rows[1] && JSON.stringify(rows[1]))
 
 const filtered = await atSource.candidates({ sessionId: 'session-a' }, { query: '副', signal })
-check('候选按查询过滤', Array.isArray(filtered) && filtered.length === 1 && filtered[0].value === 'ws-2',
-  Array.isArray(filtered) ? String(filtered.length) : 'not-array')
+check('候选按查询过滤（自动选择恒在首位）',
+  Array.isArray(filtered) && filtered.length === 2 && filtered[0].auto === true && filtered[1].value === 'ws-2',
+  Array.isArray(filtered) ? JSON.stringify(filtered.map(function (r) { return r.value })) : 'not-array')
+check('关键词命中时自动选择指向命中的工作区', Boolean(filtered && filtered[0] && filtered[0].value === 'ws-2'),
+  filtered && filtered[0] && String(filtered[0].value))
+
+// 自动选择：按关键词重排取第一名
+const autoPicked = atSource.onPick({
+  candidate: filtered[0],
+  session: { sessionId: 'session-a' },
+  query: '副',
+  action: 'pick',
+  via: 'menu',
+})
+check('自动选择 onPick 产出 insert 且指向命中的工作区',
+  Boolean(autoPicked && autoPicked.insert && autoPicked.insert.ref === 'ws-2'),
+  autoPicked && autoPicked.insert && String(autoPicked.insert.ref))
+
+// 没有匹配时给空 value，不静默失败
+const emptyAuto = await atSource.candidates({ sessionId: 'session-a' }, { query: '不存在的词', signal })
+check('无匹配时自动选择仍显示且 value 为空',
+  Boolean(emptyAuto && emptyAuto[0] && emptyAuto[0].auto === true && emptyAuto[0].value === ''),
+  emptyAuto && emptyAuto[0] && JSON.stringify(emptyAuto[0]))
 
 const before = targetRequests().length
 const pickResult = atSource.onPick({
-  candidate: rows[1],
+  candidate: rows[2],
   session: { sessionId: 'session-a' },
   action: 'pick',
   via: 'menu',
