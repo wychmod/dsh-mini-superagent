@@ -10,6 +10,7 @@
 | --- | --- |
 | [`dsh-mini-superagent/`](dsh-mini-superagent/) | 插件包本体（0.3.0）：`src/` 源码、`client/` 浏览器面板、`test/`、`locale/`、bundle patch、文档 |
 | [`notes/`](notes/) | 本机 DSH 环境的排查记录（会话失败检查、环境修复），不是插件文档 |
+| [`plans/`](plans/) | 产品规划与可行性调研：[00-vision](plans/00-vision.md) 是五条需求的判定与分期，01/02 是输入框与侧边栏的逐条取证 |
 | `reference/` | DSH 官方 `dsh-superagent-prototype` 的本地克隆，只作架构参考。目录内容被 `.gitignore` 排除，只提交了 [`reference/README.md`](reference/README.md) 作指针（记录上游地址、参考时的提交 `8c32a9d`，以及取回与移除方法） |
 | `.editorconfig` / `.gitattributes` / `.gitignore` | 编码、行尾（LF）与忽略规则 |
 
