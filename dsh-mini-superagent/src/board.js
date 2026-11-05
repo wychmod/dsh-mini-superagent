@@ -165,6 +165,11 @@ export function createBoardHandler(ctx, dispatch) {
         return send(res, 200, boardSnapshot(dispatch))
       }
 
+      if (req.method === 'GET' && pathname === `${BASE}/selfcheck`) {
+        if (!readAllowed(req)) return send(res, 403, { ok: false, error: '看板只对本机或同源页面开放' })
+        return send(res, 200, await dispatch.selfCheck())
+      }
+
       if (req.method === 'POST' && pathname === `${BASE}/archive`) {
         if (!sameOrigin(req)) return send(res, 403, { ok: false, error: '跨站请求被拒绝' })
         const result = await dispatch.archiveStale()

@@ -9,7 +9,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  DEFAULTS, LOG_PREFIX, MAX_REPORTS, SETTLED, STATE_DIR, TERMINAL_REPORT,
+  DEFAULTS, LOG_PREFIX, MAX_REPORTS, NAME, SETTLED, STATE_DIR, TERMINAL_REPORT, VERSION,
   newTaskId, nextMessageId, now,
 } from './constants.js'
 import { workerPrompt } from './prompt.js'
@@ -502,6 +502,82 @@ export class Dispatch {
   async sessionExists(sessionId) {
     try { await this.ctx.sessionController.inspect(sessionId); return true }
     catch { return false }
+  }
+
+  /**
+   * 自检：回答「宿主这一半到底装好没有」。
+   *
+   * 关键是 `client.inGraph`：宿主是否把本包的 client 模块编进了 Web 启动图。
+   * 为 false 时，页面刷新也不会出现面板/控件——要么插件没重载，要么清单有问题。
+   */
+  async selfCheck() {
+    const clientModules = this.ctx.get('clientModules')
+    let clientPath
+    try { clientPath = typeof clientModules?.clientPath === 'function' ? clientModules.clientPath(NAME) : undefined }
+    catch { clientPath = undefined }
+
+    // 把 Web 启动图里已经编进去的模块 id 列出来：用来区分「需要重启宿主」
+    // 和「本包清单有问题」——两者现象一样，原因完全不同。
+    let graphModules = []
+    try {
+      const graph = clientModules?.graph?.()
+      const source = graph?.modules ?? graph?.entries ?? graph
+      if (Array.isArray(source)) {
+        graphModules = source.map(item => (typeof item === 'string' ? item : item?.id)).filter(Boolean)
+      } else if (source && typeof source === 'object') {
+        graphModules = Object.keys(source)
+      }
+    } catch { graphModules = [] }
+
+    const registry = this.workspaces.registry
+    const leadId = String(this.config.leadSessionId || 'mas-lead')
+    let leadExists = false
+    try { leadExists = await this.sessionExists(leadId) } catch { leadExists = false }
+    return {
+      version: VERSION,
+      name: NAME,
+      client: {
+        inGraph: !!clientPath,
+        path: clientPath ?? null,
+        // 用几个已知有 client 半边的包做对照，判断 clientPath 这个探针本身是否可靠
+        probes: (() => {
+          const ids = [NAME, 'dsh-context', 'dsh-ppt', 'eac-design-world', 'dsh-better-sidebar', 'dsh-free-search']
+          const out = {}
+          for (const id of ids) {
+            try { out[id] = typeof clientModules?.clientPath === 'function' ? (clientModules.clientPath(id) ?? null) : null }
+            catch { out[id] = 'throw' }
+          }
+          return out
+        })(),
+        graphModules: graphModules.slice(0, 80),
+        graphModuleCount: graphModules.length,
+        // 判据：图里若有别的 profile 插件的 client 模块，说明扫描是工作的，
+        // 缺我们就是清单问题；一个都没有则是宿主启动时的那次扫描还没发生。
+        peerExample: graphModules.find(id => id !== NAME) ?? null,
+      },
+      host: {
+        webServer: typeof this.ctx.get('webServer')?.register === 'function',
+        workspaceRegistry: !!registry,
+        sessionController: !!this.ctx.get('sessionController'),
+        permissionPresets: typeof this.ctx.get('permissionPresets')?.set === 'function',
+        inputTrigger: null,   // 客户端能力，宿主看不到
+      },
+      workspaces: {
+        root: this.workspaces.root,
+        count: this.workspaces.list().length,
+        default: this.defaultWorkspace
+          ? { id: this.defaultWorkspace.id, title: this.defaultWorkspace.title, path: this.defaultWorkspace.path }
+          : null,
+      },
+      lead: { sessionId: leadId, exists: leadExists },
+      targets: this.targets.size,
+      tasks: {
+        total: this.table.tasks.size,
+        running: this.table.runningCount(),
+        archived: [...this.table.tasks.values()].filter(task => task.archivedAt).length,
+        maxWorkers: this.table.maxWorkers,
+      },
+    }
   }
 
   /**
