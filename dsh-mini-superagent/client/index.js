@@ -123,6 +123,7 @@ window.__ModuleLoader__.load({
       targetPortalUnavailable: '弹层不可用',
       targetSection: '工作区',
       targetAuto: '自动选择',
+      targetFollowHint: '用这个会话自己的工作目录',
       targetAutoHint: '按关键词自动匹配一个工作区',
       targetAutoHit: '自动：{title}',
       targetAutoMiss: '自动：没有匹配的工作区',
@@ -200,6 +201,7 @@ window.__ModuleLoader__.load({
       targetPortalUnavailable: 'Menu unavailable',
       targetSection: 'Workspaces',
       targetAuto: 'Auto-select',
+      targetFollowHint: "Use this session's own working directory",
       targetAutoHint: 'Pick a workspace from the typed keywords',
       targetAutoHit: 'Auto: {title}',
       targetAutoMiss: 'Auto: no workspace matches',
@@ -1192,6 +1194,9 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** 当前是不是「自动」模式（没有锁定具体工作区，每次派发按任务内容挑）。 */
+      const isAuto = Boolean(target && target.auto)
+
       function toggle() {
         if (status === 'error' || !portalReady) return
         const next = !open
@@ -1216,10 +1221,21 @@ window.__ModuleLoader__.load({
 
       const rows = []
       if (open) {
+        // 「自动选择」默认项：不锁定工作区，每次派发按任务内容挑。放在最上面。
+        rows.push(h(TargetRow, {
+          key: 'auto',
+          checked: isAuto,
+          label: tr('targetAuto'),
+          description: tr('targetAutoHint'),
+          icon: '✦',
+          disabled: saving,
+          onPick: function () { void choose('auto') },
+        }))
         rows.push(h(TargetRow, {
           key: 'follow',
           checked: !target,
           label: tr('targetMenuFollow'),
+          description: tr('targetFollowHint'),
           onPick: function () { void choose('') },
         }))
         rows.push(h('div', { key: 'sep-1', className: 'dsh-sa-menu-sep', role: 'separator' }))

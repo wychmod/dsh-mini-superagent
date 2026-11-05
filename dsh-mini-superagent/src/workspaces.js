@@ -46,6 +46,44 @@ export function safeDirName(name) {
 }
 
 /**
+ * 按关键词给工作区打分，用于「自动选择」。
+ *
+ * 只看用户看得见的东西（标题、目录名、路径），不做语义猜测——猜错比不猜更烦人。
+ * 分值：标题完全相等 100 / 标题包含 40 / 目录名相等 30 / 目录名包含 15 / 路径包含 5。
+ * 多个关键词（空格、逗号分隔）累加；同分按标题字典序。
+ *
+ * @param {Array<{id:string,title?:string,path?:string}>} pool
+ * @param {string} query
+ * @returns {Array<{ item: object, score: number, title: string }>} 分数降序，不含 0 分项
+ */
+export function rankWorkspaces(pool, query) {
+  const needle = String(query ?? '').trim().toLowerCase()
+  const words = needle.split(/[\s,，、]+/).filter(Boolean)
+  const scored = []
+  for (const item of Array.isArray(pool) ? pool : []) {
+    const title = String(item?.title || item?.id || '')
+    const path = String(item?.path || '')
+    const tail = path.split(/[\\/]/).filter(Boolean).pop() || ''
+    const haystack = `${title}\n${tail}\n${path}`.toLowerCase()
+    let score = 0
+    // 没有关键词时：全部同分，靠调用方的排序兜底。
+    if (!words.length) score = 1
+    else {
+      for (const word of words) {
+        if (title.toLowerCase() === word) score += 100
+        else if (title.toLowerCase().includes(word)) score += 40
+        else if (tail.toLowerCase() === word) score += 30
+        else if (tail.toLowerCase().includes(word)) score += 15
+        else if (haystack.includes(word)) score += 5
+      }
+    }
+    if (score > 0) scored.push({ item, score, title })
+  }
+  scored.sort((a, b) => (b.score !== a.score ? b.score - a.score : a.title.localeCompare(b.title)))
+  return scored
+}
+
+/**
  * 工作区网关：把「注册表 + 目录」的组合封起来，逻辑层只调语义方法。
  */
 export class WorkspaceGateway {

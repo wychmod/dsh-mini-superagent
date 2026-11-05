@@ -25,8 +25,13 @@ export const PROMPT_SECTION = NAME
 /** 状态文件在 $DSH_HOME 下的目录名。 */
 export const STATE_DIR = NAME
 
-/** 默认配置；cordis.patch.yml 里的 config 会覆盖这里的字段。 */
-export const DEFAULTS = {
+/**
+ * 派发目标的「自动」标记值。
+ * 写进 targets 时表示：不锁定具体工作区，每次派发按任务内容重新挑。
+ */
+export const AUTO = 'auto'
+
+/** 默认配置；cordis.patch.yml 里的 config 会覆盖这里的字段。 */export const DEFAULTS = {
   /** 同时真正在跑（running）的子会话上限；超出的任务进入 queued，有空位自动开始。 */
   maxWorkers: 6,
   /** 每个主会话最多累计派发多少个任务。 */

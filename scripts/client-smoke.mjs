@@ -419,11 +419,25 @@ update(picker)
 let menu = findAll(picker.tree, (item) => hasClass(item, 'dsh-sa-menu'))[0]
 check('下拉打开', Boolean(menu))
 const menuText = menu ? text(menu) : ''
+check('下拉第一项是「自动选择」', menuText.indexOf('自动选择') >= 0 && menuText.indexOf('自动选择') < menuText.indexOf('跟随会话目录'),
+  menuText.slice(0, 60))
 check('下拉含「跟随会话目录」', menuText.includes('跟随会话目录'))
 check('下拉含全部工作区', menuText.includes('主工作区') && menuText.includes('副工作区'))
 check('下拉含「刷新列表」', menuText.includes('刷新列表'))
 const checked = menu ? findAll(menu, (item) => item.props && item.props['aria-checked'] === true) : []
 check('当前目标带勾选且只勾一个', checked.length === 1 && text(checked[0]).includes('主工作区'), JSON.stringify(checked.map((item) => text(item))))
+
+// 「自动选择」是默认项：点它应发 workspace:"auto"，并且勾选随之转移过去
+const autoBtn = menu ? buttonsOf(menu).find((item) => text(item).includes('自动选择')) : undefined
+check('下拉里有「自动选择」按钮', Boolean(autoBtn))
+if (autoBtn) autoBtn.props.onClick()
+await tick()
+await tick()
+const autoPost = targetRequests().slice(-1)[0]
+let autoBody = null
+try { autoBody = JSON.parse(autoPost.body) } catch (error) { autoBody = null }
+check('选「自动选择」POST workspace:"auto"', Boolean(autoBody) && autoBody.workspace === 'auto',
+  JSON.stringify(autoBody))
 
 const pickBtn = menu ? buttonsOf(menu).find((item) => text(item).includes('副工作区')) : undefined
 if (pickBtn) pickBtn.props.onClick()

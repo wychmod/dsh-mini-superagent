@@ -9,14 +9,14 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  DEFAULTS, LOG_PREFIX, MAX_REPORTS, NAME, SETTLED, STATE_DIR, TERMINAL_REPORT, VERSION,
+  AUTO, DEFAULTS, LOG_PREFIX, MAX_REPORTS, NAME, SETTLED, STATE_DIR, TERMINAL_REPORT, VERSION,
   newTaskId, nextMessageId, now,
 } from './constants.js'
 import { workerPrompt } from './prompt.js'
 import { SessionGateway } from './sessions.js'
 import { readState, writeState } from './store.js'
 import { TaskTable, clip, lastAssistantText, oneLine } from './tasks.js'
-import { WorkspaceGateway, dayKey } from './workspaces.js'
+import { WorkspaceGateway, dayKey, rankWorkspaces } from './workspaces.js'
 
 export class Dispatch {
   /**
@@ -61,9 +61,13 @@ export class Dispatch {
 
   /**
    * 设置或清除一个会话的派发目标工作区。
+   *
+   * 传 `'auto'` 表示「自动」：不锁定具体工作区，每次派发时按任务标题重新挑一个。
+   * 这是默认行为，也是「刷新列表」旁边那条「自动选择」要写进去的值。
+   *
    * @param {string} sessionId 主会话 id
-   * @param {string} ref 工作区 id / 路径 / 标题；空字符串表示清除
-   * @returns {Promise<object | undefined>} 解析后的目标，清除时为 undefined
+   * @param {string} ref 工作区 id / 路径 / 标题 / `'auto'`；空字符串表示清除（跟随会话目录）
+   * @returns {Promise<object | undefined>} 解析后的目标；清除时为 undefined
    */
   async setTarget(sessionId, ref) {
     const value = String(ref ?? '').trim()
@@ -71,6 +75,12 @@ export class Dispatch {
       this.targets.delete(sessionId)
       this.schedulePersist()
       return undefined
+    }
+    if (value.toLowerCase() === AUTO) {
+      const target = { auto: true, title: '自动选择', path: '' }
+      this.targets.set(sessionId, target)
+      this.schedulePersist()
+      return target
     }
     const workspace = await this.workspaces.resolve(value)
     if (!workspace) {
@@ -81,6 +91,20 @@ export class Dispatch {
     this.targets.set(sessionId, target)
     this.schedulePersist()
     return target
+  }
+
+  /**
+   * 按任务标题自动挑一个工作区。
+   * 优先用任务的 `title + brief` 前 200 字做关键词；挑不到就退回默认工作区。
+   * @returns {Promise<object | undefined>}
+   */
+  async autoWorkspace(task) {
+    const haystack = `${task.title ?? ''} ${String(task.brief ?? '').slice(0, 200)}`
+    const ranked = rankWorkspaces(this.workspaces.list(), haystack)
+    // 只有分数足够高才算命中，避免路径里沾一个字就被误判。
+    const hit = ranked.find(entry => entry.score >= 40)
+    const picked = hit?.item ?? this.defaultWorkspace ?? (await this.workspaces.defaultWorkspace())
+    return picked ?? undefined
   }
 
   /**
@@ -95,9 +119,11 @@ export class Dispatch {
       throw new Error(`本会话已派发 ${existing.length} 个任务，达到上限 ${this.config.maxTasksPerSession}；请先收束旧任务`)
     }
 
-    // 显式 workspace 优先；否则用输入框里选的「派发目标工作区」（如果有）。
+    // 显式 workspace 优先；否则看输入框里选的「派发目标工作区」。
+    // 目标是 auto 时不锁定具体工作区：等任务标题/简报就位后再挑（见下面的 autoTarget）。
     const sticky = this.targetFor(agent.id)
-    const ref = input.workspace ?? sticky?.workspace_id
+    const autoTarget = !input.workspace && sticky?.auto === true
+    const ref = input.workspace ?? (autoTarget ? undefined : sticky?.workspace_id)
     let target
     if (ref) {
       // 只有显式指定时才允许按需新建；来自选择器的目标失效则忽略，避免凭空建目录。
@@ -117,10 +143,22 @@ export class Dispatch {
     }
 
     const id = newTaskId()
+    const title = oneLine(input.title, 120) || '未命名任务'
+    const brief = String(input.brief ?? '')
+
+    // 目标是「自动」：等标题与简报就位后再挑，挑不到就退回默认工作区。
+    if (autoTarget && !target) {
+      const picked = await this.autoWorkspace({ title, brief })
+      if (picked) {
+        target = picked
+        this.log(`${LOG_PREFIX} 自动选择工作区 → %s（%s）`, picked.title, picked.path)
+      }
+    }
+
     const task = {
       id,
-      title: oneLine(input.title, 120) || '未命名任务',
-      brief: String(input.brief ?? ''),
+      title,
+      brief,
       parentSessionId: agent.id,
       workerSessionId: `dispatch-${id}`,
       status: 'queued',
@@ -135,6 +173,7 @@ export class Dispatch {
       cwd: target?.path ?? this.sessions.cwdFor(agent, input.cwd),
       workspaceId: target?.id,
       workspaceTitle: target?.title,
+      ...(autoTarget ? { workspaceAuto: true } : {}),
       ...(input.group ? { group: input.group } : {}),
       model: input.model,
       agentPreset: input.agentPreset,
