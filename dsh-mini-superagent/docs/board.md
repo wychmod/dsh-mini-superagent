@@ -85,8 +85,25 @@
 | POST | `/dsh-mini-superagent/board/retry` | body `{"task_id":"t-..."}`，重试任务 |
 | POST | `/dsh-mini-superagent/board/archive` | 无 body，立即跑一次归档巡检 |
 | POST | `/dsh-mini-superagent/board/target` | body `{"session_id":"session-...","workspace":"id/路径/标题或空串"}`，设置/清除派发目标 |
+| GET | `/dsh-mini-superagent/board/selfcheck` | 诊断：宿主侧能力、工作区、默认主会话、`client.inGraph` / `client.ready`、启动图模块列表 |
+| POST | `/dsh-mini-superagent/board/client-ready` | 浏览器半边在 `apply` 末尾自报 `{ok, registered:[...]}`，宿主记进 `client.ready` |
 
 请求体上限 64 KiB，必须是合法 JSON（`/archive` 不需要 body）。
+
+### 两个诊断入口
+
+`/selfcheck` 与 `/client-ready` 不是给面板用的，是排查「面板为什么没出现」用的：
+
+| 字段 | 含义 | 怎么读 |
+| --- | --- | --- |
+| `client.inGraph` | 宿主是否把本包的浏览器半边编进了 Web 启动图 | `false` = 面板和输入框控件根本不会加载。`dsh.client` 的解析结果是按 Loader 行缓存在进程内存里的（含否定结论），**必须重启宿主**才能刷新。见 `plans/03-client-graph.md` |
+| `client.path` | 编进图时该模块的磁盘路径 | 用来确认装的是哪一份 |
+| `client.ready` | 浏览器半边最近一次 `apply` 自报 | 缺省 = 模块没跑起来或页面还没刷新；`ok:false` = `apply` 抛错了 |
+| `client.bootAt` | 本插件实例的启动时间 | `ready.at` 早于它，说明那是上一次实例留下的陈旧记录 |
+| `client.probes` | 对 `dsh-context` / `dsh-ppt` 等已知正常包的同样探测 | 用来判断探针本身是否可靠：它们都为空才是方法问题 |
+
+`inGraph` 与 `ready` 是两件事：前者＝模块进了图，后者＝它在页面里真的跑起来了。
+两关都过还没有面板，才轮到看槽注册与渲染。
 
 ### GET 快照
 
