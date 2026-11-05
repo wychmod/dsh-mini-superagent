@@ -74,7 +74,14 @@ npm test
 
 # 语法检查
 node --check dsh-mini-superagent/src/index.js
+
+# 对正在运行的宿主拉一遍 HTTP 接口（只读 + 一个可逆写；26 项断言）
+node scripts/http-smoke.mjs
 ```
+
+`scripts/http-smoke.mjs` 会顺带打印 `client.inGraph`：为 `false` 说明宿主还没把本包的
+浏览器半边编进 Web 启动图，面板与输入框控件不会出现（见 [`plans/03-client-graph.md`](plans/03-client-graph.md)
+——这是 `dsh.client` 解析结果的否定缓存，**必须重启宿主**才能刷新）。
 
 约定：
 
