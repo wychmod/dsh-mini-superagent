@@ -2,6 +2,45 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 0.5.1 — 2026-11-06
+
+重启宿主后第一次真机验收时发现并修掉一个会误判「主会话丢了」的 bug。**功能面与 0.5.0 相同。**
+
+### 修复
+
+- **`sessionExists` 调了不存在的方法**：0.5.0 用 `sessionController.inspect(sessionId)` 判断默认主会话是否还在，
+  但 `sessionController` 上根本没有 `inspect`（那是另一个服务的接口），调用直接抛 `TypeError`，
+  被 catch 成「不存在」。后果是每次启动都以为 `mas-lead` 没了，重新 `create` 一遍；
+  而 `selfcheck.lead.exists` 也永远报 `false`，看起来像会话丢了。
+  - 现在改用 `state({sessionId}, signal)`（只读被动状态，不 resume Agent），并以 `list()` 兜底；
+  - 返回 `{exists, error}` 而不是裸 boolean：`inspect`/`state` 抛错的原因不止「不存在」，
+    权限、格式、读写失败都会抛，盲建会覆盖或冲突，所以「查不了」时只记 warn 并跳过创建。
+  - `selfcheck.lead` 增加 `error` 字段，把失败原因暴露出来。
+
+### 验证（真机，重启宿主后）
+
+三层全绿，这是界面侧代码第一次在真实浏览器里被确认加载并执行：
+
+| 层 | 命令 | 结果 |
+| --- | --- | --- |
+| 单元 | `npm test` | **50 pass** |
+| 宿主集成 | `node scripts/http-smoke.mjs http://127.0.0.1:9270` | **26/26** |
+| 客户端离线 | `node scripts/client-smoke.mjs` | **71/71** |
+
+真机证据：
+
+- `client.inGraph = true`，`path` 指向 `dsh-mini-superagent/client/index.js`；
+- `client.ready = {ok: true, registered: ['sidebar.panellist','main','conversation.input.left','@workspace']}`，
+  且 `ready.at` 晚于 `bootAt`（`17:36:27` > `17:36:25`），确认是本次实例的真实自报而非陈旧记录；
+- 槽位注册表实测：`sidebar.panellist` 有 `dsh-mini-superagent.board`（order 60）、
+  `conversation.input.left` 有 `dsh-mini-superagent/target`（order 60）、`main` 有 key `dsh-mini-superagent.board`；
+- 系统提示里出现 `[dsh-mini-superagent 工作方式]` 段，确认 per-session 提示注入生效；
+- 派发到「mini-superagent」工作区的任务，子会话 `Get-Location` 返回该工作区根目录；
+- 磁盘上确认 `mas-lead` 的会话日志（`.dsh/sessions/--…mini-superagent--/mas-lead/session.v4.jsonl.zstd`）存在。
+
+仍未做视觉验收（布局对齐、portal 翻转、深浅主题对比度、`@` 混排观感、草稿 chip 恢复），
+这些需要人看，见 `plans/04-post-restart.md` 的目视清单。
+
 ## 0.5.0 — 2026-11-05
 
 界面侧补齐：看板的归档视图/工作区筛选/跳转会话，输入框的「派发目标」选择器与 `@` 工作区。Host 侧增量是「每个会话的派发目标」与状态文件 v3。

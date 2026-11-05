@@ -505,10 +505,34 @@ export class Dispatch {
     }
   }
 
-  /** 会话是否存在（活着的或已持久化的）。 */
+  /**
+   * 会话是否存在（活着的或已持久化的）。
+   *
+   * 用 `state()` 而不是 `resolveAgent()`：前者只读被动状态，不 resume Agent，
+   * 探测本身不该有副作用。也不要传不存在的方法名——0.5.0 曾经写成 `inspect`
+   * （那是另一个服务的接口），结果永远返回「不存在」，误判成会话丢了。
+   * @returns {Promise<{ exists: boolean, error?: string }>}
+   */
   async sessionExists(sessionId) {
-    try { await this.ctx.sessionController.inspect(sessionId); return true }
-    catch { return false }
+    const controller = this.ctx.sessionController
+    if (!controller) return { exists: false, error: 'sessionController 不可用' }
+    const signal = new AbortController().signal
+    try {
+      if (typeof controller.state === 'function') {
+        await controller.state({ sessionId }, signal)
+        return { exists: true }
+      }
+      // 没有 state 就退回 list 遍历（一次拿到全部可见会话，不激活 Agent）。
+      if (typeof controller.list === 'function') {
+        const value = await controller.list({}, signal)
+        const items = Array.isArray(value?.items) ? value.items : []
+        return { exists: items.some(item => item?.sessionId === sessionId) }
+      }
+      return { exists: false, error: 'sessionController 没有 state 也没有 list' }
+    } catch (error) {
+      const code = error?.code ?? error?.name ?? 'unknown'
+      return { exists: false, error: `${code}: ${String(error?.message ?? error).slice(0, 200)}` }
+    }
   }
 
   /**
@@ -538,8 +562,7 @@ export class Dispatch {
 
     const registry = this.workspaces.registry
     const leadId = String(this.config.leadSessionId || 'mas-lead')
-    let leadExists = false
-    try { leadExists = await this.sessionExists(leadId) } catch { leadExists = false }
+    const leadProbe = await this.sessionExists(leadId)
     return {
       version: VERSION,
       name: NAME,
@@ -580,7 +603,7 @@ export class Dispatch {
           ? { id: this.defaultWorkspace.id, title: this.defaultWorkspace.title, path: this.defaultWorkspace.path }
           : null,
       },
-      lead: { sessionId: leadId, exists: leadExists },
+      lead: { sessionId: leadId, exists: leadProbe.exists, ...(leadProbe.error ? { error: leadProbe.error } : {}) },
       targets: this.targets.size,
       tasks: {
         total: this.table.tasks.size,
@@ -604,7 +627,14 @@ export class Dispatch {
       this.defaultWorkspace = workspace
       const leadId = String(this.config.leadSessionId || 'mas-lead')
       this.leadSessionId = leadId
-      if (await this.sessionExists(leadId)) return
+      const probe = await this.sessionExists(leadId)
+      if (probe.exists) return
+      // 「查不了」不等于「不存在」：inspect 可能因权限/格式/读写失败而抛错，
+      // 这时盲建会覆盖或冲突，所以只记一条警告，交给下一次启动重试。
+      if (probe.error && !/not-found|ENOENT/i.test(probe.error)) {
+        this.warn(`${LOG_PREFIX} 无法确认主会话 %s 是否存在（%s），本次跳过创建`, leadId, probe.error)
+        return
+      }
       await this.ctx.sessionController.create({ sessionId: leadId, workspaceId: workspace.id })
       try { await this.ctx.sessionController.rename({ sessionId: leadId, title: 'mini-superagent 主会话' }) }
       catch { /* 标题非关键 */ }
