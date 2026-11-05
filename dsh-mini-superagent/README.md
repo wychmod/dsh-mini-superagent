@@ -17,6 +17,9 @@ ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直�
 从 0.4.0 起有**工作区**：启动时准备一个默认工作区与固定主会话；每天一个【派发】工作区收拢子会话；
 派发时可以用 `workspace` 指定目标工作区（id / 绝对路径 / 标题）；结束超过保留期的子会话会自动归档。
 
+从 0.5.0 起，看板补了**归档视图 / 工作区筛选 / 批次聚合 / 点行跳会话**；输入框补了**派发目标选择器**与 **`@` 工作区**，
+两者都写「下一次派发到哪」，不改会话归属。
+
 ---
 
 ## 它解决什么
@@ -72,10 +75,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.4.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.5.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 是 `0.4.0` 说明跑的是这一版；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 是 `0.5.0` 说明跑的是这一版；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「任务看板」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
@@ -202,16 +205,18 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 
 **装完/升级后必须刷新一次 GUI 页面**，图标才会出现——客户端模块在页面刷新后加载，插件已激活不影响这一点。
 
-面板从上到下：
+面板从上到下（0.5.0）：
 
-- **顶部指标**：并发 `N/max`、排队、总计、失败（有失败时红字）；右侧「更新于 HH:MM:SS」。
-- **三个过滤 chip**：全部 / 进行中（running + queued）/ 需要处理（failed + interrupted + blocked），各带计数。
-- **任务行**：状态点（只有 running 脉动，`prefers-reduced-motion` 下关闭）、状态文字、标题、**第 N 次**（attempt > 1 才显示）、
-  走表耗时（running 每秒走表，其余用服务端算好的值）、报告摘要首行，以及一个按钮；
-  第二行是 `task_id`、报告数、摘要（悬停标题里带 `cwd` 与 worker 会话 id）。失败任务额外显示一行错误。
-- **占位与提示**：加载中 / 空列表 / 筛选后为空 / 取不到数据（保留上次成功快照并提示）；取消/重试失败用顶部红条显示原因。
-- **按钮**：`running` / `queued` 只给「取消」；`failed` / `interrupted` / `ended` / `blocked` 给「重试」；
-  `done` / `cancelled` 没有按钮。按钮请求期间置灰并显示「取消中…/重试中…」，成功后立即重取快照。
+- **顶部指标**：并发 `N/max`、排队、**总计（= `counts.total − counts.archived`）**、失败（有失败时红字）；右侧「更新于 HH:MM:SS」。
+- **四个过滤 chip**：`全部`（默认，**不含已归档**）/ `进行中`（running + queued）/ `需要处理`（failed + interrupted + blocked）/ `已归档`，各带计数（按当前工作区筛选后计算）。
+- **工作区下拉**：`全部工作区` + 快照 `workspaces`；选中的工作区与状态 chip 取交集。
+- **立即归档**：两步确认（首次点击变「确认归档」，4 秒无操作自动回落），调 `POST /board/archive`，结果用提示条显示扫描/归档/失败数。
+- **任务行**：状态点（只有 running 脉动，`prefers-reduced-motion` 下关闭）、状态文字、标题、`批次` 徽标（`group` 非空）、
+  `第 N 次`（attempt > 1）、`已归档` 徽标与相对时间、走表耗时、取消/重试按钮；
+  第二行是工作区标题（为空显示「跟随会话目录」）、`task_id`、报告数、摘要首行。失败任务额外一行错误，归档失败额外一行「归档失败：…」。
+- **归档行**：整行 0.55 透明度、灰点、无按钮，只出现在「已归档」chip。
+- **点行跳子会话**：整行可点，`Enter`/`Space` 也可以；失败提示「打不开子会话 `<id>`：<原因>」，归档行先提醒但仍尝试打开。
+- **占位与提示**：加载中 / 空列表 / 筛选后为空 / 取不到数据（保留上次成功快照并提示）；取消/重试/归档失败用顶部红条显示原因。
 - **刷新节奏**：页面隐藏时停表并中止在途请求，切回来立刻重取；面板卸载时清掉定时器与所有在途请求。
 - **主题**：颜色全部走 `var(--dsw-alias-*, fallback)`，不写死明暗两套。
 
@@ -222,8 +227,8 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - 原因：插件注册的具名路由排在 DSH 页面鉴权之前。若全放开，把 Web 暴露到局域网时任何人都能读到任务标题、工作目录与报告摘要。
   代价是远程访问只能用同源页面，远程 `curl` 读不到看板。
 
-看板快照从 0.4.0 起还带 `counts.archived` 与 `workspaces`，任务卡带 `workspace_*` / `archived_*` 字段；
-`POST /dsh-mini-superagent/board/archive` 可手动跑一次归档巡检。当前面板代码未改，不显示这些字段，也没有归档按钮。
+看板接口（0.5.0）：`GET /board`、`POST /board/cancel`、`POST /board/retry`、`POST /board/archive`、`POST /board/target`。
+快照带 `workspaces`、`targets`、`counts.archived`，任务卡带 `workspace_*` / `archived_*` / `group`。
 
 **重试语义**（看板按钮，不是新工具）：
 
@@ -277,7 +282,8 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 解析不到且允许新建时：绝对路径直接建在该路径；名字建在 `<workspaceRoot>/<安全目录名>`。
 解析不到且 `create_workspace: false` → 报错并列出已有工作区。
 
-同时给 `workspace` 和 `cwd` 时**工作区路径优先**，`cwd` 被忽略。完全不指定 `workspace` 时沿用调用者的工作目录。
+同时给 `workspace` 和 `cwd` 时**工作区路径优先**，`cwd` 被忽略。完全不指定 `workspace` 时：
+先看输入框里选的「派发目标」（见下一节），没有目标才沿用调用者的工作目录。
 先用 `dispatch_workspaces` 看有哪些工作区。
 
 ### 自动归档
@@ -291,6 +297,33 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - 看板有 `POST /dsh-mini-superagent/board/archive` 可手动跑一次巡检。
 
 细节见 [docs/workspaces.md](docs/workspaces.md)。
+
+---
+
+## 输入框选择派发目标
+
+0.5.0 起，输入框工具行左侧多一个「派发目标」控件（`conversation.input.left`，`id` = `dsh-mini-superagent/target`，`order 60`）。
+
+- 只在**有活跃会话**时渲染；空白/hero 会话看不到。
+- 28px 高、`flex:none`、最大宽度 `min(260px, 45cqw)`；有目标显示 `派发 → <标题>`，没有目标显示 `派发 → 跟随会话`。
+- 下拉用 `createPortal` 挂到 `document.body` + `position: fixed`，优先向上展开、左右夹在视口内；
+  项是「跟随会话目录」/ 全部工作区（带路径与 ✓）/「刷新列表」。
+- 选中立即 `POST /board/target`（空串=清除）；失败把 Host 的中文原因留在下拉里，且不关闭。
+- 快照取不到时控件禁用，`title` 显示「看板服务不可用」；不轮询，挂载与每次打开下拉各取一次。
+- 它改的是**下一次 `dispatch_launch` 的目标**，不是会话归属——DSH 里会话的工作区建完不可迁移。
+
+## `@` 选择工作区
+
+同一个目标还可以在输入框里用 `@` 选：
+
+- 注册在 `inputTriggers` 的 `@` 触发下，`name: workspace`、`order: 40`，与官方 `@reference` 并存；候选分组「工作区」。
+- 选中后**同时**做两件事：`POST /board/target` 设目标 + 往草稿插 chip。
+- 模型看到的文本是 `<workspace id="ws-2" title="副工作区"/>`；剪贴板文本是 `@副工作区`。
+- chip 的 `appearance` 故意省略：宿主只认 `session`/`file`/`folder`，传别的会让整条草稿恢复时被清空。
+  也因为没有「只插纯文本」的返回形态，**`@中文名` 纯文本不可行**，选中一定产生 chip。
+- `inputTriggers` 服务缺席时 `@` 不出现；看板与选择器照常工作。
+
+完整契约、失败降级与限制见 [docs/composer.md](docs/composer.md)。
 
 ---
 
@@ -322,7 +355,8 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 ## 落盘与重启
 
 - 任务表在 `<stateDir>/tasks.json`（默认 `$DSH_HOME/dsh-mini-superagent/tasks.json`），UTF-8，覆盖写，800ms 防抖。
-- 文件结构 `{version: 2, savedAt, tasks: [...]}`；读取时不强校验版本，坏文件只记日志、不阻止插件启动。
+- 文件结构 `{version: 3, savedAt, tasks: [...], targets: {...}}`；读取时不强校验版本，坏文件只记日志、不阻止插件启动。
+  旧文件没有 `targets` 时按空处理。
 - 插件重启后读回历史任务；进程之间没有活的 worker，所以**未结算的一律标 `interrupted`**，不假装还活着。
 - 子会话本身是普通 DSH Session，内容由 DSH 自己持久化，在侧边栏里可以直接打开。
 - 每个任务最多保留 50 条报告；简报落盘时截到 2000 字符（完整简报在 worker 首条消息里）。
@@ -358,9 +392,12 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 - **工作区目录必须可写**：`workspaceRegistry.create` 要求目录已存在，插件会先 `mkdir`；目录不可写时默认工作区创建失败（只记日志），
   显式指定 `workspace` 的派发会直接报错。没有 `workspaceRegistry` 时，`day` 模式退化为按任务 cwd 建会话。
 - **`workspace` 优先于 `cwd`**：两者同时给时，任务工作目录取工作区路径，`cwd` 被忽略。
-- **未指定 `workspace` 时**：工作目录沿用调用者（旧行为），但子会话仍挂在当天【派发】工作区（0.3.0 的会话归属是「按目录反查工作区」）。
+- **未指定 `workspace` 时**：先看输入框选的「派发目标」；没有目标才沿用调用者目录。无论哪种，子会话仍挂在当天【派发】工作区。
+- **派发目标 ≠ 会话归属**：输入框的选择器只影响下一次 `dispatch_launch`；DSH 里会话的工作区建完不可迁移。
+- **`@` chip 外观不可定制**：`appearance` 只认 session/file/folder，插件省略它；也因为没有纯文本插入形态，`@中文名` 不可行。
 - **归档只收起会话**：不删目录、不删任务、不删报告；归档失败会每轮巡检重试，失败原因只在看板快照的 `archive_error` 里，`dispatch_list` 看不到。
-- **看板 UI 的浏览器实测缺失**：面板渲染、侧边栏图标位置、明暗对比度、窄宽度截断、轮询暂停都只做了代码审查，未在真实 GUI 里点验（原因见验证记录）。
+- **界面未在真浏览器里跑过**：控件对齐/截断、弹层翻转与边缘夹取、`@` 与官方 `@reference` 混排、chip 刷新后恢复、
+  `openSession` 成功后视图切换、深浅主题对比度、`not-listed` 错误码，全部未验证（见验证记录）。
 
 ---
 
@@ -388,15 +425,26 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 | 工作区自动准备 | 0.4.0 | ✅ `dispatch_workspaces` 返回默认工作区且 `sessions: 1`；磁盘上 `<workspaceRoot>` 已创建 |
 | 子会话住【派发】、活干在目标目录 | 0.4.0 | ✅ 子会话 `Get-Location` 返回目标工作区根（`…\Documents\mini-superagent`），而它的会话挂在【派发】工作区下 |
 | 自动归档 | 0.4.0 | ✅ 临时 `archiveAfterHours=0.001` / `archiveSweepMinutes=0.05`，约 20 秒后 4 个任务归档（`counts.archived: 4`）；`POST /board/archive` 200，再次调用返回 `scanned: 0`；配置已改回 24h / 10min |
+| 看板 UI：归档视图 / 工作区筛选 / 批次聚合 / 跳转会话 | 0.5.0 | ⚠️ 仅代码审查；接口与快照由单测覆盖，浏览器渲染未验证 |
+| 输入框派发目标选择器、`@` 工作区 | 0.5.0 | ⚠️ 仅代码审查；`/board/target` 与 `targets` 快照有单测覆盖，界面未验证 |
+| 全量单测（`npm test`） | 0.5.0 | ✅ 50 pass / 0 fail（tasks 13 + board 26 + workspaces 11） |
 
 0.2.0 那组最后一条（并发排队）同时是修复验证：0.1.0 只在派发与插件加载时推进队列，结算后不会补 `pump()`，
 并发位满时后面的任务会一直 `queued`。这个问题是整理代码时被测出来的，修法与依据见 [docs/architecture.md](docs/architecture.md) 的「pump 的触发点」。
 
-0.4.0 的全量单测是 **43 pass / 0 fail**（`tasks.test.js` 13 + `board.test.js` 19 + `workspaces.test.js` 11）。
+0.4.0 的全量单测是 43 pass（13 + 19 + 11）；0.5.0 起是 50 pass（board 新增 7 个用例）。
 
-**未实测**（0.3.0）：看板在浏览器里的实际渲染——侧边栏图标位置、点击切换、明暗对比度、窄宽度截断、面板高度、轮询暂停。
-原因：客户端模块要在页面刷新后才会加载，而 GUI 页面有鉴权，无法代刷；接口层与快照形状已被上面两条实测与 19 个用例覆盖。
-读者只需知道：**装完/更新后刷新一次 GUI 页面**。
+**未实测（0.5.0，界面一次性都没跑过）**：客户端模块要页面重载才挂载，本轮只做了代码审查 + Host 单测。不能断言：
+
+- 控件在真实工具行里的对齐、换行与截断（28px 高、`min(260px, 45cqw)` 只是 CSS 声明）；
+- 弹层向上/向下翻转与左右边缘夹取的实际观感；
+- `@` 候选与官方 `@reference` 混排时的分组、排序与视觉一致性；
+- chip 在页面刷新后能否从草稿恢复；
+- `openSession` 成功后视图是否真的切过去；
+- 深浅主题下的对比度；
+- `not-listed` 的真实错误码与错误文本。
+
+装完/更新后需要刷新一次 GUI 页面，看板、选择器与 `@` 才会挂载。
 
 `test/tasks.test.js` 覆盖任务表纯逻辑，`test/board.test.js` 覆盖快照与路由（用假的 req/res，不需要起 HTTP 服务），
 `test/workspaces.test.js` 覆盖日期键、安全目录名、根目录与工作区解析顺序（用假注册表）；它们都不是端到端实测的替代。
@@ -411,9 +459,10 @@ worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简�
 | [docs/architecture.md](docs/architecture.md) | 模块职责、数据流、设计取舍与依据 |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 排障表、日志前缀与恢复动作 |
 | [docs/workspaces.md](docs/workspaces.md) | 工作区模型、目录约定、解析规则、自动归档、限制与排障 |
-| [docs/board.md](docs/board.md) | 任务看板：入口、面板结构、HTTP 接口、重试语义、鉴权、已知限制 |
+| [docs/board.md](docs/board.md) | 任务看板：入口、面板结构、HTTP 接口、归档/工作区视图、跳转、重试、鉴权 |
+| [docs/composer.md](docs/composer.md) | 输入框：派发目标选择器、`@` 工作区、chip 契约与降级、未验证清单 |
 | [docs/api-contracts.md](docs/api-contracts.md) | DSH 主机 API 契约取证（消息/Agent/事件/会话控制器/工具作用域） |
-| [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0、0.4.0 的差异 |
+| [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0、0.4.0、0.5.0 的差异 |
 
 ---
 
@@ -431,14 +480,14 @@ dsh-mini-superagent/
     sessions.js       # DSH 适配：建会话、取 Agent、权限预设、提示注入、投递、切工作目录
     prompt.js         # 给模型的文本：工作方式提示 + worker 首条简报
     tools.js          # 9 个工具定义
-    dispatch.js       # Dispatch 服务：launch/pump/settle/start/report/relay/message/cancel/retry/归档
+    dispatch.js       # Dispatch 服务：launch/pump/settle/start/report/relay/message/cancel/retry/归档/targets
     board.js          # 看板 Host 半边：快照 + GET/POST 路由 + 同源校验
     workspaces.js     # 工作区：根/日期/安全目录名/解析/按需新建/归档
   client/
-    index.js          # 浏览器半边：侧边栏图标 + 主面板（不打包、不编译）
+    index.js          # 浏览器半边：侧边栏图标 + 主面板 + 输入框选择器 + @ 工作区（不打包、不编译）
   test/
     tasks.test.js     # TaskTable 单测（13）
-    board.test.js     # 快照与路由单测（19）
+    board.test.js     # 快照与路由单测（26）
     workspaces.test.js  # 工作区纯逻辑与解析顺序单测（11）
   locale/{zh,en}.json # 管理面板里的标题与描述
   icon.svg
@@ -448,7 +497,8 @@ dsh-mini-superagent/
     tools.md          # 9 个工具的参数/返回/错误
     troubleshooting.md  # 排障表与日志前缀
     workspaces.md     # 工作区模型、解析、归档
-    board.md          # 任务看板：面板、接口、重试、鉴权
+    board.md          # 任务看板：面板、接口、归档/工作区视图
+    composer.md       # 输入框派发目标与 @ 工作区
     api-contracts.md  # DSH 主机 API 契约取证
   CHANGELOG.md
 ```

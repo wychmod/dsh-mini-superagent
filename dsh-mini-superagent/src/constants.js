@@ -7,7 +7,7 @@
 export const NAME = 'dsh-mini-superagent'
 
 /** 插件版本，会出现在 dispatch_list 与看板快照里，便于确认“跑的是哪一版”。 */
-export const VERSION = '0.4.0'
+export const VERSION = '0.5.0'
 
 /** 日志前缀。 */
 export const LOG_PREFIX = `${NAME}:`

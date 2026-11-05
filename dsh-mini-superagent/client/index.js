@@ -23,6 +23,19 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
+    /**
+     * 弹层要挂到 document.body（输入框在层叠上下文里，内联绝对定位会被裁）。
+     * react-dom 是应用自带的同一份实例（已装插件如 dsh-free-search / better-sidebar 都这么用）；
+     * 万一取不到，下拉退化为不可用，控件本身仍然渲染。
+     */
+    let createPortal = null
+    try {
+      const ReactDOM = require('react-dom')
+      if (ReactDOM && typeof ReactDOM.createPortal === 'function') createPortal = ReactDOM.createPortal
+    } catch (error) {
+      createPortal = null
+    }
+
     /* ───────────────────────── 常量 ───────────────────────── */
 
     /** 侧边栏图标 id，同时是主面板的 key —— 两者必须完全一致，点图标才会切到这个面板。 */
@@ -98,6 +111,17 @@ window.__ModuleLoader__.load({
       minutesAgo: '{n} 分钟前',
       hoursAgo: '{n} 小时前',
       daysAgo: '{n} 天前',
+      targetPrefix: '派发',
+      targetFollow: '跟随会话',
+      targetMenuFollow: '跟随会话目录',
+      targetLabel: '派发目标工作区',
+      targetUnavailable: '看板服务不可用',
+      targetLoading: '读取中…',
+      targetMenuRefresh: '刷新列表',
+      targetMenuEmpty: '没有可用的工作区',
+      targetSetFailed: '设置派发目标失败：{reason}',
+      targetPortalUnavailable: '弹层不可用',
+      targetSection: '工作区',
     }
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
@@ -160,6 +184,17 @@ window.__ModuleLoader__.load({
       minutesAgo: '{n} min ago',
       hoursAgo: '{n} h ago',
       daysAgo: '{n} d ago',
+      targetPrefix: 'Dispatch',
+      targetFollow: 'follow session',
+      targetMenuFollow: 'Follow session cwd',
+      targetLabel: 'Dispatch target workspace',
+      targetUnavailable: 'Board service unavailable',
+      targetLoading: 'Loading…',
+      targetMenuRefresh: 'Refresh list',
+      targetMenuEmpty: 'No workspaces available',
+      targetSetFailed: 'Could not set the dispatch target: {reason}',
+      targetPortalUnavailable: 'Menu unavailable',
+      targetSection: 'Workspaces',
     }
 
     /** 当前翻译函数；attachLocale 成功后会替换成 locale 绑定的 t()。 */
@@ -420,6 +455,87 @@ window.__ModuleLoader__.load({
         throw failure
       }
       return payload
+    }
+
+    /* ───────────────── 派发目标：与输入框控件、@ 候选共用的数据层 ───────────────── */
+
+    /** 快照缓存时长：@ 候选每敲一个字都会问一次，没必要每次拉全量任务。 */
+    const SNAPSHOT_CACHE_MS = 10000
+    /** 下拉宽度下限（跟模型选择器一档，宽度自适应但不撑满）。 */
+    const MENU_MIN_WIDTH = 220
+    /** 下拉宽度上限。 */
+    const MENU_MAX_WIDTH = 340
+
+    /** 最近一次看板快照（仅用于 @ 候选的短缓存）。 */
+    let snapshotCache = { at: 0, data: null }
+    /** 工作区 id → 标题，chip 的 codec.serialize 只能拿到 ref，用它还原人能读的名字。 */
+    const workspaceTitles = new Map()
+
+    /**
+     * 读看板快照（输入框控件与 @ 候选共用）。
+     * allowCache=true 时 10 秒内复用上一次结果；控件打开下拉时强制取新的 target。
+     */
+    async function readSnapshot(signal, allowCache) {
+      const startedAt = Date.now()
+      if (allowCache && snapshotCache.data && startedAt - snapshotCache.at < SNAPSHOT_CACHE_MS) {
+        return snapshotCache.data
+      }
+      const response = await fetch(API, {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal,
+      })
+      if (!response.ok) throw new Error(tr('httpError') + ' HTTP ' + response.status)
+      let data
+      try {
+        data = await response.json()
+      } catch (error) {
+        throw new Error(tr('badResponse'))
+      }
+      if (!data || typeof data !== 'object') throw new Error(tr('badResponse'))
+      snapshotCache = { at: startedAt, data }
+      return data
+    }
+
+    /** 从快照里取某个会话当前的派发目标；没有就返回 null（= 跟随会话目录）。 */
+    function pickTarget(data, sessionId) {
+      if (!data || !data.targets || typeof data.targets !== 'object') return null
+      const entry = data.targets[sessionId]
+      if (!entry || typeof entry !== 'object') return null
+      const id = typeof entry.workspace_id === 'string' ? entry.workspace_id : ''
+      const title = typeof entry.title === 'string' ? entry.title : ''
+      if (!id && !title) return null
+      return { workspace_id: id, title: title || id, path: typeof entry.path === 'string' ? entry.path : '' }
+    }
+
+    /** 从快照里取工作区注册表。 */
+    function pickWorkspaces(data) {
+      if (!data || !Array.isArray(data.workspaces)) return []
+      return data.workspaces.filter(function (item) {
+        return item && typeof item === 'object' && typeof item.id === 'string' && item.id
+      })
+    }
+
+    /** 设置/清除派发目标。workspace 传空串表示清除。 */
+    async function setDispatchTarget(sessionId, workspace, signal) {
+      const payload = await postJson('/target', {
+        session_id: sessionId,
+        workspace: workspace === undefined || workspace === null ? '' : String(workspace),
+      }, signal)
+      const next = payload && payload.target && typeof payload.target === 'object' ? payload.target : null
+      return next
+    }
+
+    /** 目标变更广播：@ 选中之后，输入框里的控件也要跟着刷新，不能两个入口各说各话。 */
+    const targetBus = {
+      listeners: new Set(),
+      emit() {
+        for (const listener of this.listeners) {
+          try { listener() } catch (error) { /* 单个监听器出错不影响其它 */ }
+        }
+      },
     }
 
     /* ───────────────────────── 样式 ───────────────────────── */
@@ -713,6 +829,534 @@ window.__ModuleLoader__.load({
   .dsh-sa-dot-pulse { animation: none; }
 }
 `
+
+    /* ───────────────── 输入框「派发目标」控件 ───────────────── */
+
+    /** 只在这个控件挂载期间存在的样式。 */
+    const PICKER_STYLE = `
+.dsh-sa-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 28px;
+  max-width: min(260px, 45cqw);
+  padding: 0 8px;
+  border-radius: var(--dsw-radius-sm, 6px);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12, 12px);
+  cursor: pointer;
+  transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+}
+.dsh-sa-target:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.dsh-sa-target:disabled { opacity: .6; cursor: default; }
+.dsh-sa-target[aria-expanded="true"] {
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.dsh-sa-target:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 1px;
+}
+.dsh-sa-target-icon {
+  display: inline-flex;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-target[data-targeted="true"] .dsh-sa-target-icon { color: var(--dsw-alias-brand-primary, #4d6bfe); }
+.dsh-sa-target-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-sa-target-caret {
+  display: inline-flex;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-menu {
+  position: fixed;
+  z-index: 1100;
+  box-sizing: border-box;
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  padding: 6px;
+  border-radius: var(--dsw-radius-md, 8px);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.28));
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  box-shadow: var(--dsw-shadow-lv2, 0 10px 30px rgba(0,0,0,.18));
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: var(--dsw-font-xxs-12, 12px);
+}
+.dsh-sa-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-sa-menu-item:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); }
+.dsh-sa-menu-item:disabled { opacity: .55; cursor: default; }
+.dsh-sa-menu-item:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: -2px;
+}
+.dsh-sa-menu-item[aria-checked="true"] { color: var(--dsw-alias-brand-primary, #4d6bfe); }
+.dsh-sa-menu-check {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-menu-item[aria-checked="true"] .dsh-sa-menu-check { color: inherit; }
+.dsh-sa-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-sa-menu-path {
+  margin-left: auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-size: var(--dsw-font-xxxs-11, 11px);
+}
+.dsh-sa-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--dsw-alias-border-l1, rgba(127,127,127,.22));
+}
+.dsh-sa-menu-note {
+  padding: 6px 8px;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-menu-error {
+  padding: 6px 8px;
+  color: var(--dsw-alias-state-error-primary, #dc2626);
+}
+`
+
+    /** 触发器左侧的圆点：有目标实心，跟随会话时空心。 */
+    function TargetDot(props) {
+      return h(
+        'svg',
+        {
+          width: 12,
+          height: 12,
+          viewBox: '0 0 12 12',
+          'aria-hidden': 'true',
+          focusable: 'false',
+          style: { flex: 'none', display: 'block' },
+        },
+        h('circle', {
+          cx: 6,
+          cy: 6,
+          r: 3.4,
+          fill: props.on ? 'currentColor' : 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+          opacity: props.on ? 1 : 0.7,
+        }),
+      )
+    }
+
+    /** 下拉指示箭头。 */
+    function TargetCaret() {
+      return h(
+        'svg',
+        {
+          width: 10,
+          height: 10,
+          viewBox: '0 0 12 12',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': 'true',
+          focusable: 'false',
+          style: { flex: 'none', display: 'block', opacity: 0.7 },
+        },
+        h('path', { d: 'M2.5 4.5 6 8l3.5-3.5' }),
+      )
+    }
+
+    /** 下拉里的一行。 */
+    function TargetRow(props) {
+      return h(
+        'button',
+        {
+          type: 'button',
+          role: 'menuitemradio',
+          'aria-checked': props.checked === true,
+          className: 'dsh-sa-menu-item',
+          disabled: props.disabled === true,
+          title: props.description ? props.label + '\n' + props.description : props.label,
+          onClick: props.onPick,
+        },
+        h('span', { className: 'dsh-sa-menu-check', 'aria-hidden': 'true' }, props.checked ? '✓' : (props.icon || '')),
+        h('span', { className: 'dsh-sa-menu-label' }, props.label),
+        props.description ? h('span', { className: 'dsh-sa-menu-path' }, props.description) : null,
+      )
+    }
+
+    /**
+     * 「这次派发到哪个工作区」控件（conversation.input.left）。
+     *
+     * 语义提醒：它改的是派发目标，不是会话归属 —— DSH 里会话的工作区建完不可迁移，
+     * 所以这个控件永远只影响下一次 dispatch_launch。
+     *
+     * 数据：挂载时取一次快照（拿当前 target 与 workspaces），每次打开下拉再取一次；
+     * 不做轮询。取不到时控件禁用并显示「派发 → 跟随会话」。
+     */
+    function TargetPicker(props) {
+      const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
+      const portalReady = typeof createPortal === 'function'
+      const [status, setStatus] = useState('loading')
+      const [target, setTarget] = useState(null)
+      const [workspaces, setWorkspaces] = useState([])
+      const [open, setOpen] = useState(false)
+      const [menuError, setMenuError] = useState(null)
+      const [saving, setSaving] = useState(false)
+      const [anchor, setAnchor] = useState(null)
+      const [reloadKey, setReloadKey] = useState(0)
+
+      const triggerRef = useRef(null)
+      const menuRef = useRef(null)
+      const inflight = useRef(null)
+      if (inflight.current === null) inflight.current = new Set()
+
+      /* 取当前目标与工作区；reloadKey 由打开下拉、刷新、@ 选中（targetBus）推进。 */
+      useEffect(function () {
+        if (!sessionId) return undefined
+        let disposed = false
+        const controller = new AbortController()
+        inflight.current.add(controller)
+        readSnapshot(controller.signal, false).then(function (data) {
+          if (disposed || controller.signal.aborted) return
+          setWorkspaces(pickWorkspaces(data))
+          setTarget(pickTarget(data, sessionId))
+          setStatus('ready')
+        }).catch(function (error) {
+          if (disposed || controller.signal.aborted || (error && error.name === 'AbortError')) return
+          setStatus('error')
+        }).finally(function () {
+          inflight.current.delete(controller)
+        })
+        const bump = function () {
+          if (!disposed) setReloadKey(function (value) { return value + 1 })
+        }
+        targetBus.listeners.add(bump)
+        return function () {
+          disposed = true
+          controller.abort()
+          targetBus.listeners.delete(bump)
+        }
+      }, [sessionId, reloadKey])
+
+      /* 下拉的 document 监听：点外面关、Esc 关并回到触发器。 */
+      useEffect(function () {
+        if (!open) return undefined
+        function onPointerDown(event) {
+          const trigger = triggerRef.current
+          const menu = menuRef.current
+          const node = event.target
+          if (trigger && trigger.contains(node)) return
+          if (menu && menu.contains(node)) return
+          setOpen(false)
+        }
+        function onKeyDown(event) {
+          if (event.key !== 'Escape') return
+          setOpen(false)
+          const trigger = triggerRef.current
+          if (trigger && typeof trigger.focus === 'function') trigger.focus()
+        }
+        document.addEventListener('mousedown', onPointerDown, true)
+        document.addEventListener('keydown', onKeyDown, true)
+        const cleanup = function () {
+          document.removeEventListener('mousedown', onPointerDown, true)
+          document.removeEventListener('keydown', onKeyDown, true)
+        }
+        activePickerCleanup = cleanup
+        return function () {
+          cleanup()
+          if (activePickerCleanup === cleanup) activePickerCleanup = null
+        }
+      }, [open])
+
+      /* 定位：贴触发器、优先向上展开（输入框本来就在屏幕底部），左右夹在视口内。 */
+      useEffect(function () {
+        if (!open) return undefined
+        function place() {
+          const node = triggerRef.current
+          if (!node || typeof window === 'undefined') return
+          const rect = node.getBoundingClientRect()
+          const width = Math.max(MENU_MIN_WIDTH, Math.min(Math.max(rect.width, MENU_MIN_WIDTH), MENU_MAX_WIDTH))
+          const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))
+          const estimated = menuRef.current ? menuRef.current.offsetHeight : 280
+          const above = rect.top > estimated + 12
+          setAnchor({
+            left: left,
+            width: width,
+            top: above ? null : rect.bottom + 6,
+            bottom: above ? window.innerHeight - rect.top + 6 : null,
+          })
+        }
+        place()
+        window.addEventListener('resize', place)
+        window.addEventListener('scroll', place, true)
+        return function () {
+          window.removeEventListener('resize', place)
+          window.removeEventListener('scroll', place, true)
+        }
+      }, [open, workspaces.length, menuError])
+
+      /** 选中一项：立即 POST，成功后更新本地状态并关下拉；失败把 Host 的中文原因留在下拉里。 */
+      async function choose(workspace) {
+        if (!sessionId || saving) return
+        setSaving(true)
+        setMenuError(null)
+        const controller = new AbortController()
+        inflight.current.add(controller)
+        try {
+          const next = await setDispatchTarget(sessionId, workspace, controller.signal)
+          setTarget(next)
+          setStatus('ready')
+          setOpen(false)
+          targetBus.emit()
+        } catch (error) {
+          if (error && error.name === 'AbortError') return
+          setMenuError(fill(tr('targetSetFailed'), { reason: describeError(error) }))
+        } finally {
+          inflight.current.delete(controller)
+          setSaving(false)
+        }
+      }
+
+      function toggle() {
+        if (status === 'error' || !portalReady) return
+        const next = !open
+        setOpen(next)
+        if (next) {
+          setMenuError(null)
+          setReloadKey(function (value) { return value + 1 })
+        }
+      }
+
+      if (!sessionId) return null
+
+      const unavailable = status === 'error'
+      const disabled = unavailable || !portalReady
+      const shown = target && target.title ? target.title : (target && target.workspace_id ? target.workspace_id : '')
+      const text = tr('targetPrefix') + ' → ' + (shown || tr('targetFollow'))
+      const triggerTitle = unavailable
+        ? tr('targetUnavailable')
+        : !portalReady
+          ? tr('targetPortalUnavailable')
+          : (shown || tr('targetFollow')) + (target && target.path ? '\n' + target.path : '')
+
+      const rows = []
+      if (open) {
+        rows.push(h(TargetRow, {
+          key: 'follow',
+          checked: !target,
+          label: tr('targetMenuFollow'),
+          onPick: function () { void choose('') },
+        }))
+        rows.push(h('div', { key: 'sep-1', className: 'dsh-sa-menu-sep', role: 'separator' }))
+        if (status === 'loading') {
+          rows.push(h('div', { key: 'loading', className: 'dsh-sa-menu-note' }, tr('targetLoading')))
+        }
+        for (const workspace of workspaces) {
+          rows.push(h(TargetRow, {
+            key: workspace.id,
+            checked: Boolean(target && target.workspace_id === workspace.id),
+            label: workspace.title || workspace.id,
+            description: typeof workspace.path === 'string' ? workspace.path : '',
+            disabled: saving,
+            onPick: function () { void choose(workspace.id) },
+          }))
+        }
+        if (status === 'ready' && workspaces.length === 0) {
+          rows.push(h('div', { key: 'empty', className: 'dsh-sa-menu-note' }, tr('targetMenuEmpty')))
+        }
+        if (menuError) {
+          rows.push(h('div', { key: 'error', className: 'dsh-sa-menu-error', role: 'alert' }, menuError))
+        }
+        rows.push(h('div', { key: 'sep-2', className: 'dsh-sa-menu-sep', role: 'separator' }))
+        rows.push(h(TargetRow, {
+          key: 'refresh',
+          label: tr('targetMenuRefresh'),
+          icon: '↻',
+          disabled: saving,
+          onPick: function () {
+            setMenuError(null)
+            setReloadKey(function (value) { return value + 1 })
+          },
+        }))
+      }
+
+      const menu = open
+        ? h(
+            'div',
+            {
+              ref: menuRef,
+              className: 'dsh-sa-menu',
+              role: 'menu',
+              'aria-label': tr('targetLabel'),
+              style: anchor
+                ? {
+                    left: anchor.left + 'px',
+                    width: anchor.width + 'px',
+                    top: anchor.top === null ? undefined : anchor.top + 'px',
+                    bottom: anchor.bottom === null ? undefined : anchor.bottom + 'px',
+                  }
+                : { left: '-9999px', top: '0px' },
+            },
+            rows,
+          )
+        : null
+
+      return h(
+        React.Fragment,
+        null,
+        h('style', null, PICKER_STYLE),
+        h(
+          'button',
+          {
+            ref: triggerRef,
+            type: 'button',
+            className: 'dsh-sa-target',
+            'data-targeted': shown ? 'true' : 'false',
+            disabled: disabled,
+            title: triggerTitle,
+            'aria-haspopup': 'menu',
+            'aria-expanded': open,
+            'aria-label': tr('targetLabel'),
+            onClick: toggle,
+          },
+          h('span', { className: 'dsh-sa-target-icon' }, h(TargetDot, { on: Boolean(shown) })),
+          h('span', { className: 'dsh-sa-target-text' }, text),
+          h('span', { className: 'dsh-sa-target-caret' }, h(TargetCaret)),
+        ),
+        menu && createPortal ? createPortal(menu, document.body) : null,
+      )
+    }
+
+    /* ───────────────── @ 工作区触发源（可选能力） ───────────────── */
+
+    /**
+     * 注册 @ 工作区触发源。选中即把该工作区设为这个会话的派发目标，同时按官方
+     * insert 路线在草稿里插一个 chip（appearance 省略 → 用 @ 标记渲染，且不会踩
+     * 草稿持久化只认 session/file/folder 的坑）。
+     *
+     * 契约核对自本机 dsh-client-ui-input-trigger/lib/client.js：
+     *   registerSource(src) -> disposer，(trigger,name) 重复会 throw；
+     *   candidates(session, {query, quoted, position, drilled, signal}) -> 行数组；
+     *   行 = {name, label?, description?, icon?, section?, drill?, value}（icon 省略即不画图标）；
+     *   onPick({candidate, session, position, via, action, span}) ->
+     *     {insert:{source, ref, label, appearance?, clipboardText}} | {text, continue?} | 'handled'；
+     *   codec.serialize(ref, signal) 给出模型可见文本；codec.clipboardText(ref) 可选。
+     *
+     * inputTriggers 用 ctx.get 做可选查询：动态 ctx 的 get 不要求 inject 声明，
+     * 取不到返回 undefined，所以这条能力缺席时看板与控件都照常工作。
+     * @returns {boolean} 是否真的注册上了
+     */
+    function registerWorkspaceTrigger(ctx) {
+      let inputTriggers
+      try {
+        inputTriggers = typeof ctx.get === 'function' ? ctx.get('inputTriggers') : undefined
+      } catch (error) {
+        inputTriggers = undefined
+      }
+      if (!inputTriggers || typeof inputTriggers.registerSource !== 'function') return false
+
+      const source = {
+        trigger: '@',
+        name: 'workspace',
+        order: 40,
+        showGroupTitle: false,
+        async candidates(session, request) {
+          const signal = request ? request.signal : undefined
+          let data
+          try {
+            data = await readSnapshot(signal, true)
+          } catch (error) {
+            return []
+          }
+          if (signal && signal.aborted) return []
+          const pool = pickWorkspaces(data)
+          for (const item of pool) workspaceTitles.set(item.id, item.title || item.id)
+          const needle = String(request && request.query ? request.query : '').trim().toLowerCase()
+          const rows = []
+          for (const item of pool) {
+            const title = item.title || item.id
+            const path = typeof item.path === 'string' ? item.path : ''
+            if (needle) {
+              const hay = (title + '\n' + path + '\n' + item.id).toLowerCase()
+              if (!hay.includes(needle)) continue
+            }
+            rows.push({ name: title, description: path, section: tr('targetSection'), value: item.id })
+          }
+          return rows
+        },
+        onPick(pick) {
+          const candidate = pick ? pick.candidate : null
+          const id = candidate && typeof candidate.value === 'string' ? candidate.value : ''
+          if (!id) return undefined
+          const title = typeof candidate.name === 'string' && candidate.name ? candidate.name : id
+          const sessionId = pick && pick.session && typeof pick.session.sessionId === 'string'
+            ? pick.session.sessionId
+            : ''
+          if (sessionId) {
+            // 选中即设目标。菜单马上就关了，失败没有地方挂错误：记日志，并让控件下次取数时显示真实目标。
+            void setDispatchTarget(sessionId, id).then(function () {
+              targetBus.emit()
+            }).catch(function (error) {
+              console.warn('[dsh-mini-superagent] @ 工作区设置派发目标失败：', error && error.message ? error.message : error)
+            })
+          }
+          return {
+            insert: {
+              source: 'workspace',
+              ref: id,
+              label: title,
+              clipboardText: '@' + title,
+            },
+          }
+        },
+        codec: {
+          clipboardText(ref) {
+            return '@' + (workspaceTitles.get(ref) || ref)
+          },
+          serialize(ref) {
+            const title = workspaceTitles.get(ref) || ref
+            const escaped = String(title).replace(/"/g, '&quot;')
+            return Promise.resolve('<workspace id="' + String(ref) + '" title="' + escaped + '"/>')
+          },
+        },
+      }
+
+      ctx.effect(function () {
+        return inputTriggers.registerSource(source)
+      }, 'dsh-mini-superagent: @ workspace source')
+      return true
+    }
 
     /* ───────────────────────── 侧边栏图标 ───────────────────────── */
 
@@ -1329,6 +1973,9 @@ window.__ModuleLoader__.load({
     /** 当前挂载中的面板清理函数；插件卸载时由 ctx.effect 兜底调用。 */
     let activePanelCleanup = null
 
+    /** 输入框控件挂载期间挂上去的 document 监听清理；插件卸载时兜底调用。 */
+    let activePickerCleanup = null
+
     /** 插件 Context；面板用它取 uiWorkspace 打开子会话（取不到时降级为提示，不抛错）。 */
     let appContext = null
 
@@ -1371,6 +2018,33 @@ window.__ModuleLoader__.load({
           key: BOARD_ID,
         }, BoardPanel)
       })
+
+      // 输入框工具行左侧的「派发目标工作区」控件（会话作用域，sessionId 由槽注入）。
+      ctx.slots.inject('conversation.input.left', function () {
+        return ctx.slots.register({
+          name: 'conversation.input.left',
+          id: 'dsh-mini-superagent/target',
+          order: 60,
+          label: '派发目标',
+        }, TargetPicker)
+      })
+
+      // @ 工作区：可选能力。inputTriggers 不在（或没有 registerSource）就安静跳过。
+      try {
+        registerWorkspaceTrigger(ctx)
+      } catch (error) {
+        ctx.logger?.warn?.('%s @ 工作区触发源注册失败: %s', 'dsh-mini-superagent:', String(error))
+      }
+
+      // 插件卸载（含 HMR 换包）时兜底：输入框控件即使没走 React 卸载，也要摘掉 document 监听。
+      ctx.effect(function () {
+        return function () {
+          if (typeof activePickerCleanup === 'function') {
+            try { activePickerCleanup() } catch (error) { /* 清理失败不阻塞卸载 */ }
+            activePickerCleanup = null
+          }
+        }
+      }, 'dsh-mini-superagent: target picker cleanup')
     }
 
     exports.name = name

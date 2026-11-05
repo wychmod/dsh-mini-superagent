@@ -65,8 +65,9 @@ dispatch_launch({ workspace: "某项目", ... })
 实测：子会话里 `Get-Location` 返回 `C:\Users\…\Documents\mini-superagent`（目标工作区根），
 而它的会话挂在【派发】工作区下 —— 两者确实是分开的。
 
-**没有指定 `workspace` 时**：任务 cwd 仍是调用者会话的工作目录（`inheritWorkingDirectory` 或显式 `cwd`），
-但子会话仍然被放进当天【派发】工作区（`day` 模式）。也就是说工作目录的旧行为不变，会话归属从 0.3.0 的「按目录反查工作区」改成了「统一住【派发】」。
+**没有指定 `workspace` 时**：先看输入框里选的「派发目标」（0.5.0，见 [composer.md](composer.md)）；没有目标时任务 cwd 才用调用者会话的工作目录
+（`inheritWorkingDirectory` 或显式 `cwd`）。无论哪种，子会话仍然被放进当天【派发】工作区（`day` 模式）。
+也就是说会话归属从 0.3.0 的「按目录反查工作区」改成了「统一住【派发】」。
 
 ---
 

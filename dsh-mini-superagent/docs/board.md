@@ -1,7 +1,7 @@
 # 任务看板
 
-0.3.0 新增的常驻面板。Host 半边 `src/board.js` 提供快照与三个写操作（取消 / 重试 / 归档），浏览器半边 `client/index.js` 负责渲染。
-两边只通过同源 HTTP 通信，不共享内存、不走 Remote/RPC。
+0.3.0 新增、0.5.0 补齐归档与工作区视图的常驻面板。Host 半边 `src/board.js` 提供快照与四个写操作（取消 / 重试 / 归档 / 派发目标），
+浏览器半边 `client/index.js` 负责渲染。两边只通过同源 HTTP 通信，不共享内存、不走 Remote/RPC。
 
 ---
 
@@ -30,29 +30,40 @@
 
 ```text
 ┌ 并发 2/6   排队 1   总计 7   失败 3          更新于 13:42:07 ┐
-│ [全部 7] [进行中 3] [需要处理 3]                              │
+│ [全部 7] [进行中 3] [需要处理 3] [已归档 2]                    │
+│ [全部工作区 ▾]                              [立即归档]        │
 ├──────────────────────────────────────────────────────────────┤
-│ ● 运行中  重构 auth 模块              第 2 次   3 分 12 秒 [取消]│
-│   t-m0abc-1  报告 2   正在跑集成测试                           │
-│ ● 失败    迁移 billing 表              —        8 秒      [重试]│
-│   t-m0abc-2  报告 1   建会话失败                               │
-│   建会话失败：无法解析子会话 dispatch-t-m0abc-2: session/not-found│
+│ ● 运行中  重构 auth 模块   批次  第 2 次  3 分 12 秒 [取消]      │
+│   项目 A · t-m0abc-1 · 报告 2 · 正在跑集成测试                  │
+│ ○ 已完成  迁移 billing 表         已归档  2 小时前              │
+│   跟随会话目录 · t-m0abc-2 · 报告 1 · 迁移完成                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 - **顶部指标**：`并发 running/max`、`排队`、`总计`、`失败`（有失败时红字），右侧「更新于 HH:MM:SS」。
-  指标来自快照的 `concurrency` 与 `counts`，不是本地累加。
-- **过滤 chip**：全部 / 进行中（`running`+`queued`）/ 需要处理（`failed`+`interrupted`+`blocked`），各带计数。
-  过滤只影响列表，不影响顶部指标。
+  指标来自快照的 `concurrency` 与 `counts`；**「总计」= `counts.total − counts.archived`**（归档只在它自己的 chip 里计数）。
+- **过滤 chip（4 个）**：
+  - `全部`（默认）：`!archived_at`，**不含已归档**；
+  - `进行中`：未归档且 `running`/`queued`；
+  - `需要处理`：未归档且 `failed`/`interrupted`/`blocked`；
+  - `已归档`：`archived_at` 非空。
+  每个 chip 的数字按**当前工作区筛选后**的任务算。
+- **工作区下拉**：`全部工作区` + 快照 `workspaces` 列表；选中后与状态 chip 取交集（先按 `workspace_id` 过滤，再套 chip）。
+- **立即归档**：两步确认。第一次点击进入确认态（按钮变「确认归档」），4 秒内不再点自动回落；确认后
+  `POST /board/archive`，结果用提示条显示「扫描 N，归档 N，失败 N」。
 - **任务行**：
-  - 第一行：状态点、状态文字、标题、`第 N 次`（`attempt > 1` 才显示）、走表耗时、操作按钮。
-  - 第二行：`task_id`、报告数、最近一条报告摘要的首行（没有报告时显示「尚无报告」）。
-  - 失败任务第三行：错误原文。
-  - 悬停标题可看到 `task_id`、`cwd`、`worker_session_id`（放在 `title` 提示里，不占布局）。
+  - 第一行：状态点、状态文字、标题、`批次` 徽标（`group` 非空）、`第 N 次`（`attempt > 1`）、`已归档` 徽标与相对时间、走表耗时、操作按钮。
+  - 第二行：工作区名（`workspace_title`，为空显示「跟随会话目录」）、`task_id`、报告数、报告摘要首行。
+  - 失败任务额外一行错误原文；归档失败额外一行「归档失败：…」。
+  - 悬停标题可看到 `task_id`、`cwd`、`worker_session_id`；可点行再加「点击打开子会话」。
+- **归档行**：整行 0.55 透明度、状态点转灰、无脉动、**没有取消/重试按钮**；相对时间按 `刚刚 / N 分钟前 / N 小时前 / N 天前` 显示。
+- **批次聚合**：`group` 非空的行以该组在服务端底序里第一次出现的位置为锚点，把同组任务整体挪到一起（只改视觉顺序，不动底序）。
+- **跳转会话**：整行可点（`worker_session_id` 非空时），`Enter`/`Space` 同样触发；按钮会吞掉冒泡。
+  成功时不提示；失败显示「打不开子会话 `<id>`：<原因>」；归档行先弹一句「该子会话已归档，可能已不在会话列表里」，但仍然尝试打开。
 - **状态点**：颜色 + 文字双通道，不只靠颜色。只有 `running` 脉动；`prefers-reduced-motion: reduce` 下动画关闭。
 - **耗时**：`queued` 显示「等待中」；`running` 在两次轮询之间每秒走表（服务端 `elapsed_ms` + 本地经过时间）；
   其余状态用服务端算好的值。不足 1 秒按 1 秒显示。
-- **按钮**：`running`/`queued` → 「取消」；`failed`/`interrupted`/`ended`/`blocked` → 「重试」；`done`/`cancelled` 没有按钮。
+- **按钮**：`running`/`queued` → 「取消」；`failed`/`interrupted`/`ended`/`blocked` → 「重试」；`done`/`cancelled`/已归档 没有按钮。
   请求期间按钮置灰并显示「取消中… / 重试中…」，成功后立即重取快照。
 - **占位**：加载中、空列表（提示用 `dispatch_launch` 派发）、筛选后为空、取不到数据（有旧快照时显示「展示的是上一次成功取到的数据」）。
 - **提示条**：取数失败是黄色条（带「重试」按钮）；操作失败是红色条（带「关闭」），显示 Host 返回的中文原因。
@@ -73,6 +84,7 @@
 | POST | `/dsh-mini-superagent/board/cancel` | body `{"task_id":"t-..."}`，取消任务 |
 | POST | `/dsh-mini-superagent/board/retry` | body `{"task_id":"t-..."}`，重试任务 |
 | POST | `/dsh-mini-superagent/board/archive` | 无 body，立即跑一次归档巡检 |
+| POST | `/dsh-mini-superagent/board/target` | body `{"session_id":"session-...","workspace":"id/路径/标题或空串"}`，设置/清除派发目标 |
 
 请求体上限 64 KiB，必须是合法 JSON（`/archive` 不需要 body）。
 
@@ -82,19 +94,21 @@
 
 ```json
 {
-  "version": "0.4.0",
+  "version": "0.5.0",
   "generatedAt": "2026-11-05T10:42:07.000Z",
   "concurrency": { "running": 2, "queued": 1, "max": 6 },
   "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0, "archived": 2 },
   "workspaces": [ { "id": "ws-…", "title": "mini-superagent", "path": "C:\\Users\\…\\Documents\\mini-superagent" } ],
+  "targets": { "session-…": { "workspace_id": "ws-…", "title": "项目 A", "path": "D:\\proj\\a" } },
   "tasks": [ { "task_id": "t-m0abc-1", "…": "…" } ]
 }
 ```
 
 - `counts` 按**全量**任务统计；`archived` 是带 `archivedAt` 的任务数（不是状态）。
-- `workspaces` 是工作区注册表快照（`id` / `title` / `path`），注册表不可用时为空数组；面板当前没有用它渲染分组。
+- `workspaces` 是工作区注册表快照（`id` / `title` / `path`），注册表不可用时为空数组；面板用它做工作区下拉。
+- `targets` 是每个主会话当前的派发目标（`session_id → {workspace_id,title,path}`）；没有目标的会话不出现。
 - `tasks` 最多 200 条；排序：`running` → `queued` → 其余按 `updated_at` 倒序；同权重按 `updated_at` 倒序。
-- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.4.0`）。
+- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.5.0`）。
 
 任务字段（`boardTask` 拍平后的形状）：
 
@@ -132,7 +146,7 @@
 | `400` | 请求 URL 不合法 / body 不是合法 JSON / body 超过 64 KiB | `请求体不是合法 JSON`、`请求体过大` |
 | `403` | GET 非本机且非同一源 / POST 的 `Origin` 与 `Host` 不一致 | `看板只对本机或同源页面开放`、`跨站请求被拒绝` |
 | `404` | `task_id` 不存在 / 未知子路径 | `没有任务 t-xxx`、`未知的看板接口` |
-| `409` | 操作被任务状态拒绝 | `任务 t-xxx 正在运行，不需要重试；要打断它请用取消`、`任务 t-xxx 已被取消；要重新做请派发一个新任务` |
+| `409` | 操作被任务状态拒绝；或 `/target` 找不到工作区 | `任务 t-xxx 正在运行，不需要重试；要打断它请用取消`、`找不到工作区「…」。现有：<标题>（<id>）；…` |
 | `500` | 处理器内部异常 | `看板接口内部错误`（日志里有前缀 `dsh-mini-superagent:` 的 warn） |
 
 `POST /archive` 是例外：它没有 `task_id`，成功固定 `200`：
@@ -145,6 +159,24 @@
 - `archived` / `failed`：本次成功 / 失败数；失败原因记在对应任务的 `archive_error` 上。
 - `counts`：跑完后的最新计数（含 `archived`）。
 - 不会返回 404/409；`403`（跨站）与 `500`（内部异常）规则同其它 POST。
+
+`POST /target` 也不带 `task_id`：
+
+```json
+// 请求
+{ "session_id": "session-…", "workspace": "ws-…" }   // workspace 为空串 = 清除目标
+// 成功
+{ "ok": true, "target": { "workspace_id": "ws-…", "title": "项目 A", "path": "D:\\proj\\a" } }
+// 清除成功
+{ "ok": true, "target": null }
+// 失败
+{ "ok": false, "error": "需要 session_id" }          // 400
+{ "ok": false, "error": "找不到工作区「…」。现有：…（ws-…）；…" }  // 409
+```
+
+- 400：缺 `session_id`（或 URL/JSON 格式错）。
+- 409：`workspace` 解析不到（id / 绝对路径 / 标题都试过）；错误文本带现有工作区候选。
+- 设置成功后写入任务表落盘的 `targets`；`dispatch_launch` 没显式给 `workspace` 时使用它。语义见 [composer.md](composer.md)。
 
 ---
 
@@ -191,10 +223,44 @@
 - 成功记 `archived_at`，失败记 `archive_error`，下一次巡检重试；
 - 看板快照里多出 `counts.archived`，任务卡多出 `archived_at` / `archive_error`；
 - 归档只影响会话列表，任务仍在快照里、`status` 不变；
-- `POST /board/archive` 可手动触发一次巡检。
+- `POST /board/archive` 可手动触发一次巡检；面板顶部的「立即归档」就是它的两步确认版。
 
-当前面板（0.3.0 的 UI 代码）**没有**渲染归档字段，也没有归档按钮；要用就调接口或看快照 JSON。
 归档规则与排障见 [workspaces.md](workspaces.md)。
+
+---
+
+## 已归档视图
+
+0.5.0 起，归档任务从「全部」里移出，只出现在 `已归档` chip：
+
+- `全部`、`进行中`、`需要处理` 都排除 `archived_at` 非空的任务；
+- `已归档` 只显示 `archived_at` 非空的任务；
+- 顶部「总计」= `counts.total − counts.archived`，与「全部」chip 对得上；
+- 归档行整行 0.55 透明度、灰点、无脉动、没有取消/重试按钮，显示 `已归档` 徽标与相对时间；
+- 归档失败的任务额外显示一行「归档失败：<原因>」（来自 `archive_error`），不随归档隐藏。
+
+这样设计的原因：归档是历史，不是「完成」。混在「全部」里会让日常视图被历史淹没，也会让「总计」与列表数量对不上。
+
+## 工作区分组
+
+- 每行第二行显示 `workspace_title`；为 `null` 时显示「跟随会话目录」。
+- 顶部工作区下拉列出「全部工作区」+ 快照 `workspaces` 的标题；选中后先按 `workspace_id` 过滤，再套状态 chip，两者取交集。
+- chip 上的数字按**当前工作区筛选后**的任务计算，不是全量。
+- `group` 非空的任务（`dispatch_launch_many` 派出的批次）带「批次」徽标；渲染时以该组在服务端底序里第一次出现的位置为锚点，
+  把同组行聚到一起。服务端排序骨架（`running` → `queued` → 其余 `updated_at` 倒序）不变，聚合只发生在客户端。
+
+## 跳转会话
+
+- 整行可点（`worker_session_id` 非空时），鼠标点击与 `Enter` / `Space` 都会调
+  `ctx.get('uiWorkspace').openSession(worker_session_id)`。
+- 行内的取消/重试按钮会 `stopPropagation`，不会误触跳转。
+- 失败处理：
+  - `uiWorkspace` 服务不可用 → 「打不开子会话 `<id>`：会话导航服务不可用」；
+  - `openSession` 抛错 → 「打不开子会话 `<id>`：<原因>」；
+  - 任务没有 `worker_session_id` → 「这个任务没有可打开的子会话」。
+- 已归档的行先提示「该子会话已归档，可能已不在会话列表里」，但仍然尝试打开。
+- 成功时清掉上一条失败提示（归档行保留那句归档提醒）。
+- 已知边界：`openSession` 抛 `not-listed`（子会话已不在会话目录）时，展示的是通用错误文本，未针对该错误码做专门文案。
 
 ---
 
@@ -224,18 +290,20 @@
 
 ## 与 agent 工具的关系
 
-- 看板**没有**新增工具；它只是调用 `Dispatch.cancel` / `Dispatch.retry` / `Dispatch.archiveStale`。
-  agent 侧的工具在 0.4.0 是 9 个（多了只读的 `dispatch_workspaces`），但看板本身不提供工具。
+- 看板**没有**新增工具；它调用 `Dispatch.cancel` / `Dispatch.retry` / `Dispatch.archiveStale` / `Dispatch.setTarget`。
+  agent 侧的工具在 0.5.0 是 9 个（多了只读的 `dispatch_workspaces`），但看板本身不提供工具。
 - 看板的「取消」等价于 agent 调 `dispatch_cancel`（状态与并发位语义一致）。
 - 看板的「重试」是给人用的：能恢复就续跑（与 `dispatch_message` 同一条投递路径），不能恢复就新开会话重投简报。
+- 看板的「派发目标」是输入框选择器的数据源；`dispatch_launch` 没显式给 `workspace` 时读它。
 - 主会话要续跑一个任务，仍然用 `dispatch_message`；不要因为看板有按钮就以为多了一个工具。
 
 ---
 
 ## 已知限制
 
-- **浏览器渲染未实测**：侧边栏图标位置、点击切换、明暗对比度、窄宽度截断、面板高度、轮询暂停都只做了代码审查，
-  没有在真实 GUI 里点验（GUI 页面有鉴权，无法代刷）。接口与快照形状有实测和 19 个单测覆盖。
+- **界面未在真浏览器里跑过**：客户端模块要页面重载才挂载，本轮只做了代码审查 + Host 单测。不能断言的有：
+  控件在工具行的实际对齐与截断、弹层翻转与边缘夹取、`@` 与官方 `@reference` 混排观感、chip 刷新后能否从草稿恢复、
+  `openSession` 成功后视图是否真切换、深浅主题对比度、`not-listed` 的真实错误码。
 - **列表上限 200 条**：超出部分不显示，但 `counts.total` 仍是全量；没有分页。
 - **没有历史归档**：来源是内存任务表（重启时从 `tasks.json` 读回），不查库、不查子会话日志。
 - **轮询固定 2 秒**：不可配置；页面隐藏时暂停。
@@ -243,8 +311,8 @@
 - **看板不按会话过滤**：它展示整个实例的任务；agent 侧要按会话看用 `dispatch_list`。
 - **POST 无 Origin 即放行**：见「鉴权与暴露面」，局域网部署要自己控制端口暴露。
 - **重试不做状态回滚**：续跑依赖 worker 自己的历史；它可能重复执行已经做过的步骤。
-- **归档字段只进快照**：`archived_at` / `archive_error` / `counts.archived` 有数据，但当前面板不显示；
-  也没有归档按钮，只能调 `POST /board/archive`。
+- **归档字段现在会渲染，但归档行的历史仍可点**：`openSession` 对已归档会话可能失败（`not-listed`），失败只给通用错误文本。
+- **`targets` 只看主会话**：它是「下一次派发往哪派」的偏好，不是任务属性；任务卡上的 `workspace_id` 只反映任务实际派到哪。
 
 ---
 
@@ -259,5 +327,8 @@
 | 重试后 worker 会话 id 变了 | 正常 | 原会话不可恢复，换了 `dispatch-<taskId>-a<attempt>` |
 | 「第 N 次」一直是 1 | 是否真的点过重试；旧任务是否有 `attempt` | 旧任务缺省 1；重试成功后 +1 |
 | 远程 `curl` 读不到 | 403 是预期 | 用同源页面；或在 Host 本机访问 |
-| `counts.archived` 不涨 | `archiveAfterHours` 是否为 0；任务是否已结算；`updatedAt` 是否够旧 | 调小保留期，或 `POST /board/archive` 手动跑一次 |
+| `counts.archived` 不涨 | `archiveAfterHours` 是否为 0；任务是否已结算；`updatedAt` 是否够旧 | 调小保留期，或点「立即归档」/`POST /board/archive` |
 | `POST /board/archive` 返回 `failed > 0` | 任务卡的 `archive_error`；日志 `归档子会话 … 失败` | 宿主是否支持 `workspaceRegistry.archiveSession`；会话/目录是否还在。失败会在下次巡检重试 |
+| 「全部」chip 数比 `counts.total` 少 | 正常 | 「全部」不含已归档；「总计」与「全部」一致，归档数看「已归档」chip |
+| 点行打不开子会话 | 提示条里的原因；任务卡 `worker_session_id` | 会话导航服务不可用，或子会话已归档/不在会话目录（`not-listed`） |
+| 工作区下拉是空的 | 快照 `workspaces`；工作区注册表 | 先让插件建默认工作区，或检查 `workspaceRegistry`；空列表时下拉只有「全部工作区」 |

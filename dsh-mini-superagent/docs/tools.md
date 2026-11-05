@@ -79,7 +79,8 @@
 
 1. 校验本会话累计派发数，超过 `maxTasksPerSession`（默认 64）抛错。
 2. 给了 `workspace` 就先解析（id → 绝对路径 → 标题精确 → 标题包含）；解析不到且 `create_workspace !== false` 时按需新建，
-   仍失败则抛错并列出已有工作区。任务 `cwd` 取工作区路径；没给 `workspace` 时 `cwd` 沿用调用者目录。
+   仍失败则抛错并列出已有工作区。没给 `workspace` 时用该会话的「派发目标」（输入框选择器/`@` 写入，见 [composer.md](composer.md)）；
+   没有目标才沿用调用者目录。任务 `cwd` 取目标工作区路径。
 3. 生成任务 id 与子会话 id（`dispatch-<task_id>`），登记为 `queued`。
 4. 首次从这个会话派发时，把 `[dsh-mini-superagent 工作方式]` 注入该会话系统提示（只一次）。
 5. `pump()` 有空位就立刻建会话、投递简报、置 `running`；没空位就留在 `queued`。

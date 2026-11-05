@@ -66,19 +66,25 @@ apply()
                             → 成功记 archivedAt，失败记 archiveError（看板快照可见）
 ```
 
-看板是第三条按需链路：
+看板与输入框是第三条按需链路：
 
 ```text
-浏览器面板（client/index.js）
-  │  GET  /dsh-mini-superagent/board          （2s 轮询）
-  │  POST /dsh-mini-superagent/board/cancel   （看板「取消」）
-  │  POST /dsh-mini-superagent/board/retry    （看板「重试」）
-  │  POST /dsh-mini-superagent/board/archive  （手动跑一次归档巡检）
+浏览器侧（client/index.js）
+  ├─ 看板（sidebar.panellist + main）
+  │    GET  /dsh-mini-superagent/board          （2s 轮询）
+  │    POST /dsh-mini-superagent/board/cancel   （看板「取消」）
+  │    POST /dsh-mini-superagent/board/retry    （看板「重试」）
+  │    POST /dsh-mini-superagent/board/archive  （「立即归档」/手动巡检）
+  │    POST /dsh-mini-superagent/board/target   （看板读 targets；选择器与 @ 写）
+  ├─ 派发目标选择器（conversation.input.left）
+  │    GET  /board（挂载 + 每次打开）→ POST /board/target
+  └─ @ 工作区（inputTriggers 的 @ source）
+       GET  /board（10s 缓存）→ POST /board/target + 插入 chip
   ▼
-src/board.js ── boardSnapshot / Dispatch.cancel / Dispatch.retry / Dispatch.archiveStale ──▶ TaskTable
+src/board.js ── boardSnapshot / Dispatch.cancel / retry / archiveStale / setTarget ──▶ TaskTable + targets
 ```
 
-Host 与 Client 不共享内存：Client 只认这 4 个同源 HTTP 端点，Host 把任务表拍平成快照返回。
+Host 与 Client 不共享内存：Client 只认这 5 个同源 HTTP 端点（1 个 GET + 4 个 POST），Host 把任务表与目标表拍平成快照返回。
 
 ## 模块与职责
 
@@ -87,14 +93,14 @@ Host 与 Client 不共享内存：Client 只认这 4 个同源 HTTP 端点，Hos
 | `src/index.js` | 插件入口：建 `Dispatch`、`restore` + `provision`、注册 9 个工具、接宿主事件、注册看板路由、启动归档巡检、`ctx.effect` 清理 | `dispatch` / `tools` / `board` / `constants` | 不含业务逻辑 |
 | `src/constants.js` | 名称、版本、日志前缀、消息来源 kind、提示段名、状态集合、默认配置（含工作区/归档）、任务 id 与消息 id 生成 | 无 | 不读文件、不碰 ctx |
 | `src/tasks.js` | `TaskTable`：并发位、排队、结算、等待者；纯函数 `clip` / `oneLine` / `lastAssistantText` | `constants` | 不做 I/O，不调宿主 API |
-| `src/store.js` | `tasks.json` 读回与覆盖写；`{version, savedAt, tasks}` | Node 内置模块 | 不校验业务字段、不做迁移 |
+| `src/store.js` | `tasks.json` 读回与覆盖写；`{version, savedAt, tasks, targets}`（`version: 3`，缺 `targets` 按空） | Node 内置模块 | 不校验业务字段、不做迁移 |
 | `src/sessions.js` | `SessionGateway`：`freezeMessage` 懒加载、构造插件来源消息、双通道投递、按目录取 cwd、workspace 解析、建子会话、权限预设、系统提示注入、`enterDirectory`（切工作目录） | `constants` / `prompt` | 不管任务状态 |
 | `src/prompt.js` | 给模型看的文本：主会话工作方式提示 `DISPATCH_HINT`、worker 首条消息 `workerPrompt` | `constants` / `tasks` | 不含判断逻辑 |
 | `src/tools.js` | 9 个工具定义（含只读的 `dispatch_workspaces`）、`TOOL_NAMES`、参数 schema、结果卡片拼装、归属校验 | `constants` | 不直接操作会话 |
-| `src/dispatch.js` | `Dispatch`：`launch` / `pump` / `settle` / `start` / `report` / `relay` / `message` / `cancel` / `retry` / `placementFor` / `provision` / `startArchiveSweep` / `archiveStale`、视图 `card` / `detail`、落盘 `persist` / `restore` / `dispose` | 其余全部 | 不直接调 `sessionController` / `agent.*`（走 gateway） |
-| `src/board.js` | 看板 Host 半边：`boardTask` / `boardSnapshot`（拍平、计数、排序、200 条、工作区列表）、`createBoardHandler`（4 条路由 + 同源校验）、`registerBoardRoutes` | `constants` | 不自己改任务状态（取消/重试/归档转调 `Dispatch`） |
+| `src/dispatch.js` | `Dispatch`：`launch` / `pump` / `settle` / `start` / `report` / `relay` / `message` / `cancel` / `retry` / `placementFor` / `provision` / `startArchiveSweep` / `archiveStale` / `targetFor` / `setTarget`、视图 `card` / `detail`、落盘 `persist` / `restore` / `dispose` | 其余全部 | 不直接调 `sessionController` / `agent.*`（走 gateway） |
+| `src/board.js` | 看板 Host 半边：`boardTask` / `boardSnapshot`（拍平、计数、排序、200 条、工作区列表、`targets`）、`createBoardHandler`（5 条路由 + 同源校验）、`registerBoardRoutes` | `constants` | 不自己改任务状态（取消/重试/归档/目标转调 `Dispatch`） |
 | `src/workspaces.js` | 工作区网关：`defaultRoot` / `rootOf` / `dayKey` / `dayTitle` / `safeDirName`、`WorkspaceGateway`（`ensure` / `defaultWorkspace` / `dayWorkspace` / `createNamed` / `list` / `resolve` / `resolveOrCreate` / `archiveSession`） | `constants` | 不碰任务表、不投递消息 |
-| `client/index.js` | 看板浏览器半边：ModuleLoader 包、`sidebar.panellist` 图标 + `main` 面板、2s 轮询、取消/重试按钮、主题 token | 无（`require('react')` + 同源 `fetch`） | 不 import Host 代码、不共享内存、不打包 |
+| `client/index.js` | 浏览器半边，三条注册：`sidebar.panellist` 图标 + `main` 看板（2s 轮询、4 chip、工作区筛选、归档、点行跳会话）；`conversation.input.left` 派发目标选择器；`inputTriggers` 的 `@` 工作区 source。共用 `GET /board` 与 `POST /board/target` | 无（`require('react')` + 同源 `fetch` + `createPortal`） | 不 import Host 代码、不共享内存、不打包；不写全局样式 |
 
 ### 依赖方向
 
@@ -230,7 +236,8 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 
 ### 11. 落盘单文件 + 800ms 防抖
 
-- 写：`Dispatch.persist()` 覆盖写 `{version: 2, savedAt, tasks}`；密集的状态变化由 800ms 定时器合并（`timer.unref()`，不阻止进程退出）。
+- 写：`Dispatch.persist()` 覆盖写 `{version: 3, savedAt, tasks, targets}`；密集的状态变化由 800ms 定时器合并（`timer.unref()`，不阻止进程退出）。
+  0.5.0 起多一个 `targets`（会话 id → 派发目标），旧文件缺它时按空对象。
 - 读：`restore()` 启动时读一次；读失败只 warn，不阻止插件启动——任务表是辅助信息，会话内容由 DSH 自己持久化。
 - 恢复语义：未结算任务一律标 `interrupted`，因为新进程里没有活的 worker，不能假装它们还在跑。
 
@@ -320,6 +327,19 @@ React 从 `require('react')` 取。理由：
 理由：工作区是「让侧边栏更好用」的增强，不是派发的前置条件。目录不可写、注册表缺失、默认会话创建失败，
 都不该让 9 个工具跟着不可用。代价是失败只在日志里，需要 `dispatch_workspaces` 或看板自己确认。
 
+### 20. 派发目标与会话归属分离，客户端三条注册共用一份快照
+
+0.5.0 的输入框能力没有新增 Host 工具，而是复用看板 HTTP 面：
+
+- **派发目标**存在 `Dispatch.targets`（落盘到 `tasks.json`），只是「下一次 `dispatch_launch` 的默认 workspace」。
+  DSH 的会话工作区建完不可迁移，所以控件/`@` 都不试图搬会话，只改下一次派发。
+- 客户端三条注册（`sidebar.panellist` + `main`、`conversation.input.left`、`inputTriggers` 的 `@`）都读同一份
+  `GET /board` 快照，写同一个 `POST /board/target`；`targetBus` 在页面内广播变更，避免选择器与 `@` 各说各话。
+- `@` 的 chip 只能走 `insert`，`appearance` 是闭集（session/file/folder），所以只插裸 chip，不能插纯文本。
+
+代价：快照有 10 秒缓存（`@` 候选复用），选择器打开下拉时强制刷新；`@` 选中时设置目标失败没有可挂错误的位置，只 `console.warn`。
+边界与未验证项见 [composer.md](composer.md)。
+
 ## 模块拆分轴
 
 拆分前是单文件 853 行。0.2.0 按「谁最容易变」切开：
@@ -335,7 +355,7 @@ React 从 `require('react')` 取。理由：
 | 标识与默认值 | `constants.js` | 低 |
 | 事件接线 | `index.js` | 低 |
 | 看板 Host 半边（路由/快照形状） | `board.js` | 中（0.3.0 新增） |
-| 看板浏览器半边（UI/轮询） | `client/index.js` | 高（样式与交互会改；0.3.0 新增） |
+| 看板浏览器半边（看板 + 选择器 + `@`） | `client/index.js` | 高（样式与交互会改；0.3.0 起，0.5.0 扩到三条注册） |
 | 工作区（目录/解析/归档） | `workspaces.js` | 中（0.4.0 新增） |
 
 这样 DSH 升级时优先改 `sessions.js`；调整提示词不碰业务逻辑；任务表规则可以脱离宿主跑测试；
@@ -360,6 +380,12 @@ React 从 `require('react')` 取。理由：
 | 看板 GET 非本机且非同源 | `403 {"ok":false,"error":"看板只对本机或同源页面开放"}` | `board.js` `readAllowed()` |
 | 看板 POST 跨站 | `403 {"ok":false,"error":"跨站请求被拒绝"}`，不产生副作用 | `board.js` `sameOrigin()` |
 | 看板操作被状态拒绝 | `409`，中文原因（取消/重试的前置条件） | `dispatch.js` `retry()` / `cancel()` |
+| 看板 `/target` 缺会话 | `400 {"ok":false,"error":"需要 session_id"}` | `board.js` `createBoardHandler()` |
+| 看板 `/target` 解析不到工作区 | `409`，错误文本带现有工作区候选 | `dispatch.js` `setTarget()` |
+| 派发目标在派发时已失效 | 只 warn，退回调用者目录，不新建目录 | `dispatch.js` `launch()` |
+| 选择器 / `@` 快照取不到 | 选择器禁用（「看板服务不可用」）；`@` 候选为空 | `client/index.js` |
+| `inputTriggers` 缺席 | `@` 不注册，看板与选择器照常 | `client/index.js` `registerWorkspaceTrigger()` |
+| 点行打开子会话失败 | 提示「打不开子会话 …：原因」，不白屏 | `client/index.js` `openWorker()` |
 | 看板 handler 内部异常 | `500` + warn 日志 | `board.js` `createBoardHandler()` |
 | 默认工作区准备失败 | 只 warn，插件继续启动，派发按调用者目录工作 | `dispatch.js` `provision()` |
 | 显式 `workspace` 解析/新建失败 | `dispatch_launch` 抛错，带现有工作区清单 | `workspaces.js` `resolveOrCreate()` |
@@ -370,14 +396,16 @@ React 从 `require('react')` 取。理由：
 ## 可测试性
 
 - 纯逻辑测试 `test/tasks.test.js`（13 个用例）：`TaskTable`、`clip`、`oneLine`、`lastAssistantText`。
-- 看板测试 `test/board.test.js`（19 个用例）：8 个快照用例（拍平、`last_report`、截断、计数、排序、200 条上限、版本/时间），
-  11 个路由用例（GET 200/404/403/同源 200、cancel、retry、跨站 403、同源 POST、任务不存在 404、坏 JSON 400、失败 409）。
+- 看板测试 `test/board.test.js`（26 个用例）：
+  - 8 个快照用例（拍平、`last_report`、截断、计数、排序、200 条上限、版本/时间）；
+  - 11 个既有路由用例（GET 200/404/403/同源 200、cancel、retry、跨站 403、同源 POST、任务不存在 404、坏 JSON 400、失败 409）；
+  - 7 个 0.5.0 用例（工作区列表与归档计数、`/archive`、`/target` 设置/清除/缺参/解析失败、快照 `targets`）。
   路由用假的 `req`/`res` 直接调 handler，不需要起 HTTP 服务。
 - 工作区测试 `test/workspaces.test.js`（11 个用例）：日期键、`【派发】`标题、安全目录名（非法字符/空白/长度）、
   根目录优先级，以及解析顺序（id、绝对路径、标题精确、标题包含、找不到、无注册表）；用假注册表，只在 `ensure` 之外不碰磁盘。
-- `npm test` 跑 `node --test`，全量 43 个用例。
+- `npm test` 跑 `node --test`，全量 50 个用例。
 - 宿主相关行为（建会话、投递、事件顺序、真实 HTTP 连接、浏览器渲染、真实 mkdir/归档）没有单元测试，靠 README 的实测记录覆盖；
-  其中看板 UI 的浏览器渲染尚未实测（见 README「验证记录」）。
+  看板与输入框的**界面一次都没在真浏览器里跑过**（见 README「验证记录」与 [composer.md](composer.md)）。
 - 想手工验证：`dispatch_list` 看 `version` 与 `max_workers`；`dispatch_inspect` 看 `cwd`、`recent_reports`、`last_worker_text`；
   `dispatch_workspaces` 看工作区；看板看 `GET /dsh-mini-superagent/board` 的 JSON。
 

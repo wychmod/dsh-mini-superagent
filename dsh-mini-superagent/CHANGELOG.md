@@ -2,6 +2,55 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 0.5.0 — 2026-11-05
+
+界面侧补齐：看板的归档视图/工作区筛选/跳转会话，输入框的「派发目标」选择器与 `@` 工作区。Host 侧增量是「每个会话的派发目标」与状态文件 v3。
+
+### 新增
+
+- **看板（Client）**：
+  - 过滤 chip 3 → 4：`全部`（默认，**不含已归档**）/ `进行中` / `需要处理` / `已归档`；顶部「总计」显示 `counts.total − counts.archived`。
+  - 归档行整行 0.55 透明度、灰点、无取消/重试按钮，显示 `已归档` 徽标与相对时间（刚刚 / N 分钟前 / N 小时前 / N 天前）；`archive_error` 单独一行。
+  - 顶部「立即归档」两步确认（首次点击进入确认态，4 秒无操作自动回落），调 `POST /board/archive`。
+  - 每行显示 `workspace_title`（`null` → 「跟随会话目录」）；顶部工作区下拉与状态 chip 取交集；同 `group` 的行聚在一起并带「批次」徽标（服务端底序不变）。
+  - 点行跳子会话：`ctx.get('uiWorkspace').openSession(worker_session_id)`，支持 Enter/Space；失败提示「打不开子会话 `<id>`：<原因>」；归档行先提示「可能已不在会话列表」但仍尝试打开。
+- **输入框「派发目标工作区」选择器（Client）**：注册到 `conversation.input.left`（list / session），id `dsh-mini-superagent/target`、`order 60`、label「派发目标」；
+  28px 高、`flex:none`、`max-width: min(260px, 45cqw)`；有目标显示 `派发 → <标题>`，无目标显示 `派发 → 跟随会话`；
+  只在有活跃会话时渲染。下拉用 `createPortal` 挂 body + `position: fixed`，优先向上展开、左右夹在视口内；
+  项为「跟随会话目录」/ 全部工作区（带路径与 ✓）/「刷新列表」；选中即 `POST /board/target`，失败把 Host 中文原因留在下拉里且不关闭；
+  快照取不到时禁用并提示「看板服务不可用」。不轮询：挂载与每次打开各取一次（快照层另有 10s 缓存，供 `@` 复用）。
+- **`@` 选择工作区（Client）**：`inputTriggers.registerSource({trigger:'@', name:'workspace', order:40, …})`，与官方 `@reference` 并存，
+  候选分组「工作区」；选中同时设置 Host 目标并往草稿插 chip；`codec.serialize` 产出 `<workspace id="…" title="…"/>`，
+  `codec.clipboardText` 为 `@<标题>`；chip 的 `appearance` 故意省略（只认 session/file/folder，传别的会导致整条草稿恢复时被清空）。
+  `inputTriggers` 服务缺席时 `@` 不出现，看板与控件照常。
+- **Host 增量**：
+  - `POST /dsh-mini-superagent/board/target`：body `{session_id, workspace}`（空串=清除）；成功 `{ok, target}`，缺 `session_id` 400，解析失败 409 并给候选。
+  - 快照新增 `targets:{[sessionId]:{workspace_id,title,path}}`；任务卡新增 `workspace_id` / `workspace_title` / `archived_at` / `archive_error` / `group`（其中 `workspaces` / `counts.archived` 已在 0.4.0）。
+  - `dispatch_launch` 没显式给 `workspace` 时用该会话的派发目标；目标失效只 warn 并退回调用者目录（不会凭选择器新建目录）。
+  - 状态文件升到 `version: 3`：`{tasks, targets}`；旧文件缺 `targets` 按空处理。
+- `docs/composer.md`：派发目标选择器与 `@` 工作区的说明。
+
+### 变更
+
+- 版本 `0.4.0` → `0.5.0`；`client/index.js` 从 1017 行扩到 **2055 行**（看板 UI 与输入框控件同属 0.5.0）。
+- 看板「全部」不再包含已归档任务；顶部「总计」同步减去归档数。归档任务只出现在「已归档」chip。
+- 单测从 43 → **50**（`tasks` 13 + `board` 26 + `workspaces` 11）。
+
+### 验证
+
+- ✅ `npm test`：50 pass / 0 fail（board 新增 7 个用例：工作区列表与归档计数、`/archive`、`/target` 设置/清除/缺参/解析失败、快照 `targets`）。
+- ⚠️ 界面**未在真浏览器里跑过**（客户端模块要页面重载才挂载）：控件在工具行的对齐与截断、弹层翻转与边缘夹取、
+  `@` 与官方 `@reference` 混排观感、chip 刷新后能否从草稿恢复、`openSession` 成功后视图是否真切换、深浅主题对比度、
+  `not-listed` 的真实错误码，均未验证。
+
+### 限制
+
+- 派发目标是「下一次 `dispatch_launch` 的目标」，不是会话归属；DSH 会话的工作区建完不可迁移。
+- 选择器只在有活跃会话时渲染；空白/hero 会话看不到。
+- `@` chip 的 `appearance` 是闭集（session/file/folder），所以插件只插裸 chip，不能自定义图标/颜色。
+- `@` 选中时设置目标失败没有可挂错误的位置，只 `console.warn`；控件下次取数会显示真实目标。
+- 没显式 `workspace` 而目标已失效时，任务退回调用者目录，只记 warn。
+
 ## 0.4.0 — 2026-11-05
 
 新增**工作区**能力：默认工作区 + 按天【派发】工作区 + 按工作区派发 + 自动归档，工具从 8 个变成 9 个。
