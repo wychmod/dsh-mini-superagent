@@ -37,6 +37,13 @@ export class Dispatch {
      * 输入框里的工作区选择器写这里，dispatch_launch 没显式给 workspace 时读这里。
      */
     this.targets = new Map()
+    /**
+     * 浏览器半边最近一次自报：`{ at, ok, registered?, error? }`。
+     * 客户端模块加载失败时页面上什么都看不到，只有这条记录能证明「它跑过 / 它挂了」。
+     */
+    this.clientReady = undefined
+    /** 本插件实例的启动时间：`client.ready.at` 早于它就说明那是上一次实例留下的。 */
+    this.bootAt = now()
     const stateRoot = this.config.stateDir
       || join(process.env.DSH_HOME || join(homedir(), '.dsh'), STATE_DIR)
     this.stateFile = join(stateRoot, 'tasks.json')
@@ -539,6 +546,10 @@ export class Dispatch {
       client: {
         inGraph: !!clientPath,
         path: clientPath ?? null,
+        // 浏览器半边是否真的执行过（它自己在 apply 末尾回报）；与 inGraph 是两件事：
+        // inGraph=true 只说明模块进了图，ready 才说明它在页面里跑起来了。
+        ready: this.clientReady ?? null,
+        bootAt: this.bootAt,
         // 用几个已知有 client 半边的包做对照，判断 clientPath 这个探针本身是否可靠
         probes: (() => {
           const ids = [NAME, 'dsh-context', 'dsh-ppt', 'eac-design-world', 'dsh-better-sidebar', 'dsh-free-search']

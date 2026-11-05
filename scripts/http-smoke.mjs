@@ -55,9 +55,17 @@ if (self.status === 200) {
   check('默认主会话存在', s.lead?.exists === true, s.lead?.sessionId)
   // 客户端模块是否进了 Web 启动图：false 时面板/控件不会出现，需要重启宿主。
   console.log(`    client.inGraph = ${s.client?.inGraph}`)
+  console.log(`    client.ready   = ${s.client?.ready ? JSON.stringify(s.client.ready) : '（页面还没自报）'}`)
   if (s.client?.inGraph === false) {
     console.log('    ⚠ 客户端模块还不在 Web 启动图里：面板与输入框控件不会出现，需要重启 DSH 宿主。')
     console.log(`      对照探针: ${JSON.stringify(s.client?.probes ?? {})}`)
+  } else if (s.client?.ready?.ok === false) {
+    console.log(`    ⚠ 客户端 apply 报错了: ${s.client.ready.error ?? '（无原因）'}`)
+  } else if (!s.client?.ready) {
+    console.log('    ⚠ 模块已进图但页面还没自报：刷新一次页面后应出现 client.ready。')
+  } else {
+    const registered = s.client.ready.registered ?? []
+    console.log(`    注册项: ${registered.join(' / ') || '（未报告）'}`)
   }
 }
 

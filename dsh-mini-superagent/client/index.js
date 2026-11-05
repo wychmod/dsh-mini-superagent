@@ -2045,6 +2045,22 @@ window.__ModuleLoader__.load({
           }
         }
       }, 'dsh-mini-superagent: target picker cleanup')
+
+      // 自报存活：客户端加载失败时页面上什么都看不到，这条记录是唯一能区分
+      // 「模块没进图 / 进了图但 apply 抛错 / apply 跑完了」的证据。
+      // 它只证明 apply 跑到了这里，不证明槽一定渲染成功——渲染要看面板本身。
+      try {
+        if (typeof fetch === 'function') {
+          void fetch('/dsh-mini-superagent/board/client-ready', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              ok: true,
+              registered: ['sidebar.panellist', 'main', 'conversation.input.left', '@workspace'],
+            }),
+          }).catch(function () { /* 宿主不在线时忽略 */ })
+        }
+      } catch (error) { /* 自报失败不影响功能 */ }
     }
 
     exports.name = name
