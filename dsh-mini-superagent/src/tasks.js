@@ -233,11 +233,28 @@ export class TaskTable {
   }
 }
 
-/** 把长文本截断到 limit 字符，保留结尾（结尾通常是结论）。 */
+/**
+ * 把长文本截断到 limit 字符，保留结尾（结尾通常是结论）。
+ *
+ * 预算按比例分配，不写死 400：0.6.0 之前是 `limit - 400` + `slice(-400)`，
+ * 于是 `limit < 400` 时头部预算变负（`slice(0,0)` 为空）、尾部仍取 400，
+ * 输出反而比 limit 长——实测 `clip(1000 字, 200)` 返回 417 字。
+ * 这类调用在 `reportText` 与 `card` 里都有，会把消息撑出上下文预算。
+ *
+ * 现在头部与尾部各占一半（小 limit 也成立），提示语本身也算在预算内。
+ */
 export function clip(text, limit) {
   const value = typeof text === 'string' ? text : ''
-  if (value.length <= limit) return value
-  return `${value.slice(0, Math.max(0, limit - 400))}\n…（已截断 ${value.length - limit + 400} 字符）…\n${value.slice(-400)}`
+  const cap = Math.max(0, Number(limit) || 0)
+  if (value.length <= cap) return value
+  // 至少留出提示语的长度，避免只剩省略号
+  const note = tail => `\n…（已截断 ${value.length - cap} 字符）…\n${tail}`
+  const bodyBudget = Math.max(0, cap - 40)               // 给提示语留位置
+  const head = Math.floor(bodyBudget / 2)
+  const tailLen = bodyBudget - head
+  const out = `${value.slice(0, head)}${note(value.slice(-tailLen))}`
+  // 兜底：极端小的 limit 下宁可返回硬截断，也不要超长
+  return out.length <= cap ? out : value.slice(0, cap)
 }
 
 /** 单行摘要，供列表展示。 */
