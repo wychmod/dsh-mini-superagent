@@ -10,7 +10,7 @@
  */
 import { mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, relative, resolve as toAbsolute, sep } from 'node:path'
 
 import { LOG_PREFIX } from './constants.js'
 
@@ -34,15 +34,60 @@ export function dayKey(date = new Date()) {
 /** 【派发】工作区的标题。 */
 export const dayTitle = day => `【派发】${day}`
 
-/** 把任意标题压成安全的目录名（去路径分隔符与控制字符，限长）。 */
+/**
+ * Windows 保留设备名：这些名字（大小写无关）不能当文件/目录名。
+ *
+ * 为什么必须躲开：`mkdir` 命中保留名时要么直接失败，要么（经 realpath 后）指到设备上，
+ * 两种都比「换个名字」糟得多；而失败发生在 `registry.create` 之前，
+ * 用户看到的只是「新建工作区失败」，根本看不出是名字的问题。
+ *
+ * 带扩展名的形式同样非法（`CON.txt` 在 Windows 上仍指向 CON 设备），所以判定时只看第一个点之前的部分。
+ * CONIN$/CONOUT$ 之类扩展名不在集合里 —— 它们日常几乎不出现，加进来只会让规则更难懂。
+ */
+const WINDOWS_RESERVED = new Set([
+  'CON', 'PRN', 'AUX', 'NUL',
+  ...Array.from({ length: 9 }, (_, index) => `COM${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `LPT${index + 1}`),
+])
+
+/**
+ * 去掉尾部的点号与空格。
+ *
+ * Windows **静默**吃掉名字末尾的点和空格：`abc.` 与 `abc`、`abc ` 与 `abc` 都落到同一个目录。
+ * 不清理的话，两个不同标题会撞进同一个目录，于是同一个工作区被复用、`create` 也不会新建 ——
+ * 这类「看起来成功了其实混在一起」的问题最难查，所以在派生目录名时一次清干净。
+ */
+function stripTrailing(value) {
+  return String(value).replace(/[. ]+$/, '')
+}
+
+/**
+ * 给命中的保留名加后缀避开：`CON` → `CON-`，`CON.txt` → `CON-.txt`。
+ *
+ * 后缀必须插在第一个点**之前**：`CON.txt-` 去掉扩展名后仍然是 `CON`，还是设备名，等于没改。
+ * 选 `-` 而不是 `_1`：不改长度、不与「用户本来就叫 CON_1」撞名，也不影响后续截断。
+ */
+function breakReservedName(value) {
+  const text = String(value)
+  const dot = text.indexOf('.')
+  return dot === -1 ? `${text}-` : `${text.slice(0, dot)}-${text.slice(dot)}`
+}
+
+/** 把任意标题压成安全的目录名（去路径分隔符与控制字符、避开 Windows 保留名、去尾部点号/空格、限长）。 */
 export function safeDirName(name) {
-  const cleaned = String(name ?? '')
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
-    .replace(/^\.+/, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 60)
-  return cleaned || 'dispatch'
+  const cleaned = stripTrailing(
+    String(name ?? '')
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
+      .replace(/^\.+/, '')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  )
+  // 截断之后再清一次尾部点号/空格：截断点可能正好落在点号后面，只清一次等于没清。
+  const sliced = stripTrailing(cleaned.slice(0, 60))
+  if (!sliced) return 'dispatch'
+  // 保留名判定放在最后：`CON.` 先被清成 `CON`，只在这一步之后才看得出来是保留名。
+  const base = sliced.split('.')[0].toUpperCase()
+  return WINDOWS_RESERVED.has(base) ? breakReservedName(sliced) : sliced
 }
 
 /**
@@ -81,6 +126,35 @@ export function rankWorkspaces(pool, query) {
   }
   scored.sort((a, b) => (b.score !== a.score ? b.score - a.score : a.title.localeCompare(b.title)))
   return scored
+}
+
+/**
+ * `target` 是否落在 `root` 之内（含 root 本身）。
+ *
+ * 用 `relative` 而不是字符串前缀判断：前缀判断会被 `C:\work` vs `C:\workspace2`
+ * 这种「同前缀不同目录」骗过去。`relative` 跨盘符会返回绝对路径（如 `D:\x`），
+ * 那也一定在 root 之外。
+ *
+ * 先各自绝对化再比：`workspaceRoot` 被配成相对路径时，直接和绝对路径做相对运算
+ * 会把所有合法路径都判成越界，于是天天误报，日志很快就没人看了。
+ */
+function isInside(root, target) {
+  const rel = relative(toAbsolute(root), toAbsolute(target))
+  if (!rel) return true                     // 同一个目录
+  if (isAbsolute(rel)) return false         // 跨盘符，算不出来相对路径
+  return rel.split(sep)[0] !== '..'         // 首段是 `..` 才是往上跑（`..foo` 仍在 root 内）
+}
+
+/**
+ * 标题包含匹配的全部候选（大小写不敏感）。
+ *
+ * 单独抽出来是因为 `resolve` 和 `resolveOrCreate` 都要用：前者靠它判断歧义，
+ * 后者靠它在**新建之前**拦住歧义引用 —— 否则 `resolve` 因歧义返回 undefined 后，
+ * `resolveOrCreate` 会把这当成「不存在」，凭空建出一个同名新目录，
+ * 把一个「有两个候选」的问题变成「多出一个重复工作区」，比原来更糟。
+ */
+function fuzzyMatches(items, lower) {
+  return items.filter(item => String(item.title).toLowerCase().includes(lower))
 }
 
 /**
@@ -132,9 +206,22 @@ export class WorkspaceGateway {
   /**
    * 解析一个工作区引用，顺序：id → 绝对路径 → 标题精确匹配 → 标题包含匹配。
    * 只解析，不创建。
+   *
+   * 包含匹配的三个取舍（都为了「别猜错」）：
+   * - 单字符查询（`'a'`、`'1'`）不做包含匹配：这种查询几乎必然命中一堆无关工作区，
+   *   命中第一个纯属偶然，比解析不到更糟。单字符只走精确匹配，解析不到就交给调用方。
+   * - 包含匹配**收集全部**命中而不是取第一个：静默取第一个会让用户莫名其妙被派到别的目录。
+   * - 多个命中时返回 `undefined` 并 `warn` 出候选，**不抛错**：上层 `Dispatch.setTarget`
+   *   的 `if (!workspace)` 分支本来就会把现有工作区全列给用户，退回 undefined 的体验
+   *   （「找不到，现有这些」）足够可用；抛错则会改掉那条错误信息，牵动 `dispatch.js`。
+   *
+   * @param {string} ref 工作区 id / 绝对路径 / 标题
+   * @param {{ quiet?: boolean }} [internal] `quiet: true` 时歧义不写日志 ——
+   *   只给 `resolveOrCreate` 用：它在同一件事上有更贴切的措辞（「不新建」），
+   *   两处都 warn 会让同一歧义在日志里出现两遍。
    * @returns {Promise<object | undefined>}
    */
-  async resolve(ref) {
+  async resolve(ref, internal = {}) {
     const registry = this.registry
     const value = String(ref ?? '').trim()
     if (!registry || !value) return undefined
@@ -149,8 +236,23 @@ export class WorkspaceGateway {
 
     const lower = value.toLowerCase()
     const items = this.list()
-    return items.find(item => String(item.title).toLowerCase() === lower)
-      ?? items.find(item => String(item.title).toLowerCase().includes(lower))
+    const exact = items.find(item => String(item.title).toLowerCase() === lower)
+    if (exact) return exact
+
+    // 单字符不做包含匹配（见上方注释）。用数组下标而不是 length 判断，代理对也算 1 个字符。
+    if ([...lower].length < 2) return undefined
+
+    const fuzzy = fuzzyMatches(items, lower)
+    if (fuzzy.length === 1) return fuzzy[0]
+    if (fuzzy.length > 1) {
+      // warn 而不是 throw：调用方要的是「解析不到」这个统一信号，候选只是给人看的线索。
+      if (internal.quiet !== true) {
+        const candidates = fuzzy.map(item => `${item.title}（${item.id}）`).join('；')
+        this.warn(`${LOG_PREFIX} 工作区引用「%s」有歧义，命中 %d 个：%s`, value, fuzzy.length, candidates)
+      }
+      return undefined
+    }
+    return undefined
   }
 
   /**
@@ -162,15 +264,39 @@ export class WorkspaceGateway {
    * @param {{ create?: boolean }} [options]
    */
   async resolveOrCreate(ref, options = {}) {
-    const resolved = await this.resolve(ref)
+    // quiet：歧义日志由下面「不新建」那条统一写，避免同一歧义打两遍。
+    const resolved = await this.resolve(ref, { quiet: true })
     if (resolved) return { workspace: resolved, created: false }
     if (options.create === false) return { workspace: undefined, created: false }
 
     const value = String(ref ?? '').trim()
     if (!value) return { workspace: undefined, created: false }
-    const workspace = isAbsolute(value)
-      ? await this.ensure(value, safeDirName(value.split(/[\\/]/).filter(Boolean).at(-1) ?? 'dispatch'))
-      : await this.createNamed(value)
+
+    // 歧义引用不能走到「新建」：`resolve` 因歧义返回 undefined，但那些目录是**真的存在**的，
+    // 再建一个同名目录只会制造重复。这里再判一次并同样 warn，让调用方拿到「找不到」而不是新工作区。
+    if (!isAbsolute(value)) {
+      const fuzzy = fuzzyMatches(this.list(), value.toLowerCase())
+      if (fuzzy.length > 1) {
+        const candidates = fuzzy.map(item => `${item.title}（${item.id}）`).join('；')
+        this.warn(`${LOG_PREFIX} 工作区引用「%s」有歧义（命中 %d 个：%s），不新建以避免重复工作区`,
+          value, fuzzy.length, candidates)
+        return { workspace: undefined, created: false }
+      }
+    }
+
+    let workspace
+    if (isAbsolute(value)) {
+      // 绝对路径是有意允许的：用户/agent 完全可能想在工作区根之外（另一个盘、另一个项目树）建工作区，
+      // 一律拒绝会砍掉合法用法。但这条路径不受 `workspaceRoot` 约束、又会以宿主进程权限 `mkdir -p`，
+      // 所以必须留痕：越界时记一条 warn，事后能从日志里查到「谁在工作区根之外建了目录」。
+      // 这是「可审计」优先于「可禁止」的取舍，不是漏了校验。
+      if (!isInside(this.root, value)) {
+        this.warn(`${LOG_PREFIX} 已在 workspaceRoot 之外创建工作区：%s（工作区根：%s）`, value, this.root)
+      }
+      workspace = await this.ensure(value, safeDirName(value.split(/[\\/]/).filter(Boolean).at(-1) ?? 'dispatch'))
+    } else {
+      workspace = await this.createNamed(value)
+    }
     return { workspace, created: true }
   }
 
