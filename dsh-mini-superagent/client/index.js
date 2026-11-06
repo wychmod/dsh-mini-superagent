@@ -42,6 +42,13 @@ window.__ModuleLoader__.load({
     const BOARD_ID = 'dsh-mini-superagent.board'
     /** Host 路由（src/board.js 里的 BASE，改一处要改两处）。 */
     const API = '/dsh-mini-superagent/board'
+    /**
+     * 准入头。Host 端要求写操作必须带它（见 src/constants.js 的 BOARD_HEADER），
+     * 用来挡掉同源页面之外的脚本与简单 CSRF。读操作在回环 Host 下不需要，
+     * 但统一带上没有副作用。
+     */
+    const BOARD_HEADER = 'x-dsh-mini-superagent'
+    const AUTH_HEADERS = { [BOARD_HEADER]: '1' }
     /** 面板可见时的轮询间隔。 */
     const POLL_MS = 2000
     /** 「耗时」走表的间隔。 */
@@ -424,7 +431,7 @@ window.__ModuleLoader__.load({
     async function readBoard(signal) {
       const response = await fetch(API, {
         method: 'GET',
-        headers: { accept: 'application/json' },
+        headers: { accept: 'application/json', ...AUTH_HEADERS },
         cache: 'no-store',
         credentials: 'same-origin',
         signal,
@@ -451,7 +458,7 @@ window.__ModuleLoader__.load({
     async function postJson(path, body, signal) {
       const response = await fetch(API + path, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        headers: { 'content-type': 'application/json', accept: 'application/json', ...AUTH_HEADERS },
         credentials: 'same-origin',
         body: JSON.stringify(body || {}),
         signal,
@@ -498,7 +505,7 @@ window.__ModuleLoader__.load({
       }
       const response = await fetch(API, {
         method: 'GET',
-        headers: { accept: 'application/json' },
+        headers: { accept: 'application/json', ...AUTH_HEADERS },
         cache: 'no-store',
         credentials: 'same-origin',
         signal,
@@ -2178,7 +2185,7 @@ window.__ModuleLoader__.load({
         if (typeof fetch === 'function') {
           void fetch('/dsh-mini-superagent/board/client-ready', {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: { 'content-type': 'application/json', ...AUTH_HEADERS },
             body: JSON.stringify({
               ok: true,
               registered: ['sidebar.panellist', 'main', 'conversation.input.left', '@workspace'],

@@ -10,9 +10,15 @@ import { boardSnapshot, boardTask, createBoardHandler } from '../src/board.js'
 
 const BASE = '/dsh-mini-superagent/board'
 
-/** 假的 IncomingMessage：够 readJson 用（on/data/end/error）。默认带本机 Host。 */
+/**
+ * 假的 IncomingMessage：够 readJson 用（on/data/end/error）。
+ *
+ * 默认带本机 Host，并带上准入头 `x-dsh-mini-superagent`——看板的写操作
+ * 现在要求它（见 src/constants.js 的 BOARD_HEADER）。需要测拒绝路径时，
+ * 在 headers 里传 `'x-dsh-mini-superagent': ''` 覆盖掉。
+ */
 function fakeReq({ method = 'GET', url = BASE, headers = {}, body } = {}) {
-  const finalHeaders = { host: '127.0.0.1:11586', ...headers }
+  const finalHeaders = { host: '127.0.0.1:11586', 'x-dsh-mini-superagent': '1', ...headers }
   const listeners = new Map()
   const req = {
     method,
@@ -146,6 +152,44 @@ test('boardSnapshot 最多返回 200 条，但计数按全量算', () => {
   assert.equal(snap.counts.total, 250)
 })
 
+/**
+ * 截断必须显式说出来：否则「总计 500 / 列表 200」看起来像数据丢了，
+ * 用户会去翻根本不存在的第 201 条。
+ */
+test('boardSnapshot 截断时带上 truncated，明确告诉看板少显示了', () => {
+  const tasks = Array.from({ length: 500 }, (_, index) => makeTask(`t${index}`, { status: 'done' }))
+  const snap = boardSnapshot(fakeDispatch(tasks))
+  assert.deepEqual(snap.truncated, { shown: 200, total: 500 })
+})
+
+test('boardSnapshot 未截断时 truncated 为 null（含恰好 200 的边界）', () => {
+  assert.equal(boardSnapshot(fakeDispatch([])).truncated, null)
+  const exactly = Array.from({ length: 200 }, (_, index) => makeTask(`t${index}`, { status: 'done' }))
+  assert.equal(boardSnapshot(fakeDispatch(exactly)).truncated, null, '恰好 200 条不该误报截断')
+})
+
+/**
+ * elapsed_ms 的基准必须能「停住」：已结算任务量到结算时刻（updated_at），
+ * 未结算的才量到现在。0.7.0 之前一律用 now，一个 26 小时前就 done 的任务
+ * 会一直显示「26 时 0 分」并继续增长。
+ */
+test('boardTask 已结算任务的 elapsed_ms 量到结算时刻，不随 now 增长', async () => {
+  const task = makeTask('d', {
+    status: 'done',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:05:00.000Z',
+  })
+  const first = boardTask(task).elapsed_ms
+  assert.equal(first, 5 * 60_000, '应当是 startedAt → updatedAt 的 5 分钟')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(boardTask(task).elapsed_ms, first, 'done 的耗时必须冻结，否则看板一直走表')
+})
+
+test('boardTask 未结算任务的 elapsed_ms 仍然量到现在', () => {
+  const task = makeTask('r', { status: 'running', startedAt: new Date(Date.now() - 60_000).toISOString() })
+  assert.ok(boardTask(task).elapsed_ms >= 60_000, 'running 要继续走表')
+})
+
 test('boardSnapshot 带上版本号与生成时间', () => {
   const snap = boardSnapshot(fakeDispatch([]))
   assert.equal(snap.version, VERSION)
@@ -159,7 +203,10 @@ test('boardSnapshot 带上版本号与生成时间', () => {
 /** 假宿主：handler 需要 table.get / cancel / retry。 */
 function fakeHost(tasks, { cancelThrows = false } = {}) {
   const calls = { cancel: [], retry: [] }
+  const agents = new Map([['s1', { id: 's1' }], ['s2', { id: 's2' }]])
   const dispatch = {
+    config: { leadSessionId: 'mas-lead' },
+    ctx: { agents: { get: id => agents.get(id) } },
     table: {
       tasks: new Map(tasks.map(task => [task.id, task])),
       maxWorkers: 6,
@@ -216,12 +263,37 @@ test('非回环且非同源的 GET 被拒绝（避免暴露任务名与工作目
   assert.equal(result.status, 403)
 })
 
-test('非回环但同源页面可以读（远程浏览器访问自己的页面）', async () => {
+/**
+ * 0.7.0 的行为变更：非回环 Host 默认拒绝，即使 Origin 与它同源。
+ *
+ * 原因：0.6.0 的「Origin.host === Host 即放行」对 DNS rebinding 恒真
+ * （攻击者页面与目标同源，两个头都由攻击者的域名决定）。要开放
+ * 远程访问，必须把 Host 显式写进 BOARD_ALLOWED_HOSTS —— 见下一条测试。
+ */
+test('非回环 Host 即使同源也默认拒绝（防 DNS rebinding）', async () => {
   const { handler } = fakeHost([makeTask('a')])
   const result = await call(handler, {
     headers: { host: '192.168.1.5:3080', origin: 'http://192.168.1.5:3080' },
   })
-  assert.equal(result.status, 200)
+  assert.equal(result.status, 403)
+})
+
+test('DNS rebinding 的典型形态被拒绝（Host 与 Origin 都是攻击者域名）', async () => {
+  const { handler } = fakeHost([makeTask('a')])
+  const result = await call(handler, {
+    headers: { host: 'evil.example:9735', origin: 'http://evil.example:9735' },
+  })
+  assert.equal(result.status, 403)
+})
+
+test('回环 Host 的写操作需要准入头', async () => {
+  const { handler } = fakeHost([makeTask('a', { status: 'running' })])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/cancel`,
+    headers: { 'x-dsh-mini-superagent': '' },
+    body: { task_id: 'a' },
+  })
+  assert.equal(result.status, 403)
 })
 
 test('POST cancel 调用取消并回卡片', async () => {

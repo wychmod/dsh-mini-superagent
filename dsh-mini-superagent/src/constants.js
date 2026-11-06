@@ -7,7 +7,7 @@
 export const NAME = 'dsh-mini-superagent'
 
 /** 插件版本，会出现在 dispatch_list 与看板快照里，便于确认“跑的是哪一版”。 */
-export const VERSION = '0.6.0'
+export const VERSION = '0.8.0'
 
 /** 日志前缀。 */
 export const LOG_PREFIX = `${NAME}:`
@@ -79,6 +79,30 @@ export const MODE_ALWAYS = 'always'
   /** 默认主会话的固定 id；改成别的值等于换一个新默认会话。 */
   leadSessionId: 'mas-lead',
 }
+
+/**
+ * 看板准入用的自定义请求头。
+ *
+ * 为什么需要它：`Origin` 与 `Host` 都可由客户端伪造，所以
+ * 「Origin.host === Host」这个判据对 DNS rebinding 恒真——攻击者页面从
+ * `http://evil.example:9735` 加载、该域名解析到 127.0.0.1 时，
+ * 两个头都是 `evil.example:9735`，判据成立。实测该请求能读到全部任务
+ * 标题、工作目录与报告摘要。
+ *
+ * 自定义头是浏览器跨站请求带不上的：
+ * - 带自定义头的跨站请求会触发 CORS 预检，预检不带这个头，服务端拒绝；
+ * - 不触发预检的「简单请求」也带不上自定义头。
+ * 所以「必须带这个头」等价于「必须是脚本主动发的、且已通过预检」。
+ * 本机命令行/脚本自己带上它即可，不受影响。
+ */
+export const BOARD_HEADER = 'x-dsh-mini-superagent'
+
+/**
+ * 看板额外放行的 Host（例如要直连的局域网地址，形如 `192.168.1.5:3080`）。
+ * 留空 = 只认回环名与同源页面。放行任意 Host 用 `['*']`（不推荐）。
+ * @type {string[]}
+ */
+export const BOARD_ALLOWED_HOSTS = []
 
 /** 已结算：不再占并发位、不再等它。 */
 export const SETTLED = new Set(['done', 'blocked', 'failed', 'cancelled', 'ended', 'interrupted'])
