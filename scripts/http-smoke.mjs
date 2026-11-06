@@ -20,6 +20,14 @@ function check(name, ok, detail) {
   else { failures.push(`${name}${detail ? ` — ${detail}` : ''}`); console.log(`  ✗ ${name}${detail ? ` — ${detail}` : ''}`) }
 }
 
+/**
+ * 写操作必须带的自定义头。
+ * 0.8.0 起看板写操作要求它：不是防 DNS rebinding（那由 Host 判定负责），
+ * 而是挡掉同源页面之外的脚本与简单 CSRF——跨站发带自定义头的请求会触发预检。
+ * 本脚本模拟「本机调用者」，所以带上它。
+ */
+const WRITE_HEADER = 'x-dsh-mini-superagent'
+
 async function getJson(path) {
   const response = await fetch(`${API}${path}`, { headers: { accept: 'application/json' } })
   const text = await response.text()
@@ -31,7 +39,7 @@ async function getJson(path) {
 async function postJson(path, payload) {
   const response = await fetch(`${API}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    headers: { 'content-type': 'application/json', accept: 'application/json', [WRITE_HEADER]: '1' },
     body: JSON.stringify(payload ?? {}),
   })
   const text = await response.text()
@@ -93,8 +101,13 @@ if (board.status === 200) {
 // 3. 派发目标：设置 → 读回 → 清除（可逆）
 console.log('\n派发目标（可逆写）')
 const workspace = snapshot?.workspaces?.[0]
-const sessionId = 'smoke-session-does-not-need-to-exist'
-if (workspace) {
+// 0.8.0 起 /target 会校验会话存在，所以必须用一个真实会话 id。
+// 优先用默认主会话（插件自己建的），没有就退回快照里任一任务的父会话。
+const sessionId = self.body?.lead?.exists
+  ? self.body.lead.sessionId
+  : (snapshot?.tasks?.[0]?.parent_session_id ?? snapshot?.tasks?.[0]?.worker_session_id)
+if (workspace && sessionId) {
+  console.log(`  使用会话 ${sessionId}`)
   const set = await postJson('/target', { session_id: sessionId, workspace: workspace.id })
   check('POST /target 设置返回 200', set.status === 200, `实际 ${set.status}`)
   check('返回的目标与所选工作区一致', set.body?.target?.workspace_id === workspace.id)

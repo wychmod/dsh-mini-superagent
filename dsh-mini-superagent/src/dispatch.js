@@ -262,15 +262,15 @@ export class Dispatch {
    * 子会话放在哪个工作区。
    * - `target` 模式且任务指定了目标 → 放进目标工作区（子会话混在项目里）
    * - 其余情况 → 当天的【派发】工作区（侧边栏保持干净）
-   * @returns {Promise<{ workspaceId?: string, path: string }>}
+   * @returns {Promise<{ workspaceId?: string, path: string, title?: string }>}
    */
   async placementFor(task) {
     const target = task.workspaceId ? this.workspaces.list().find(item => item.id === task.workspaceId) : undefined
     if (this.config.workerWorkspace === 'target' && target) {
-      return { workspaceId: target.id, path: target.path }
+      return { workspaceId: target.id, path: target.path, title: target.title }
     }
     const day = await this.workspaces.dayWorkspace(dayKey())
-    if (day) return { workspaceId: day.id, path: day.path }
+    if (day) return { workspaceId: day.id, path: day.path, title: day.title }
     return { path: task.cwd }
   }
 
@@ -380,6 +380,12 @@ export class Dispatch {
 
     const placement = await this.placementFor(task)
     if (this.abortIfSettled(task, '解析工作区之后')) return task
+
+    // 记下子会话实际挂在哪个工作区。这是「它住在哪」，与 workspaceTitle
+    //（「派发目标」）是两件事：没指定目标时子会话住进当天的【派发】工作区，
+    // 但 workspaceTitle 是空的。看板要显示前者，否则看起来像没归属。
+    task.hostWorkspaceId = placement.workspaceId
+    task.hostWorkspaceTitle = placement.title
 
     const created = await this.sessions.createWorker(task.workerSessionId, placement.path, `[派发] ${task.title}`, {
       agentPreset: task.agentPreset,
@@ -790,6 +796,7 @@ export class Dispatch {
       status: task.status,
       session_id: task.workerSessionId,
       ...(task.workspaceTitle ? { workspace: task.workspaceTitle } : {}),
+      ...(task.hostWorkspaceTitle ? { host_workspace: task.hostWorkspaceTitle } : {}),
       ...(task.archivedAt ? { archived_at: task.archivedAt } : {}),
       created_at: task.createdAt,
       updated_at: task.updatedAt,

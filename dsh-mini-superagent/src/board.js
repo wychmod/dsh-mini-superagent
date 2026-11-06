@@ -60,6 +60,10 @@ export function boardTask(task) {
     cwd: task.cwd,
     workspace_id: task.workspaceId ?? null,
     workspace_title: task.workspaceTitle ?? null,
+    // 子会话实际挂在哪个工作区（没指定目标时就是当天的【派发】工作区）。
+    // 与 workspace_title（派发目标）不是一回事，看板显示这个才有归属感。
+    host_workspace_id: task.hostWorkspaceId ?? null,
+    host_workspace_title: task.hostWorkspaceTitle ?? null,
     archived_at: task.archivedAt ?? null,
     ...(task.group ? { group: task.group } : {}),
     created_at: task.createdAt,
