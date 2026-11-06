@@ -123,6 +123,9 @@ window.__ModuleLoader__.load({
       targetPortalUnavailable: '弹层不可用',
       targetSection: '工作区',
       targetAuto: '自动选择',
+      targetNone: '不派发',
+      targetNoneHint: '本会话自己跑，不派发',
+      targetForcedHint: '已开启必派发：除纯问答外，任务都派下去',
       targetFollowHint: '用这个会话自己的工作目录',
       targetAutoHint: '按关键词自动匹配一个工作区',
       targetAutoHit: '自动：{title}',
@@ -201,6 +204,9 @@ window.__ModuleLoader__.load({
       targetPortalUnavailable: 'Menu unavailable',
       targetSection: 'Workspaces',
       targetAuto: 'Auto-select',
+      targetNone: 'Do not dispatch',
+      targetNoneHint: 'Run in this session',
+      targetForcedHint: 'Dispatch mode: every task is delegated',
       targetFollowHint: "Use this session's own working directory",
       targetAutoHint: 'Pick a workspace from the typed keywords',
       targetAutoHit: 'Auto: {title}',
@@ -1212,16 +1218,27 @@ window.__ModuleLoader__.load({
       const unavailable = status === 'error'
       const disabled = unavailable || !portalReady
       const shown = target && target.title ? target.title : (target && target.workspace_id ? target.workspace_id : '')
-      const text = tr('targetPrefix') + ' → ' + (shown || tr('targetFollow'))
+      // 没有目标 = 不派发（默认）。文案与按钮保持同一套词，免得两个入口各说各话。
+      const text = tr('targetPrefix') + ' → ' + (shown || tr('targetNone'))
       const triggerTitle = unavailable
         ? tr('targetUnavailable')
         : !portalReady
           ? tr('targetPortalUnavailable')
-          : (shown || tr('targetFollow')) + (target && target.path ? '\n' + target.path : '')
+          : shown
+            ? tr('targetForcedHint') + (target && target.path ? '\n' + target.path : '')
+            : tr('targetNoneHint')
 
       const rows = []
       if (open) {
-        // 「自动选择」默认项：不锁定工作区，每次派发按任务内容挑。放在最上面。
+        // 「不派发」是默认项：会话自己干活，不创建子会话。
+        rows.push(h(TargetRow, {
+          key: 'none',
+          checked: !target,
+          label: tr('targetNone'),
+          description: tr('targetNoneHint'),
+          onPick: function () { void choose('') },
+        }))
+        // 「自动选择」：不锁定工作区，每次派发按任务内容挑。
         rows.push(h(TargetRow, {
           key: 'auto',
           checked: isAuto,
@@ -1230,13 +1247,6 @@ window.__ModuleLoader__.load({
           icon: '✦',
           disabled: saving,
           onPick: function () { void choose('auto') },
-        }))
-        rows.push(h(TargetRow, {
-          key: 'follow',
-          checked: !target,
-          label: tr('targetMenuFollow'),
-          description: tr('targetFollowHint'),
-          onPick: function () { void choose('') },
         }))
         rows.push(h('div', { key: 'sep-1', className: 'dsh-sa-menu-sep', role: 'separator' }))
         if (status === 'loading') {
@@ -1366,6 +1376,18 @@ window.__ModuleLoader__.load({
           const lower = needle.toLowerCase()
           const rows = []
 
+          // 「不派发」也是可 @ 的：手边正好在打字时，不必去点控件。
+          // 只有关键词能匹配上「不派发/关/off」时才出现，免得平时占位。
+          const noneHit = !lower || ['不派发', '不', 'none', 'off', '关'].some(word => word.startsWith(lower) || lower.startsWith(word))
+          if (noneHit) {
+            rows.push({
+              name: tr('targetNone'),
+              description: tr('targetNoneHint'),
+              section: tr('targetNone'),
+              value: 'none',
+            })
+          }
+
           // 顶部固定一条「自动选择」：按关键词打分挑最优，不用手动翻列表。
           // 没有匹配时也显示，点下去会提示没有可选项，而不是静默什么都不做。
           const ranked = rankWorkspaces(pool, needle)
@@ -1396,6 +1418,20 @@ window.__ModuleLoader__.load({
           let id = candidate && typeof candidate.value === 'string' ? candidate.value : ''
           const auto = Boolean(candidate && candidate.auto)
           const query = pick && pick.query ? String(pick.query) : ''
+
+          // 「不派发」：value 是 'none'，Host 侧按清除处理（回到默认模式）。
+          if (id === 'none') {
+            const sessionIdNone = pick && pick.session && typeof pick.session.sessionId === 'string'
+              ? pick.session.sessionId
+              : ''
+            if (sessionIdNone) {
+              void setDispatchTarget(sessionIdNone, '').then(function () { targetBus.emit() })
+                .catch(function (error) {
+                  console.warn('[dsh-mini-superagent] @ 不派发设置失败：', error && error.message ? error.message : error)
+                })
+            }
+            return undefined
+          }
 
           // 「自动选择」这一条：用输入过的关键词重新排一次，取第一名。
           if (auto && !id) {

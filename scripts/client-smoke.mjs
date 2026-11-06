@@ -419,9 +419,9 @@ update(picker)
 let menu = findAll(picker.tree, (item) => hasClass(item, 'dsh-sa-menu'))[0]
 check('下拉打开', Boolean(menu))
 const menuText = menu ? text(menu) : ''
-check('下拉第一项是「自动选择」', menuText.indexOf('自动选择') >= 0 && menuText.indexOf('自动选择') < menuText.indexOf('跟随会话目录'),
+check('下拉第一项是「不派发」', menuText.indexOf('不派发') >= 0 && menuText.indexOf('不派发') < menuText.indexOf('自动选择'),
   menuText.slice(0, 60))
-check('下拉含「跟随会话目录」', menuText.includes('跟随会话目录'))
+check('下拉含「自动选择」', menuText.includes('自动选择'))
 check('下拉含全部工作区', menuText.includes('主工作区') && menuText.includes('副工作区'))
 check('下拉含「刷新列表」', menuText.includes('刷新列表'))
 const checked = menu ? findAll(menu, (item) => item.props && item.props['aria-checked'] === true) : []
@@ -460,16 +460,16 @@ await tick()
 await tick()
 update(picker)
 menu = findAll(picker.tree, (item) => hasClass(item, 'dsh-sa-menu'))[0]
-const followRow = menu ? buttonsOf(menu).find((item) => text(item).includes('跟随会话目录')) : undefined
-if (followRow) followRow.props.onClick()
+const noneRow = menu ? buttonsOf(menu).find((item) => text(item).includes('不派发')) : undefined
+if (noneRow) noneRow.props.onClick()
 await tick()
 await tick()
 update(picker)
 let clearBody = null
 try { clearBody = JSON.parse(targetRequests().slice(-1)[0].body) } catch (error) { clearBody = null }
-check('「跟随会话目录」清除目标（workspace 为空串）', Boolean(clearBody) && clearBody.workspace === '', JSON.stringify(clearBody))
+check('「不派发」清除目标（workspace 为空串）', Boolean(clearBody) && clearBody.workspace === '', JSON.stringify(clearBody))
 trigger = findAll(picker.tree, (item) => hasClass(item, 'dsh-sa-target'))[0]
-check('清除后文案回到「派发 → 跟随会话」', Boolean(trigger) && text(trigger).includes('派发 → 跟随会话'))
+check('清除后文案回到「派发 → 不派发」', Boolean(trigger) && text(trigger).includes('派发 → 不派发'), trigger && text(trigger).replace(/\s+/g, ' ').trim())
 
 boardResponse = boardFixture()
 trigger.props.onClick()
@@ -502,7 +502,7 @@ await tick()
 update(picker)
 trigger = findAll(picker.tree, (item) => hasClass(item, 'dsh-sa-target'))[0]
 check('快照取不到时控件禁用', Boolean(trigger) && trigger.props.disabled === true)
-check('禁用时文案是「派发 → 跟随会话」', Boolean(trigger) && text(trigger).includes('派发 → 跟随会话'))
+check('禁用时文案是「派发 → 不派发」', Boolean(trigger) && text(trigger).includes('派发 → 不派发'), trigger && text(trigger).replace(/\s+/g, ' ').trim())
 check('禁用时 title 提示看板服务不可用', Boolean(trigger) && trigger.props.title === '看板服务不可用', trigger && String(trigger.props.title))
 if (trigger) trigger.props.onClick()
 update(picker)
@@ -519,27 +519,29 @@ const atSource = registeredSources[0]
 const signal = new AbortController().signal
 
 const rows = await atSource.candidates({ sessionId: 'session-a' }, { query: '', quoted: false, drilled: false, signal })
-// 顶部固定一条「自动选择」，其后才是全部工作区。
-check('候选 = 自动选择 + 全部工作区', Array.isArray(rows) && rows.length === 3, Array.isArray(rows) ? String(rows.length) : 'not-array')
-check('首条是「自动选择」', Boolean(rows && rows[0] && rows[0].section === '自动选择' && rows[0].auto === true),
+// 顺序：不派发 → 自动选择 → 全部工作区。
+check('候选 = 不派发 + 自动选择 + 全部工作区', Array.isArray(rows) && rows.length === 4, Array.isArray(rows) ? String(rows.length) : 'not-array')
+check('首条是「不派发」', Boolean(rows && rows[0] && rows[0].value === 'none' && rows[0].section === '不派发'),
   rows && rows[0] && JSON.stringify(rows[0]))
-check('自动选择在无关键词时也会指向一个真实工作区',
-  Boolean(rows && rows[0] && (rows[0].value === 'ws-1' || rows[0].value === 'ws-2')),
-  rows && rows[0] && String(rows[0].value))
-check('候选带「工作区」分组', Boolean(rows && rows[1] && rows[1].section === '工作区'), rows && rows[1] && String(rows[1].section))
-check('候选项形状正确', Boolean(rows && rows[1] && rows[1].value === 'ws-1' && rows[1].name === '主工作区'),
+check('第二条是「自动选择」', Boolean(rows && rows[1] && rows[1].section === '自动选择' && rows[1].auto === true),
   rows && rows[1] && JSON.stringify(rows[1]))
+check('自动选择在无关键词时也会指向一个真实工作区',
+  Boolean(rows && rows[1] && (rows[1].value === 'ws-1' || rows[1].value === 'ws-2')),
+  rows && rows[1] && String(rows[1].value))
+check('候选带「工作区」分组', Boolean(rows && rows[2] && rows[2].section === '工作区'), rows && rows[2] && String(rows[2].section))
+check('候选项形状正确', Boolean(rows && rows[2] && rows[2].value === 'ws-1' && rows[2].name === '主工作区'),
+  rows && rows[2] && JSON.stringify(rows[2]))
 
 const filtered = await atSource.candidates({ sessionId: 'session-a' }, { query: '副', signal })
-check('候选按查询过滤（自动选择恒在首位）',
-  Array.isArray(filtered) && filtered.length === 2 && filtered[0].auto === true && filtered[1].value === 'ws-2',
+check('候选按查询过滤（自动选择恒在前，不派发按关键词出现）',
+  Array.isArray(filtered) && filtered.some(r => r.auto === true) && filtered.some(r => r.value === 'ws-2'),
   Array.isArray(filtered) ? JSON.stringify(filtered.map(function (r) { return r.value })) : 'not-array')
-check('关键词命中时自动选择指向命中的工作区', Boolean(filtered && filtered[0] && filtered[0].value === 'ws-2'),
-  filtered && filtered[0] && String(filtered[0].value))
+const autoRow = filtered.find(r => r.auto === true)
+check('关键词命中时自动选择指向命中的工作区', Boolean(autoRow && autoRow.value === 'ws-2'), autoRow && String(autoRow.value))
 
 // 自动选择：按关键词重排取第一名
 const autoPicked = atSource.onPick({
-  candidate: filtered[0],
+  candidate: autoRow,
   session: { sessionId: 'session-a' },
   query: '副',
   action: 'pick',
@@ -551,13 +553,25 @@ check('自动选择 onPick 产出 insert 且指向命中的工作区',
 
 // 没有匹配时给空 value，不静默失败
 const emptyAuto = await atSource.candidates({ sessionId: 'session-a' }, { query: '不存在的词', signal })
+const emptyAutoRow = emptyAuto.find(r => r.auto === true)
 check('无匹配时自动选择仍显示且 value 为空',
-  Boolean(emptyAuto && emptyAuto[0] && emptyAuto[0].auto === true && emptyAuto[0].value === ''),
-  emptyAuto && emptyAuto[0] && JSON.stringify(emptyAuto[0]))
+  Boolean(emptyAutoRow && emptyAutoRow.value === ''),
+  emptyAutoRow && JSON.stringify(emptyAutoRow))
+
+// 「不派发」写空串清除目标
+const nonePicked = atSource.onPick({
+  candidate: rows[0],
+  session: { sessionId: 'session-a' },
+  action: 'pick',
+  via: 'menu',
+})
+check('选「不派发」不插入 chip，且清除派发目标',
+  nonePicked === undefined && targetRequests().some(r => { try { return JSON.parse(r.body).workspace === '' } catch { return false } }),
+  nonePicked === undefined ? '未插入' : JSON.stringify(nonePicked))
 
 const before = targetRequests().length
 const pickResult = atSource.onPick({
-  candidate: rows[2],
+  candidate: rows[3],
   session: { sessionId: 'session-a' },
   action: 'pick',
   via: 'menu',

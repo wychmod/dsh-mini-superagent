@@ -9,10 +9,11 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  AUTO, DEFAULTS, LOG_PREFIX, MAX_REPORTS, NAME, SETTLED, STATE_DIR, TERMINAL_REPORT, VERSION,
+  AUTO, DEFAULTS, LOG_PREFIX, MAX_REPORTS, MODE_ALWAYS, MODE_OFF, NAME, NONE, SETTLED,
+  STATE_DIR, TERMINAL_REPORT, VERSION,
   newTaskId, nextMessageId, now,
 } from './constants.js'
-import { workerPrompt } from './prompt.js'
+import { FORCED_HINT, SOFT_HINT, workerPrompt } from './prompt.js'
 import { SessionGateway } from './sessions.js'
 import { readState, writeState } from './store.js'
 import { TaskTable, clip, lastAssistantText, oneLine } from './tasks.js'
@@ -60,6 +61,39 @@ export class Dispatch {
   }
 
   /**
+   * 一个会话当前的派发模式。
+   *
+   * - 目标里没有这个会话，或值是 `none` → `off`（不派发，正常跑）
+   * - 任何其他值（auto / 具体工作区） → `always`（强制派发）
+   *
+   * 这就是输入框里「不派发 / 派发到某处」那个开关的语义：
+   * 只要不是「不派发」，一切任务都得派下去。
+   */
+  modeOf(sessionId) {
+    const target = this.targets.get(sessionId)
+    if (!target) return MODE_OFF
+    if (target.auto) return MODE_ALWAYS
+    if (target.workspace_id) return MODE_ALWAYS
+    return MODE_OFF
+  }
+
+  /**
+   * 按会话当前的派发模式，切换它系统提示里那段「工作方式」。
+   *
+   * 提示段本身只注册一次，文本是函数，每次装配重新求值；这里只是换掉求值函数，
+   * 所以切模式不需要重载插件，也不需要重新建段。
+   */
+  refreshHint(agent) {
+    if (!agent) return
+    this.sessions.hint(agent, () => (this.modeOf(agent.id) === MODE_ALWAYS ? FORCED_HINT : SOFT_HINT))
+  }
+
+  /** 把所有活着的会话的提示按当前模式刷一遍（插件启动时用）。 */
+  refreshAllHints() {
+    for (const agent of this.ctx.agents?.list?.() ?? []) this.refreshHint(agent)
+  }
+
+  /**
    * 设置或清除一个会话的派发目标工作区。
    *
    * 传 `'auto'` 表示「自动」：不锁定具体工作区，每次派发时按任务标题重新挑一个。
@@ -71,15 +105,18 @@ export class Dispatch {
    */
   async setTarget(sessionId, ref) {
     const value = String(ref ?? '').trim()
-    if (!value) {
+    if (!value || value.toLowerCase() === NONE) {
       this.targets.delete(sessionId)
       this.schedulePersist()
+      // 切回「不派发」：把该会话的提示换回轻提示。
+      this.refreshHint(this.ctx.agents.get(sessionId))
       return undefined
     }
     if (value.toLowerCase() === AUTO) {
       const target = { auto: true, title: '自动选择', path: '' }
       this.targets.set(sessionId, target)
       this.schedulePersist()
+      this.refreshHint(this.ctx.agents.get(sessionId))
       return target
     }
     const workspace = await this.workspaces.resolve(value)
@@ -90,6 +127,7 @@ export class Dispatch {
     const target = { workspace_id: workspace.id, title: workspace.title, path: workspace.path }
     this.targets.set(sessionId, target)
     this.schedulePersist()
+    this.refreshHint(this.ctx.agents.get(sessionId))
     return target
   }
 
@@ -180,7 +218,7 @@ export class Dispatch {
       permissionPreset: input.permissionPreset,
     }
     this.table.add(task)
-    this.sessions.hint(agent)
+    this.refreshHint(agent)
     this.schedulePersist()
     void this.pump()
     return task

@@ -55,6 +55,10 @@ export async function apply(ctx, config) {
     dispatch.schedulePersist()
   })
 
+  // 会话新建时按当前模式挂上提示段：模式是「必派发」就装强制段，否则装轻提示。
+  // 段文本是函数，之后切模式只换求值函数，不用重载插件。
+  ctx.on('agent/created', ({ agent }) => { dispatch.refreshHint(agent) })
+
   // 任务看板的 HTTP 路由（宿主没有 webServer 时安静跳过）。
   const disposeBoard = registerBoardRoutes(ctx, dispatch)
   if (disposeBoard) ctx.effect(() => disposeBoard)
@@ -63,6 +67,8 @@ export async function apply(ctx, config) {
   ctx.effect(() => () => { void dispatch.dispose() })
 
   void dispatch.pump()
+  // 已有会话按当前模式刷新一次（插件重载后不会重复注册段，只换文本）。
+  dispatch.refreshAllHints()
   // 过期子会话自动归档（archiveAfterHours / archiveSweepMinutes 都为 0 时不起）。
   dispatch.startArchiveSweep()
   ctx.logger?.info?.('%s 已加载：maxWorkers=%d', LOG_PREFIX, dispatch.table.maxWorkers)

@@ -7,7 +7,7 @@
 export const NAME = 'dsh-mini-superagent'
 
 /** 插件版本，会出现在 dispatch_list 与看板快照里，便于确认“跑的是哪一版”。 */
-export const VERSION = '0.5.2'
+export const VERSION = '0.6.0'
 
 /** 日志前缀。 */
 export const LOG_PREFIX = `${NAME}:`
@@ -30,6 +30,22 @@ export const STATE_DIR = NAME
  * 写进 targets 时表示：不锁定具体工作区，每次派发按任务内容重新挑。
  */
 export const AUTO = 'auto'
+
+/**
+ * 派发目标的「不派发」标记值。
+ *
+ * 这是**默认模式**：目标里没有这个会话的条目，就等同于不派发。
+ * 设成它 = 删掉条目，会话按普通方式直接干活，不创建子会话。
+ */
+export const NONE = 'none'
+
+/**
+ * 派发模式（会话级开关）：
+ * - `off`    不派发：往返于本会话，怎么干由模型自己决定
+ * - `always` 必派发：除纯问答外，一切执行型任务都必须 dispatch_launch 下去
+ */
+export const MODE_OFF = 'off'
+export const MODE_ALWAYS = 'always'
 
 /** 默认配置；cordis.patch.yml 里的 config 会覆盖这里的字段。 */export const DEFAULTS = {
   /** 同时真正在跑（running）的子会话上限；超出的任务进入 queued，有空位自动开始。 */

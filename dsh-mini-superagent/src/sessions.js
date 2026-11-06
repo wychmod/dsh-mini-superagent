@@ -6,7 +6,6 @@
  * agent.steer 这些细节，换版本时只需要改这一个文件。
  */
 import { LOG_PREFIX, PROMPT_SECTION, SOURCE_KIND } from './constants.js'
-import { DISPATCH_HINT } from './prompt.js'
 
 export class SessionGateway {
   /**
@@ -19,6 +18,8 @@ export class SessionGateway {
     this.freezePromise = undefined
     /** 已经加过工作方式提示的会话，避免重复注册。 */
     this.hinted = new Set()
+    /** 每个会话当前的提示求值函数；换模式时只替换这里，不重复注册段。 */
+    this.hintTexts = new Map()
     /**
      * 提示段的 disposer。注册挂在 agent.ctx 上，生命周期比插件长，
      * 所以插件卸载时必须主动收回，否则重载后同一会话会出现两段提示。
@@ -155,16 +156,27 @@ export class SessionGateway {
   }
 
   /**
-   * 第一次从这个会话派发时，把工作方式写进它的系统提示（只加一次）。
-   * 注册在 agent.ctx 上，所以只影响该会话，不影响部署里的其他会话。
+   * 给会话装上「工作方式」提示段。
+   *
+   * 段文本是**函数**：DSH 每次装配系统提示都会重新求值，所以模式一变
+   * （在输入框里切换派发目标），下一轮请求就用新的文本——不需要重载插件。
+   *
+   * @param {object} agent 目标会话
+   * @param {() => string} text 每次装配时求值的提示文本
    */
-  hint(agent) {
+  hint(agent, text) {
+    this.hintTexts.set(agent.id, text)
     if (this.hinted.has(agent.id)) return
     this.hinted.add(agent.id)
     try {
       const prompt = agent.ctx?.systemPrompt
       if (typeof prompt?.section !== 'function') return
-      const dispose = prompt.section({ name: PROMPT_SECTION, order: 9998, text: DISPATCH_HINT })
+      const resolve = () => {
+        const current = this.hintTexts.get(agent.id)
+        try { return typeof current === 'function' ? current() : String(current ?? '') }
+        catch { return '' }
+      }
+      const dispose = prompt.section({ name: PROMPT_SECTION, order: 9998, text: resolve })
       if (typeof dispose === 'function') this.hintDisposers.add(dispose)
     } catch (error) {
       this.warn(`${LOG_PREFIX} 无法为该会话注册工作方式提示: %s`, String(error))
@@ -178,5 +190,6 @@ export class SessionGateway {
     }
     this.hintDisposers.clear()
     this.hinted.clear()
+    this.hintTexts.clear()
   }
 }
