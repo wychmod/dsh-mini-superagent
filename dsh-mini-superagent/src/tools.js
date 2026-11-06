@@ -19,6 +19,20 @@ const TaskRefSchema = {
   description: '任务 ID，例如 t-m0abc-1；也可以用 dispatch_list 查。',
 }
 
+/**
+ * `dispatch_report` 接受的报告状态（与 schema 里的 enum 同一份事实）。
+ *
+ * 为什么在工具边界再校验一次、而不复用 constants.js 的 TERMINAL_REPORT：
+ * 两者职责不同——TERMINAL_REPORT 是「哪些报告会结束任务」，只有 4 个里的 3 个
+ * 终态外加 cancelled；而这里要判的是「这个 status 是不是我们认识的词」，
+ * 必须包含不结算任务、但完全合法的 `progress`。
+ *
+ * 为什么非校验不可：宿主不保证按 schema 的 enum 拦住模型，一旦传进 `finished`
+ * 这类未知值，dispatch.report 既不结算也不报错，任务就永远停在 running
+ * 白占一个并发位，而且没有任何提示。所以在入口就把脏值挡住。
+ */
+const REPORT_STATUSES = new Set(['done', 'blocked', 'failed', 'progress'])
+
 /** 全部工具名，供文档与测试引用。 */
 export const TOOL_NAMES = [
   'dispatch_launch',
@@ -262,8 +276,12 @@ export function toolDefinitions(dispatch) {
       async execute(args, exec) {
         const agent = requireCaller(exec)
         const mine = dispatch.table.ofSession(agent.id)
+        // 显式指定 id 时必须走 ownTask 的归属校验：否则会话 A 传会话 B 的
+        // task_id 就能读到对方任务的标题/状态/摘要（0.7.0 之前实测可复现）。
+        // 这里不做「过滤掉不可见任务」的静默处理——那会让调用方以为等到了
+        // 一个根本没等的任务；混入别人的任务就直接报错。
         const targets = args.task_ids?.length
-          ? args.task_ids.map(id => dispatch.table.get(id)).filter(Boolean)
+          ? args.task_ids.map(id => ownTask(agent, id))
           : mine.filter(task => !SETTLED.has(task.status))
         if (!targets.length) return { waited: false, tasks: mine.slice(0, 10).map(task => dispatch.card(task)) }
         await dispatch.table.waitFor(targets, args.timeout_ms ?? 60_000)
@@ -285,7 +303,16 @@ export function toolDefinitions(dispatch) {
         additionalProperties: false,
       },
       async execute(args, exec) {
-        return dispatch.report(requireCaller(exec), args)
+        // 在工具边界把未知 status 挡住：dispatch.js 只对终态报告结算，
+        // 未知词既不结算也不报错，任务会永远停在 running 占着并发位。
+        // 报错时列出允许值，让模型能自己改对后重试。
+        const status = String(args?.status ?? '')
+        if (!REPORT_STATUSES.has(status)) {
+          throw new Error(
+            `dispatch_report 的 status 必须是 ${[...REPORT_STATUSES].join(' / ')} 之一，收到的是「${status || '(空)'}」`,
+          )
+        }
+        return dispatch.report(requireCaller(exec), { ...args, status })
       },
     },
   ]
