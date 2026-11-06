@@ -10,7 +10,7 @@
  *
  * 入口只做三件事：建 Dispatch、注册工具、接两条宿主事件。
  */
-import { LOG_PREFIX, NAME, SETTLED, now } from './constants.js'
+import { LOG_PREFIX, NAME, SETTLED } from './constants.js'
 import { registerBoardRoutes } from './board.js'
 import { Dispatch } from './dispatch.js'
 import { registerTools } from './tools.js'
@@ -34,14 +34,17 @@ export async function apply(ctx, config) {
   registerTools(ctx, dispatch)
 
   // worker 回合开始：记下 turnStartedAt，用于判断本回合是否已经给过终态报告。
+  //
+  // 注意这里**不能**直接写 task.status：0.6.0 之前它无条件把任务写成 running，
+  // 于是已结算（done / cancelled / interrupted）的任务会被 worker 的下一次
+  // running 事件「复活」，runningCount 虚高、并发位被幽灵占用，
+  // 而且这个任务永远不会再被结算。现在交给 dispatch.workerTurnStarted，
+  // 由状态跃迁表判定该不该动。
   ctx.on('agent/status', ({ agent, status }) => {
     const task = dispatch.table.byWorker(agent.id)
     if (!task) return
     if (status === 'running') {
-      task.status = 'running'
-      task.turnStartedAt = now()
-      task.updatedAt = task.turnStartedAt
-      dispatch.schedulePersist()
+      dispatch.workerTurnStarted(task)
       return
     }
     if (status === 'idle') void dispatch.onWorkerIdle(agent.id)
@@ -52,7 +55,6 @@ export async function apply(ctx, config) {
     const task = dispatch.table.byWorker(agent.id)
     if (!task || SETTLED.has(task.status)) return
     dispatch.settle(task, 'interrupted')
-    dispatch.schedulePersist()
   })
 
   // 会话新建时按当前模式挂上提示段：模式是「必派发」就装强制段，否则装轻提示。
@@ -64,7 +66,12 @@ export async function apply(ctx, config) {
   if (disposeBoard) ctx.effect(() => disposeBoard)
 
   // 卸载时冲刷状态；运行中的子会话归 DSH 自己管。
-  ctx.effect(() => () => { void dispatch.dispose() })
+  //
+  // disposer 必须**返回** dispose() 的 Promise：0.6.0 之前写的是
+  // `void dispatch.dispose()`，宿主拿不到 Promise 就不会等它，
+  // 而 dispose 内部先 `disposed = true` 再 await persist——
+  // 期间任何 schedulePersist 都被挡住，最后一段状态可能根本没落盘。
+  ctx.effect(() => () => dispatch.dispose())
 
   void dispatch.pump()
   // 已有会话按当前模式刷新一次（插件重载后不会重复注册段，只换文本）。
