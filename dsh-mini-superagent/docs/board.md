@@ -76,7 +76,7 @@
 
 ## HTTP 接口
 
-全部挂在同一个前缀下，同源 `fetch`，不需要鉴权头：
+全部挂在同一个前缀下，同源 `fetch`；0.7.0 起客户端会带上 `x-dsh-mini-superagent` 头（写操作要求它）：
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
@@ -111,21 +111,23 @@
 
 ```json
 {
-  "version": "0.5.0",
+  "version": "0.7.0",
   "generatedAt": "2026-11-05T10:42:07.000Z",
   "concurrency": { "running": 2, "queued": 1, "max": 6 },
   "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0, "archived": 2 },
   "workspaces": [ { "id": "ws-…", "title": "mini-superagent", "path": "C:\\Users\\…\\Documents\\mini-superagent" } ],
   "targets": { "session-…": { "workspace_id": "ws-…", "title": "项目 A", "path": "D:\\proj\\a" } },
+  "truncated": null,
   "tasks": [ { "task_id": "t-m0abc-1", "…": "…" } ]
 }
 ```
 
 - `counts` 按**全量**任务统计；`archived` 是带 `archivedAt` 的任务数（不是状态）。
 - `workspaces` 是工作区注册表快照（`id` / `title` / `path`），注册表不可用时为空数组；面板用它做工作区下拉。
-- `targets` 是每个主会话当前的派发目标（`session_id → {workspace_id,title,path}`）；没有目标的会话不出现。
+- `targets` 是每个主会话当前的派发目标（`session_id → {workspace_id,title,path}` 或 `{auto:true,…}`）；没有目标的会话不出现。
 - `tasks` 最多 200 条；排序：`running` → `queued` → 其余按 `updated_at` 倒序；同权重按 `updated_at` 倒序。
-- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.5.0`）。
+- `truncated`：任务总数超过 200 时为 `{shown, total}`，否则 `null`。**这是给界面的提示**——没有它的时候「总计 500 / 列表 200」看起来像数据丢了。
+- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.7.0`）。
 
 任务字段（`boardTask` 拍平后的形状）：
 
@@ -146,7 +148,7 @@
 | `created_at` / `updated_at` | ISO 8601 | 创建 / 最近变更 |
 | `started_at` | ISO 8601 | 首次启动时间；从未启动（仍在 `queued`）时字段缺失 |
 | `turn_started_at` | ISO 8601 | 本轮开始时间；没有在跑回合时字段缺失 |
-| `elapsed_ms` | number | 从 `started_at` 到现在的毫秒数；无 `started_at` 时为 0 |
+| `elapsed_ms` | number | 耗时。未结算：`started_at → 现在`（走表增长）；已结算：`started_at → updated_at`（冻结在结算时刻）。无 `started_at`、或已结算但 `updated_at` 不可解析时为 0 |
 | `report_count` | number | 报告条数（上限 50） |
 | `last_report` | object \| null | `{at, status, summary}`，没有报告时 `null` |
 | `last_text_preview` | string | worker 最后一段输出的前 500 字符 |
@@ -161,7 +163,7 @@
 | 码 | 场景 | 错误文案示例 |
 | --- | --- | --- |
 | `400` | 请求 URL 不合法 / body 不是合法 JSON / body 超过 64 KiB | `请求体不是合法 JSON`、`请求体过大` |
-| `403` | GET 非本机且非同一源 / POST 的 `Origin` 与 `Host` 不一致 | `看板只对本机或同源页面开放`、`跨站请求被拒绝` |
+| `403` | Host 非回环且未在 `BOARD_ALLOWED_HOSTS` / Origin 与 Host 不一致 / 写操作缺 `x-dsh-mini-superagent` 头 | `看板只对本机或同源页面开放`、`看板写操作需要同源页面或带 ... 头的本机调用` |
 | `404` | `task_id` 不存在 / 未知子路径 | `没有任务 t-xxx`、`未知的看板接口` |
 | `409` | 操作被任务状态拒绝；或 `/target` 找不到工作区 | `任务 t-xxx 正在运行，不需要重试；要打断它请用取消`、`找不到工作区「…」。现有：<标题>（<id>）；…` |
 | `500` | 处理器内部异常 | `看板接口内部错误`（日志里有前缀 `dsh-mini-superagent:` 的 warn） |
@@ -283,25 +285,40 @@
 
 ## 鉴权与暴露面
 
-没有 token、没有登录态、没有额外请求头。准入靠 Host/Origin：
+0.7.0 起不再只靠 Host/Origin 的相等比较，因为那个判据可以被 DNS rebinding 绕过。
+
+没有 token、没有登录态，准入靠两条：**Host 必须是真正在监听的地址**，写操作另需**自定义头**。
 
 | 操作 | 规则 |
 | --- | --- |
-| `GET` | `Host` 的主机名是 `127.0.0.1` / `localhost` / `::1`（含 `[::1]`）→ 放行；否则必须带 `Origin` 且其 host 与 `Host` 一致 |
-| `POST` | 带 `Origin` 时，其 host 必须与 `Host` 一致；不带 `Origin` 的请求放行（非浏览器客户端，如 curl/脚本） |
+| `GET` | `Host` 的主机名是回环（`127.0.0.1` / `localhost` / `::1` / `[::1]`）→ 放行，但若有 `Origin` 它也必须指向回环；非回环 `Host` 默认拒绝，需写进 `BOARD_ALLOWED_HOSTS`，且 `Origin` 与 `Host` 一致 |
+| `POST` | 先满足 `GET` 的规则，**并且**带 `x-dsh-mini-superagent` 头 |
 
-为什么：
+为什么这么改：
 
-- DSH 自己的页面路由要求鉴权，但**插件注册的具名路由排在鉴权之前**。如果对所有来源开放，
-  把 Web 暴露到局域网时，任何人都能读到任务标题、工作目录、报告摘要与错误原文。
-- 同源检查挡的是**浏览器跨站伪造**：浏览器发起的跨站 POST 一定带 `Origin`，不一致就 403，且不产生副作用。
+- **D A S**（DNS rebinding）能绕过 0.6.0 的判据。攻击者页面在 `http://evil.example:9735`
+  （该域名解析到 127.0.0.1），它向同一个源发请求——浏览器的 `Host` 与 `Origin`
+  都是 `evil.example:9735`，「两者相等」恒真。而 0.6.0 对不带 `Origin` 的 POST
+  直接放行，等于局域网里任意脚本都能打。
+- **自定义头挡不住 rebinding**（同源请求不需要预检），所以真正的判据是 Host：
+  浏览器无法伪造 `Host`，它来自 URL。回环 Host 放行是安全的——攻击者页面想让浏览器
+  发出 `Host: 127.0.0.1:9735`，就必须真的去连 127.0.0.1，那时 `Origin` 是 `evil.example`，
+  会被回环分支的 Origin 检查拒掉。
+- 自定义头的作用是防**同源页面之外的脚本**与简单 CSRF：跨站发带自定义头的请求会触发
+  预检，预检不带凭据也不带这个头，服务端拒绝后真请求不会发出。
+
+配置：
+
+- `BOARD_ALLOWED_HOSTS`（`src/constants.js`）默认空数组。要开放远程访问，把实际地址
+  写进去，例如 `['192.168.1.5:3080']`；`['*']` 放行任意 Host，不推荐。
+- 本机命令行/脚本调用写操作时自己带上这个头即可：
+  `curl -H 'x-dsh-mini-superagent: 1' -X POST ...`
 
 代价与边界：
 
-- 远程访问时，看板只能在同源页面里用；**远程 `curl` 读不到数据（GET 403）**。
-- 但「不带 Origin」的 POST 会被放行。也就是说：能访问到端口、又知道 `task_id` 的远程脚本，仍可以取消/重试任务。
-  这是为了不破坏本机命令行调用而做的取舍；任务 id 不含可枚举的会话信息，但拿到 id 就能操作，不要把 Web 端口暴露到不可信网络。
+- **非回环地址默认不可访问**（0.7.0 的行为变更）。远程浏览器要用的，必须显式放行。
 - 看板返回的数据包含 `cwd`、会话 id、报告摘要与错误原文，按敏感信息对待。
+- 这仍然不是完整鉴权：同源页面里的 XSS 可以带着这个头发请求。它防的是跨站，不是页面内的脚本。
 
 ---
 
@@ -326,7 +343,7 @@
 - **轮询固定 2 秒**：不可配置；页面隐藏时暂停。
 - **数据可能陈旧**：取数失败时保留上一次成功快照并提示，不自动清空。
 - **看板不按会话过滤**：它展示整个实例的任务；agent 侧要按会话看用 `dispatch_list`。
-- **POST 无 Origin 即放行**：见「鉴权与暴露面」，局域网部署要自己控制端口暴露。
+- ~~POST 无 Origin 即放行~~：0.7.0 已修，见「鉴权与暴露面」。
 - **重试不做状态回滚**：续跑依赖 worker 自己的历史；它可能重复执行已经做过的步骤。
 - **归档字段现在会渲染，但归档行的历史仍可点**：`openSession` 对已归档会话可能失败（`not-listed`），失败只给通用错误文本。
 - **`targets` 只看主会话**：它是「下一次派发往哪派」的偏好，不是任务属性；任务卡上的 `workspace_id` 只反映任务实际派到哪。

@@ -2,6 +2,192 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 0.8.0 — 2026-11-06
+
+修掉 0.7.0 评审里剩下的 P1/P2。这些问题单个看都不致命，但都是「用久了会咬人」的类型：
+越权读、报告丢失、排队错乱、额度永久锁死、提示注入、来源污染。
+
+### 权限与安全
+
+- **`dispatch_wait` 缺归属校验**（`src/tools.js`）
+  同文件的 `inspect` / `message` / `cancel` 都校验了 `parentSessionId`，唯独 `wait` 没校验。
+  后果：会话 A 传会话 B 的 `task_id`，能读到对方的标题、状态与报告摘要。
+  顺带修掉同源的另一半：原来的 `.filter(Boolean)` 还会把**不存在的 id 静默吃掉**并返回
+  `waited:false`，让调用方误以为等到了。现在两者都显式报错。
+- **`dispatch_report` 的未知 status 让任务永远卡 `running`**（`src/tools.js`）
+  schema 声明了 enum，但 execute 直接透传；传 `'finished'` 之类的值既不结算也不报错，
+  任务永久占用并发位。现在入口处校验并列出允许值。
+- **工作目录可伪造提示规则块**（`src/prompt.js`）
+  `工作目录: ${task.cwd}` 未清洗，含换行的 cwd 能伪造出「工作规则」块并插在真规则**之前**。
+  现在：结构化字段一律压成单行去控制字符；简报用围栏包住；**规则放到数据块之后**，
+  并显式声明「与简报冲突时以规则为准」。
+  风险等级要说清：不是远程漏洞（攻击面是能控制 `dispatch_launch` 参数的会话），
+  但它破坏了数据/指令边界，而边界破了之后，任何让外部输入流进参数的功能都会变成真漏洞。
+
+### 报告回流
+
+- **报告投递失败无人知晓**（`src/dispatch.js`）
+  `relay()` 的返回值被所有调用方忽略，「报告会自己回来」这个核心承诺其实是尽力而为。
+  现在：失败按 2s→4s→8s 重试 3 次，结果记在 `task.delivery` 上，
+  并通过 `card()` 的 `report_delivery` 暴露——失败的投递在 `dispatch_list` 与看板上一眼可见。
+- **降级投递污染消息来源**（`src/sessions.js`）
+  收件箱不可用时退回 `sessionController.prompt`，而它构造的消息来源是 `{kind:'user'}`，
+  主会话会把报告当成用户亲口说的。现在降级时记 warn，并返回 `delivered:'prompt'`
+  让调用方能区分；这直接违背了 `constants.js` 里「不会被误当成用户手打的消息」的注释。
+- **`wake=false` 反而会唤醒对方**（`src/sessions.js` / `src/dispatch.js`）
+  steer 对空闲 agent 会静默降级成 followup（唤醒），与「不打扰」的意图相反；
+  且 `relay` 与 `deliver` 各有一套「目标在不在跑」的判据。
+  现在判据只留一处，`wake=false` 走 `agent.inject()`（只追加下一步、不唤醒）。
+- **批次成员被 retry 后三条回流路径全关**（`src/dispatch.js`）
+  `groupClosed` 永不复位 + `report` 见 group 就 skip + `onWorkerIdle` 见 group 就 return，
+  结果重试后的成员彻底静默。现在用独立的 `groupReopened` 标记放行，**不动** `groupClosed`
+  （改动它会让 `maybeSummarize` 以为这批没汇总，重复发一条）。
+
+### 状态与额度
+
+- **`maxTasksPerSession` 永久锁死会话**（`src/dispatch.js`）
+  原实现数 `ofSession().length`，而任务表只增不减：累计派发满 64 个之后该会话**再也不能派发**，
+  即使全部 done、全部归档也不释放。这是「用着用着突然不能派了」的典型成因。
+  现在 `quotaUsed()` 只数仍在册的任务：已归档的不计，已结算超过 24 小时的不计。
+- **`waitFor` 对重复 id 要等满超时、且超时后不清理等待者**（`src/tasks.js`）
+  `finishOne` 被 `Set` 去重但 `remaining` 按数组长度计，所以 `waitFor([a,a])` 里 a 结算后仍要等满超时；
+  超时分支也从不摘除 `waiters`，长期不结算的任务会一直挂着 resolver。两者都已修。
+- **`retry` 的 attempt 先自增后投递**（`src/dispatch.js`）
+  投递失败时 attempt 已消耗、状态卡 `running`。现在投递成功后才记 attempt。
+  同时区分「确定不存在」与「探不了」：原来的 `.catch(() => undefined)` 把任意异常都当成
+  不可恢复，一次瞬时 `gateway/internal` 就会白白换掉 worker、历史断链。
+- **`createWorker` 丢弃 `create()` 的返回值**（`src/sessions.js`）
+  `create({sessionId})` 在会话已存在且非空白时**可能换号**，返回值里的 id 才是真的。
+  原实现紧接着用请求里的 id 去 `resolveAgent`，换号时必然 not-found，任务 failed 而真会话成孤儿。
+  现在以返回值为准，并同步回 `task.workerSessionId`。
+
+### 文本与数据
+
+- **`clip()` 在 `limit < 400` 时输出比上限还长**（`src/tasks.js`）
+  原来是 `limit - 400` + `slice(-400)`，短 limit 下头部预算变负、尾部仍取 400，
+  实测 `clip(1000 字, 200)` 返回 417 字。这类调用在 `reportText` 与 `card` 里都有，
+  会把消息撑出上下文预算。现在按比例分配预算并做硬兜底。
+- **简报落盘被截到 2000 字，retry 重投残版**（`src/dispatch.js`）
+  重启读回的是残版，`retry` 的「重投原始简报」实际投的是被截断的任务描述，worker 无从得知。
+  现在完整落盘（上限放宽到 `maxBriefChars × 2`），超过才截并留 `briefTruncated` 标记。
+
+### 工作区
+
+- **`safeDirName` 放过 Windows 保留名与尾部点号**（`src/workspaces.js`）
+  `CON` / `NUL` / `COM1` 会让 `mkdir` 失败或建出非法目录；`abc.` 与 `abc` 会撞同一个目录。
+  现在保留名按第一个点之前的部分判定并在点前插入 `-`（`CON.txt` → `CON-.txt`），
+  尾部点号与空格在截断前后各清理一次。
+- **`resolve` 的包含匹配会误命中短查询**（`src/workspaces.js`）
+  `resolve('a')` 会命中「第一个含 a 的工作区」。现在单字符跳过包含匹配；多命中时
+  记 warn 列出全部候选并返回 `undefined`，不再静默挑一个。
+  同时补掉一个我自己方案里的坑：`resolve` 返回 undefined 后 `resolveOrCreate` 会把歧义
+  当成「不存在」然后 `mkdir` 一个重复目录——比原 bug 更糟。现在新建前再判一次歧义。
+- **绝对路径无脑 `mkdir -p`，可越界建目录**（`src/workspaces.js`）
+  agent 只要把 `workspace` 写成绝对路径，插件就以 Host 进程权限在该路径建目录并注册，
+  不受 `workspaceRoot` 约束且无任何痕迹。现在越界时记 warn 说明路径与工作区根
+  （仍然创建——「可审计」优先于「可禁止」，但必须留痕）。
+
+### 看板
+
+- **`elapsed_ms` 语义错误**（`src/board.js`）：用 `startedAt → 现在`，已完成任务会一直增长，
+  实测一个 26 小时前的 done 任务显示「26 时 0 分」。现在已结算的冻结在 `updatedAt`。
+- **200 条截断无提示**（`src/board.js`）：任务数超上限时「总计 500 / 列表 200」看起来像数据丢了。
+  快照新增 `truncated: {shown, total}`。
+- `/target` 只校验 `session_id` 非空，任意字符串（含 `__proto__`）都会 200 并写进 targets 落盘；
+  现在校验会话形状与存在性，不合法 404。
+- 请求体超限时 `req.destroy()` 让客户端收到 ECONNRESET 而非 400；改为停止累积并正常返回 400。
+
+### 验证
+
+- `node --test` **95 pass**（0.7.0 为 74；新增 `test/p1-regression.test.js` 17 条 +
+  看板新增 4 条）。
+- 四个独立验证脚本全通过（共 70 项断言）：
+  `verify-p0-fixes.mjs`（11）· `verify-lead-p1.mjs`（11）· `verify-surface-p1.mjs`（19）·
+  `verify-workspaces-p1.mjs`（37）。
+
+### 未做
+
+- 未做真机视觉验收。
+- 未引入错误码闭集（评审的 P1-13）：13 处 `throw new Error(中文)` 与看板手工状态码仍在，
+  这是「文档漂移」与「状态码靠猜」的共同根因，但改动面横跨所有模块，单独一轮做更合适。
+
+## 0.7.0 — 2026-11-06
+
+修掉六个**可复现**的正确性 / 安全问题。它们都属于「平时看不出、出事很难查」的类型：
+状态机没有单一入口、落盘不原子、看板准入判据可被绕过。全部有回归测试钉住
+（`test/p0-regression.test.js`，16 条用例）。
+
+### 修复（P0）
+
+- **P0-1 看板准入可被 DNS rebinding 绕过**（`src/board.js`）
+  0.6.0 的判据是「`Origin.host === Host` 即同源」，没有 `Origin` 时直接放行。
+  但 `Host` 与 `Origin` 都由客户端决定：攻击者页面从 `http://evil.example:9735`
+  加载（域名解析到 127.0.0.1）时两者都是 `evil.example:9735`，判据恒真。
+  实测能读全部任务标题 / 工作目录 / 报告摘要，能归档、改派发目标、取消任务。
+  现在：回环 Host 放行（并要求 Origin 也是回环或无 Origin），非回环 Host 默认拒绝、
+  需显式写进 `BOARD_ALLOWED_HOSTS`；写操作另需自定义头 `x-dsh-mini-superagent`。
+  **行为变更**：非回环地址的看板默认不可访问，需要显式放行。
+
+- **P0-2 `settle()` 无幂等，状态可被任意覆盖**（`src/tasks.js`）
+  0.6.0 的 `settle` 是裸赋值：`done` 能被 `settle('cancelled')` 改成 cancelled
+  （看板点一下「取消」就能改掉已完成任务）；`index.js` 的 `agent/status` 分支
+  更是无条件把任务写成 `running`，让 `done` / `cancelled` 复活、并发位被幽灵占用
+  且永不结算。
+  现在：新增 `TRANSITIONS` 跃迁表与 `transition()` 唯一入口，`settle` 对已结算
+  任务直接返回 false；`index.js` 改为调用事实方法 `dispatch.workerTurnStarted()`。
+
+- **P0-3 `dispatch_message` 先改状态后投递**（`src/dispatch.js`）
+  投递失败时状态不回滚：已完成任务被打回 `running` 并永久占用并发位；
+  对 `queued` 任务更糟——状态置 running 但没从队列摘除，排队顺序永久错乱。
+  现在：先投递，成功后跃迁状态，失败则保持原状态并抛错。
+
+- **P0-4 `cancel()` 与 `start()` 竞态留下僵尸 worker**（`src/dispatch.js`）
+  `start()` 有多个 await（解析工作区、建会话、切目录、投递），期间取消任务时
+  `agents.get()` 还是空的，`agent.cancel()` 被跳过，但会话照常被创建并投递简报。
+  看板显示已取消，实际有子会话在烧模型额度。
+  现在：每个 await 之后检查一次状态，已结算就中止启动并取消已建出的会话。
+
+- **P0-5 落盘非原子，写坏即全部历史丢失**（`src/store.js`）
+  原来是直接 `writeFile` 覆盖，进程在写入中途崩溃会留下半截 JSON，`restore`
+  只 warn 然后以空表启动，用户无法区分「第一次装」和「数据被写坏了」。
+  现在：`tmp` → `fsync` → `rename` 原子替换，保留 `.bak`，读时主文件损坏
+  自动回退备份并标明 `recovered: 'bak'`；`Dispatch.persist()` 另加串行写链。
+
+- **P0-6 「自动选择」目标重启后丢失**（`src/dispatch.js`）
+  `restore()` 只恢复带 `workspace_id` 的目标，`auto` 目标被过滤掉。
+  0.6.0 里 auto 还意味着「必派发」模式，所以丢失后会话会**静默退回「不派发」**
+  （自己干活），行为反转且界面无提示。
+  现在：`auto` 与具体工作区目标都被保留。
+
+### 顺带修复
+
+- `/target` 只校验 `session_id` 非空，任意字符串（含 `__proto__`、不存在的会话）
+  都会返回 200 并写进 targets；现在校验会话形状与存在性，不合法返回 404。
+- 请求体超限时 `req.destroy()` 让客户端收到 ECONNRESET 而非 400；改为停止累积
+  并正常返回 400。
+- `pump()` 串行 `await start()`：并发位是 6 但启动永远是 1，冷启动时延 ≈ N × 建会话时延。
+  现在一次占满所有空位并行启动。
+- `ctx.effect` 的 disposer 用 `void dispatch.dispose()`，宿主拿不到 Promise 不会等它，
+  最后一段状态可能没落盘。改为返回该 Promise。
+
+### 客户端
+
+- 所有 fetch 带上 `x-dsh-mini-superagent` 头（写操作现在要求它）。
+- 带该头的跨站请求会触发 CORS 预检，预检不带凭据也不带此头，服务端拒绝后真请求不会发出。
+
+### 验证
+
+- `node --test` **74 pass**（0.6.0 为 56；新增 `test/p0-regression.test.js` 16 条 +
+  看板准入新增 2 条，同时移除了 1 条与新行为冲突的旧断言）。
+- 独立探针 `verify-p0-fixes.mjs` 逐条复验：**11/11 通过**。
+- 真实 `tasks.json`（12 个任务）可被新版正常读回；该文件的 `targets` 已为空，
+  正是旧版每次重启丢弃 auto 目标的结果。
+
+### 未做
+
+- 未做真机视觉验收；看板界面与 `@` 菜单的观感仍需目视。
+- 本轮只修 P0，评审列出的 20 条 P1 未动。
+
 ## 0.6.0 — 2026-11-06
 
 把「派发」变成**会话级的模式开关**：默认不派发，选了任何具体目标就强制派发。

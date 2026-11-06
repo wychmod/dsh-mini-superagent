@@ -84,7 +84,7 @@ apply()
 src/board.js ── boardSnapshot / Dispatch.cancel / retry / archiveStale / setTarget ──▶ TaskTable + targets
 ```
 
-Host 与 Client 不共享内存：Client 只认这 5 个同源 HTTP 端点（1 个 GET + 4 个 POST），Host 把任务表与目标表拍平成快照返回。
+Host 与 Client 不共享内存：Client 只认这几个同源 HTTP 端点（GET /board、GET /selfcheck、POST /client-ready、POST /archive、POST /target、POST /cancel、POST /retry），Host 把任务表与目标表拍平成快照返回。
 
 ## 模块与职责
 
@@ -216,9 +216,17 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 
 这条修复本身是 0.2.0 的改动：0.1.0（单文件版）只在 `launch` 与 `apply` 调 pump，并发位一满，队列要等下一次派发才动。
 
-### 9. 状态机只有两个集合
+### 9. 状态机只有两个集合，且只有一个写入口
 
 - `SETTLED = {done, blocked, failed, cancelled, ended, interrupted}`：不再占并发位、`dispatch_wait` 不再等。
+
+
+**0.7.0 起，`task.status` 只有一个写入口。** `TaskTable.transition()` 依 `TRANSITIONS`
+跃迁表校验每一次变化，`settle()` 对已结算任务直接返回 false（幂等），离开终态只能走
+显式命名的 `reopen()`。0.6.0 之前有 6 处裸赋值（`index.js` 的 agent/status、`takeRunnable`、
+`settle`、`start`、`message`、`retry`），没有任何一处校验前置状态，于是派生出这批可复现的 bug：
+`done` 被看板的「取消」改成 `cancelled`；已结算任务被 `agent/status` 的 running 事件复活、
+并发位被幽灵占用且永不结算；`queued` 任务被 `message` 置 running 但没出队，排队顺序错乱。
 - `TERMINAL_REPORT = {done, blocked, failed, cancelled}`：本回合已经给过结论，`idle` 时不再补自动回报。
 
 `progress` 不在任何集合里：只追加记录，不结束任务。

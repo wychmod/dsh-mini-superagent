@@ -26,6 +26,14 @@ Host 侧实现全在 `src/workspaces.js`（约 160 行），`dispatch.js` 负责
 `safeDirName` 把 `\ / : * ? " < > |` 与控制字符换成 `-`，去掉开头连续的点，空白压成一个空格，截到 60 字符；
 结果为空时用 `dispatch`。只用于目录名，工作区标题保持原样。
 
+0.7.0 起另外处理两类 Windows 特例（它们会让 `mkdir` 失败或建出非法目录）：
+
+- **保留名**：`CON` / `PRN` / `AUX` / `NUL` / `COM1`-`COM9` / `LPT1`-`LPT9`。判定取第一个点之前的部分
+  （所以 `CON.txt` 也能抓到），命中时在**第一个点之前**插入 `-`：`CON` → `CON-`、`CON.txt` → `CON-.txt`。
+  插在点前而不是末尾，是因为 `CON.txt-` 去掉扩展名之后仍然是 `CON`。
+- **尾部点号与空格**：Windows 会静默去掉它们，导致 `abc` 和 `abc.` 撞同一个目录。现在直接删掉，
+  且在 60 字符截断**前后各做一次**（截断点可能正好落在点号后）。
+
 ---
 
 ## 启动准备（幂等）
@@ -85,11 +93,27 @@ dispatch_launch({ workspace: "某项目", ... })
 1. 工作区 **id**：`workspaceRegistry.get(value)`。
 2. **绝对路径**：`resolveByPath(value)`；路径未注册或不存在时返回 `undefined`（不会在这里建）。
 3. **标题精确匹配**：`title.toLowerCase() === value.toLowerCase()`。
-4. **标题包含匹配**：`title.toLowerCase().includes(value.toLowerCase())`，取注册表顺序的第一个。
+4. **标题包含匹配**：`title.toLowerCase().includes(value.toLowerCase())`。
+
+关于第 4 步，0.7.0 起有两条约束（都是为了不再「静默挑错一个」）：
+
+- 单字符查询（按码点数，代理对算 1 个）**跳过**包含匹配——`'a'` 命中「第一个含 a 的工作区」没有意义；
+- 包含匹配**收集全部命中**：0 个 → `undefined`；1 个 → 返回它（`resolve('派发')` 仍命中【派发】工作区）；
+  多个 → 记一条 warn 列出全部候选，返回 `undefined`，**不抛错**。
+
+不抛错是有意的：`dispatch.setTarget` 依赖「找不到返回 undefined」这个契约，抛错会改变它的错误信息
+并牵动调用方。返回 undefined 之后，`setTarget` 的 `!workspace` 分支本来就会列出全部工作区，够用。
+
+注意「歧义」与「不存在」必须分开处理，否则会凭空建重复目录：`resolveOrCreate` 在真正新建之前
+会再判一次歧义（`fuzzyMatches`），命中多个就 warn 并放弃新建——而不是把歧义当成「不存在」
+然后 `mkdir` 一个同名新目录。
 
 解析不到且 `create_workspace !== false` 时：
 
 - 给的是**绝对路径** → 在**该路径**上 `mkdir -p` 并注册，标题取路径最后一段（经 `safeDirName`）。
+  **0.7.0 起会检查该路径是否在工作区根之内**：越界时记一条 warn
+  （`已在 workspaceRoot 之外创建工作区：<path>`）但**仍然创建**——这是「可审计」优先于「可禁止」的取舍，
+  agent 可能真的要在别的盘上开项目，但这件事必须留痕。
 - 给的是**名字** → 在 `<workspaceRoot>/<safeDirName(名字)>` 建目录并注册，标题就是这个名字。
 
 解析不到且 `create_workspace === false` → `dispatch_launch` 抛错，错误里带现有工作区清单：
