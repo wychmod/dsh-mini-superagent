@@ -23,3 +23,9 @@ cancel-*.txt
 Thumbs.db
 .idea/
 .vscode/
+
+# ---- 本机预览与工作区数据（不进仓库）----
+# 浏览器预览用的临时 Chrome profile
+.preview/
+# WorkBuddy 的会话记忆与项目数据
+.workbuddy/

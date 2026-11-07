@@ -15,6 +15,7 @@ LICENSE.*        text eol=lf
 *.yml   text eol=lf
 *.yaml  text eol=lf
 *.svg   text eol=lf
+*.html  text eol=lf
 
 # Windows 脚本保持 CRLF，否则某些宿主会报错。
 *.ps1   text eol=crlf
