@@ -22,15 +22,61 @@
         # 投给 worker 的任务简报最大字符数，超出截断。
         maxBriefChars: 12000
 
+        # ---- 容错 ----
+        # worker 回合遇到瞬时故障（HTTP 408/429/5xx、连接被拒/重置、限流）时自动续跑。
+        # 靠宿主发 agent/error 触发；宿主不发时这项不生效，任务仍会走到 idle 并被回报成 ended。
+        retryTransient: true
+        # 续跑的退避序列（毫秒），长度即最大重试次数。
+        retryBackoffMs:
+          - 15000
+          - 30000
+          - 60000
+        # 同一任务的 progress 报告最短回流间隔（毫秒）；0 = 不节流。被挡下的仍然入库。
+        progressRelayIntervalMs: 60000
+        # 子会话默认 preset；留空用部署默认。指向一个收紧的 preset 可以让 worker 的前台命令更早转后台。
+        workerAgentPreset: ''
+
+        # ---- 后台活与每任务目录 ----
+        # worker 回合结束后，后台还有 shell job / subagent 在跑时的巡检间隔（毫秒）。
+        backgroundPollMs: 15000
+        # 后台活最多再占多久（毫秒）；到点终止剩下的 job 再结算。0 = 不限（不建议）。
+        backgroundLimitMs: 1800000
+        # 每任务目录的根；留空表示不启用（子会话仍在工作区/调用者目录里干活）。
+        # 启用后每个任务得到 <root>/<标题>-<id后6位> 作为工作目录。
+        taskDirRoot: ''
+        # 任务目录不存在时在父目录执行一次的 prepare 命令，典型用法是 git worktree add。
+        # 环境变量：DSH_DISPATCH_DIR / _TASK / _TITLE / _WORKSPACE / _CWD。
+        # 失败即任务失败，不自动重试（目录可能已被写了一半）。
+        prepareCommand: ''
+        # prepare 命令超时（毫秒）。
+        prepareTimeoutMs: 600000
+
+        # ---- 路由模式（必派发的会话不许改代码）----
+        # 只对「必派发」的会话生效：输入框里把派发目标设成某个工作区或「自动」时，
+        # 在该会话的 agent 作用域上收窄这些工具；选回「不派发」立刻还回去。
+        # 为什么挂在开关上而不是「派发过一次」：任何会话都可能是主会话，
+        # 而且「不派发」是默认选项——不能因为派过一次就永久收走 write/edit。
+        # false = 关闭，必派发时也保留 write/edit。
+        restrictRouter: true
+        # 要收走的工具名。默认只收走「改文件」的两个；名字不存在的会被跳过（restrict 对未知名字抛错）。
+        # 注意 边界：bash 仍可用，shell 重定向依然能写文件；要硬边界就写成
+        #   [write, edit, bash, pwsh]
+        routerDenyTools:
+          - write
+          - edit
+
         # ---- 工作区 ----
         # 工作区根目录；留空表示 <用户文档目录>/mini-superagent。
         # 默认工作区（mini-superagent）和每天的【派发】工作区都建在这下面。
         workspaceRoot: ''
         # 首次激活时创建默认工作区与其中的默认主会话（失败只记日志，不影响派发）。
         provisionDefaultWorkspace: true
-        # 子会话放在哪个工作区：
-        #   day    = 每天的【派发】工作区（默认，侧边栏保持干净）
-        #   target = 任务指定的目标工作区（子会话混在项目里）
+        # 子会话放哪。注意语义：**有目标工作区时一律用目标**，与这里无关（不可关闭）。
+        # 这个配置只在「没有目标 / 目标已被删除」时决定兜底行为：
+        #   day = 当天的【派发】工作区（默认；侧边栏按天收拢，用完归档）
+        #   cwd = 不建【派发】工作区，直接挂在任务的 cwd 上
+        # 旧值 target（0.8.0 及更早）已废弃：它表达的「用目标工作区」现在是无条件默认行为，
+        # 配成 target 会被当作 day 处理，不再报错。
         workerWorkspace: day
         # 子会话结束多少小时后自动归档；0 表示不归档。
         archiveAfterHours: 24

@@ -74,6 +74,16 @@ export function boardTask(task) {
     report_count: Array.isArray(task.reports) ? task.reports.length : 0,
     last_report: last ? { at: last.at, status: last.status, summary: last.summary } : null,
     last_text_preview: typeof task.lastText === 'string' ? task.lastText.slice(0, PREVIEW_CHARS) : '',
+    // 追问的投递阶段：pending = 进了收件箱但 worker 还没读；read = 已经读进上下文。
+    input_pending_at: task.inputPendingAt ?? null,
+    input_read_at: task.inputReadAt ?? null,
+    retry_at: task.retryAt ?? null,
+    // 每任务的独立目录与准备时间（配了 taskDirRoot 才有）。
+    task_dir: task.taskDir ?? null,
+    prepare_at: task.prepareAt ?? null,
+    // 后台活：回合结束了但 job/subagent 还在跑，任务仍占着并发位。
+    background: task.background ?? null,
+    background_killed: task.backgroundKilled ?? null,
     ...(task.error ? { error: String(task.error) } : {}),
     ...(task.archiveError ? { archive_error: String(task.archiveError) } : {}),
   }

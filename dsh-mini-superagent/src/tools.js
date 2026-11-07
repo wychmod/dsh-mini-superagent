@@ -79,7 +79,7 @@ export function toolDefinitions(dispatch) {
           cwd: { type: 'string', description: '可选。子会话工作目录的绝对路径；省略则用 workspace 的路径，再省略则继承本会话的工作目录。' },
           workspace: { type: 'string', description: '可选。派发到哪个工作区：工作区 id、绝对路径、或工作区标题都可以。子会话会在这个目录里干活；省略则沿用本会话的工作目录。先用 dispatch_workspaces 看有哪些。' },
           create_workspace: { type: 'boolean', description: '可选，默认 true。workspace 解析不到时是否自动新建：给的是绝对路径就在该路径建，给的是名字就在工作区根下建。' },
-          model: { type: 'string', description: '可选。子会话使用的模型 id；省略则用 DSH 默认模型。' },
+          model: { type: 'string', description: '可选。子会话使用的模型：`model` 或 `provider/model`；省略则用部署默认。宿主不支持切换模型时这次派发会失败并说明原因（不会静默改用默认模型）。' },
           agent_preset: { type: 'string', description: '可选。子会话使用的 agent preset id；省略则用部署默认 preset。' },
           permission_preset: { type: 'string', description: '可选。子会话的权限预设（如 danger-full-access）；省略则继承插件配置或 DSH 默认。' },
         },

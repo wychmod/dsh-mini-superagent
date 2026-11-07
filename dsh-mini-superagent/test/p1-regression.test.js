@@ -56,6 +56,9 @@ function stub(d, host, dir) {
     hint: () => {},
     refreshHint: () => {},
     dispose: () => {},
+    restrictTools: () => () => {},
+    forgetRestrict: () => {},
+    holds: () => false,
     async createWorker(sessionId) {
       const agent = {
         id: sessionId, status: 'idle',

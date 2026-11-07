@@ -25,6 +25,11 @@ export class SessionGateway {
      * 所以插件卸载时必须主动收回，否则重载后同一会话会出现两段提示。
      */
     this.hintDisposers = new Set()
+    /**
+     * 路由模式的工具收窄 disposer，按 agent id 记。
+     * 同上：`agent.ctx` 的生命周期比插件长，卸载时要主动收回。
+     */
+    this.restrictDisposers = new Map()
   }
 
   warn(...args) { this.ctx.logger?.warn?.(...args) }
@@ -116,6 +121,130 @@ export class SessionGateway {
     return { delivered: 'prompt', woke: true }
   }
 
+  /**
+   * 这条 requestId 的消息是否**已经**在这条会话里——待处理的收件箱，或已进入历史的 user/message。
+   *
+   * 用途：投递重试前判重。报告的重试必须复用同一个 requestId，否则「第一次其实已投递、
+   * 只是后面抛错」会变成两条一样的报告（0.8.0 及更早的 #deliverWithRetry 就是这样）。
+   *
+   * 两处都要查，因为它们是两个阶段：还在 `nextTurn`/`nextStep` 里 = 已入队未消费；
+   * 出现在 `user/message` 事件里 = 已经被某一步取进上下文。只查前者会漏掉后者。
+   *
+   * @param {object} agent 目标 Agent
+   * @param {string} requestId 调用方给的稳定 id（不含来源前缀）
+   * @returns {boolean}
+   */
+  holds(agent, requestId) {
+    const id = `${SOURCE_KIND}:${requestId}`
+    try {
+      const inbox = agent?.inbox
+      const pending = [...(inbox?.nextTurn ?? []), ...(inbox?.nextStep ?? [])]
+      if (pending.some(message => message?.id === id)) return true
+    } catch { /* 收件箱读不到：继续查历史 */ }
+    try {
+      const session = agent?.session
+      const events = (typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : session?.events?.()) ?? []
+      for (const event of events) {
+        if (event?.type === 'user/message' && event.data?.id === id) return true
+      }
+    } catch { /* 历史读不到：按未投处理，宁可重投也不静默丢 */ }
+    return false
+  }
+
+  /**
+   * 在这个 agent 的作用域上收窄工具面（路由模式：主会话不许改代码）。
+   *
+   * `restrict` 的三条硬约束决定了这里的写法：
+   * 1. 必须在 `agent.ctx` 上调用，根 ctx 会抛 `requires a scoped context`；
+   * 2. 只过滤**继承来的**工具（全局 + 祖先层），本层自己注册的滤不掉；
+   * 3. **名字未知会抛错**——所以先 `get()` 探一下，缺哪个就跳过哪个。
+   *
+   * 用 `deny` 而不是 `allow`：各部署的工具集不一样，allow 一旦写死就会把
+   * 我们不认识的工具一起收走（包括本插件自己的 9 个）。
+   *
+   * @param {object} agent 目标 Agent
+   * @param {string[]} deny 要收走的工具名
+   * @returns {(() => void) | undefined} disposer；宿主不支持时返回 undefined
+   */
+  restrictTools(agent, deny) {
+    const tools = agent?.ctx?.tools
+    if (typeof tools?.restrict !== 'function') {
+      this.warn(`${LOG_PREFIX} 宿主没有 agent.ctx.tools.restrict，跳过路由模式的工具收窄`)
+      return undefined
+    }
+    const names = []
+    for (const raw of Array.isArray(deny) ? deny : []) {
+      const name = String(raw ?? '').trim()
+      if (!name) continue
+      let exists = true
+      try {
+        if (typeof tools.get === 'function') exists = !!tools.get(name, agent)
+      } catch { exists = false }
+      if (exists) names.push(name)
+    }
+    if (!names.length) {
+      // 一个都没命中就明确记一条：配了却没生效，静默会让「说好的禁止」变成空话。
+      this.warn(`${LOG_PREFIX} 路由模式没有可收窄的工具（配置：%s）`, (deny ?? []).join(', ') || '(空)')
+      return undefined
+    }
+    try {
+      const dispose = tools.restrict({ deny: names })
+      if (typeof dispose !== 'function') return undefined
+      // 由这里统一持有，插件卸载时一次性收回；Dispatch 只记「谁的已经收窄过」。
+      this.restrictDisposers.set(agent.id, dispose)
+      return dispose
+    } catch (error) {
+      this.warn(`${LOG_PREFIX} 路由模式收窄工具失败: %s`, String(error))
+      return undefined
+    }
+  }
+
+  /** 会话被销毁时收回它的工具收窄，别让登记表随会话数一直长。 */
+  forgetRestrict(agentId) {
+    const dispose = this.restrictDisposers.get(agentId)
+    if (!dispose) return
+    this.restrictDisposers.delete(agentId)
+    try { dispose() } catch { /* 宿主已回收 */ }
+  }
+
+  /**
+   * 把 `model` 应用到刚建好的子会话上。
+   *
+   * 为什么不能在建会话时传：`SessionCreateRequest` 只有
+   * `{workspaceId?, cwd?, sessionId?, agentPreset?}`，没有模型字段；
+   * 模型是「首个请求之前记一条 model/selection」来定的（官方原型同样这么做，
+   * 且特意避开会改全局默认的 selectModel）。
+   *
+   * 拿不到能力时**抛错**而不是假装成功：工具 schema 承诺了 model，
+   * 悄悄用默认模型比报错更贵——用户会以为自己在用便宜/更强的那个模型。
+   *
+   * @param {object} agent 刚建好的 Agent
+   * @param {string} spec `provider/model` 或裸 `model` id
+   */
+  async applyModel(agent, spec) {
+    const raw = String(spec ?? '').trim()
+    if (!raw) return undefined
+    const llm = this.ctx.get('llm')
+    if (typeof llm?.resolveCallConfig !== 'function') {
+      throw new Error(`宿主没有 llm.resolveCallConfig，无法应用 model="${raw}"；去掉 model 参数再派发`)
+    }
+    const cut = raw.indexOf('/')
+    const provider = cut > 0 ? raw.slice(0, cut) : undefined
+    const model = cut > 0 ? raw.slice(cut + 1) : raw
+    const resolved = await llm.resolveCallConfig({ ...(provider ? { provider } : {}), model })
+    const selection = {
+      provider: resolved?.provider,
+      model: resolved?.model,
+      ...(resolved?.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
+    }
+    const session = agent?.session
+    if (typeof session?.append !== 'function') {
+      throw new Error('宿主 session 不支持 append，无法记下 model/selection；去掉 model 参数再派发')
+    }
+    session.append('model/selection', selection)
+    return selection
+  }
+
   /** 子会话的工作目录：优先显式 cwd，其次主会话目录，最后进程 cwd。 */
   cwdFor(agent, explicit) {
     if (explicit) return explicit
@@ -181,6 +310,10 @@ export class SessionGateway {
       catch (error) { this.warn(`${LOG_PREFIX} 设置权限预设失败: %s`, String(error)) }
     }
 
+    // 模型：建会话时给不了（SessionCreateRequest 没有模型字段），只能在首个请求之前
+    // 记一条 model/selection。失败就抛出去让任务 failed——静默用默认模型等于骗人。
+    if (options.model) await this.applyModel(agent, options.model)
+
     // 标题只影响可读性，失败不算任务失败。
     try { await this.ctx.sessionController.rename({ sessionId: actualId, title }) }
     catch { /* 忽略 */ }
@@ -230,7 +363,7 @@ export class SessionGateway {
     }
   }
 
-  /** 插件卸载：收回所有已注册的提示段。 */
+  /** 插件卸载：收回所有已注册的提示段与工具收窄。 */
   dispose() {
     for (const dispose of this.hintDisposers) {
       try { dispose() } catch { /* 宿主已回收 */ }
@@ -238,5 +371,11 @@ export class SessionGateway {
     this.hintDisposers.clear()
     this.hinted.clear()
     this.hintTexts.clear()
+    // 工具收窄是挂在 agent.ctx 上的副作用，作用域比插件长，卸载时必须收回，
+    // 否则重载后主会话仍然看不到 write/edit（用户会以为插件坏了）。
+    for (const dispose of this.restrictDisposers.values()) {
+      try { dispose() } catch { /* 宿主已回收 */ }
+    }
+    this.restrictDisposers.clear()
   }
 }

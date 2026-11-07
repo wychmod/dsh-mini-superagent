@@ -47,7 +47,40 @@ export const NONE = 'none'
 export const MODE_OFF = 'off'
 export const MODE_ALWAYS = 'always'
 
-/** 默认配置；cordis.patch.yml 里的 config 会覆盖这里的字段。 */export const DEFAULTS = {
+/**
+ * `workerWorkspace` 的两个取值：**只在没有目标工作区时才生效**。
+ *
+ * 为什么语义变了（0.8.1）：0.8.0 及更早，这个配置决定「用不用目标工作区」，
+ * 而它的默认值 `day` 意味着**即使用户明确指定了工作区，子会话也被塞进【派发】**，
+ * 于是每次启动都凭空多出一个 `【派发】YYYY-MM-DD` 工作区。用户的意图是：
+ * 选了目标就该在目标里，「退回日期工作区」只是找不到目标时的兜底。
+ * 所以「有目标用目标」现在是**不可关闭**的默认行为，这个配置只剩兜底这一件事。
+ */
+export const WORKER_WORKSPACE_DAY = 'day'
+export const WORKER_WORKSPACE_CWD = 'cwd'
+
+/**
+ * 把 `workerWorkspace` 归一成新语义的取值。
+ *
+ * 兼容处理（不抛错）：这个键在 0.2.0 起就写进了配置契约，旧 profile 里可能还留着
+ * `target`。它想表达的「有目标就用目标」现在是默认且不可关的行为，所以这个值本身
+ * 已经没有意义了；剩下要决定的是它在**无目标**时退化到哪里 —— 旧 `target` 模式下
+ * 无目标同样走 `dayWorkspace()`，因此未知值（含 `target`）一律退回 `day`，
+ * 能保持旧 profile 的兜底行为不变。
+ *
+ * 反过来把未知值当错误抛出去，会让升级后的插件直接起不来——为一个已经变成默认
+ * 行为的旧开关付这个代价不值得。
+ *
+ * @param {unknown} value 配置里的原始值
+ * @returns {string} `'day'` 或 `'cwd'`
+ */
+export function normalizeWorkerWorkspace(value) {
+  const raw = String(value ?? '').trim().toLowerCase()
+  return raw === WORKER_WORKSPACE_CWD ? WORKER_WORKSPACE_CWD : WORKER_WORKSPACE_DAY
+}
+
+/** 默认配置；cordis.patch.yml 里的 config 会覆盖这里的字段。 */
+export const DEFAULTS = {
   /** 同时真正在跑（running）的子会话上限；超出的任务进入 queued，有空位自动开始。 */
   maxWorkers: 6,
   /** 每个主会话最多累计派发多少个任务。 */
@@ -71,13 +104,92 @@ export const MODE_ALWAYS = 'always'
   /** 归档巡检间隔（分钟）；0 表示不巡检。 */
   archiveSweepMinutes: 10,
   /**
-   * 子会话放在哪个工作区：
-   * - `day`：每天的【派发】工作区（默认，侧边栏保持干净）
-   * - `target`：任务指定的目标工作区（子会话混在项目里）
+   * **没有目标工作区时**子会话放哪（有目标时一律用目标，与这里无关）。
+   * - `day`：当天的【派发】工作区（默认，侧边栏保持干净）
+   * - `cwd`：不建【派发】工作区，直接挂在任务的 cwd 上
+   *
+   * 语义在 0.8.1 被重新定义：见 `normalizeWorkerWorkspace` 上方的长注释。
    */
-  workerWorkspace: 'day',
+  workerWorkspace: WORKER_WORKSPACE_DAY,
   /** 默认主会话的固定 id；改成别的值等于换一个新默认会话。 */
   leadSessionId: 'mas-lead',
+  /**
+   * 「必派发」的会话是否禁止它改代码（默认开）。
+   *
+   * 语义（与上游 dsh-superagent 的 router preset 对齐，但**只对路由器生效**）：
+   * 当输入框里把派发目标设成某个工作区或「自动」（`modeOf() === 'always'`）时，
+   * 在该会话的 agent 作用域上 `tools.restrict({ deny: routerDenyTools })`，
+   * 于是模型看不到 write / edit，改代码只能派给子会话。
+   *
+   * 为什么挂在「必派发」上而不是「派发过一次」：任何会话都可能是主会话，
+   * 而且「不派发」是默认选项。只要派过一次就永久收走 write/edit，等于用插件的
+   * 产品假设覆盖用户的当场意图。挂在自己的开关上，用户随时能切回来。
+   *
+   * 为什么用 deny 而不是 allow：`restrict` 的名字未知会抛错，而各部署的工具集不同；
+   * deny 只碰我们点名的两个工具，缺一个就跳过那一个，不会误伤别的。
+   *
+   * 为什么不是 preset：我们的主会话是用户自己的会话，不是插件建的，
+   * 改不了它的 preset；作用域 restrict 是当前 API 里唯一能按 agent 收窄工具面的口子。
+   */
+  restrictRouter: true,
+  /**
+   * 路由模式下要收走的工具名。默认只收走「改文件」的两个。
+   *
+   * 注意边界（与上游一致）：`bash` 仍可用，所以 shell 里 `echo > file` 依然能写文件。
+   * 想要硬边界就把它也加进来：`['write', 'edit', 'bash', 'pwsh']`。
+   */
+  routerDenyTools: ['write', 'edit'],
+  /**
+   * 报告投递失败的退避序列（毫秒），按顺序用，用完即放弃。
+   * 抽成配置只为可测：默认的 2s/4s/8s 会让「重试复用同一 id」的用例至少跑 2 秒。
+   */
+  relayRetryMs: [2000, 4000, 8000],
+  /**
+   * worker 回合因**瞬时故障**中断时是否自动续跑（默认开）。
+   * 瞬时 = HTTP 408/429/5xx、连接被拒/重置/超时、DNS 失败、限流。
+   * 依据：上游 `DshExecutor` 的 `transient()` 与 3 次退避续跑。
+   */
+  retryTransient: true,
+  /** 续跑的退避序列（毫秒），长度即最大重试次数。 */
+  retryBackoffMs: [15000, 30000, 60000],
+  /**
+   * 同一任务的 `progress` 报告最短回流间隔（毫秒）；0 表示不节流。
+   *
+   * 目的：长任务每完成一步就报一次 progress，会把主会话刷屏。
+   * 上游用「同名 notice 覆盖未发送的那条」实现合并，我们没有那个队列，
+   * 退化成「按时间节流」——被挡下的 progress 仍然入库，`dispatch_inspect` 看得到。
+   */
+  progressRelayIntervalMs: 60000,
+  /**
+   * 子会话默认使用的 agent preset id；空表示用部署默认。
+   * 想让 worker 的前台命令更早转后台（上游是 5 秒），把这里指向一个收紧的 preset。
+   */
+  workerAgentPreset: '',
+  /**
+   * worker 回合结束后，后台还有 shell job / subagent 在跑时的巡检间隔（毫秒）。
+   *
+   * 为什么要等：回合结束 ≠ 活干完。worker 常会留一个 dev server、或还有 subagent 在跑。
+   * 0.8.1 及更早 `idle` 就结算，并发位被释放，但后台其实还在改同一个目录。
+   * 上游把占用单位定成 Assignment，job/subagent 还在跑就一直占着槽位。
+   */
+  backgroundPollMs: 15000,
+  /**
+   * 后台活最多再占多久（毫秒）。到点终止还剩的 shell job 并结算，默认 30 分钟。
+   * 0 表示不限——不建议，一个卡住的 job 会永久占住并发位。
+   */
+  backgroundLimitMs: 1800000,
+  /**
+   * 每任务目录的根；空表示不启用（子会话仍在工作区/调用者目录里干活）。
+   * 启用后每个任务得到 `<root>/<标题>-<id后6位>` 作为工作目录，并可选跑一次 prepare 命令。
+   */
+  taskDirRoot: '',
+  /**
+   * prepare 命令：任务目录**不存在**时在父目录执行一次，典型用法是 `git worktree add`。
+   * 失败即任务失败，不自动重试（目录可能已被写了一半）。见 `src/prepare.js`。
+   */
+  prepareCommand: '',
+  /** prepare 命令超时（毫秒），默认 10 分钟。 */
+  prepareTimeoutMs: 600000,
 }
 
 /**

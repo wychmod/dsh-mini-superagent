@@ -66,6 +66,9 @@ function stub(d, host, dir) {
     hint: () => {},
     refreshHint: () => {},
     dispose: () => {},
+    restrictTools: () => () => {},
+    forgetRestrict: () => {},
+    holds: () => false,
     async createWorker(sessionId) {
       if (host.createDelayMs) await new Promise(resolve => setTimeout(resolve, host.createDelayMs))
       const agent = {

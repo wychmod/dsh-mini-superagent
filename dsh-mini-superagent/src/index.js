@@ -52,6 +52,9 @@ export async function apply(ctx, config) {
 
   // 子会话被外部关闭/删除时，别让任务永远挂在 running。
   ctx.on('agent/disposed', ({ agent }) => {
+    // 会话没了，它的工具收窄登记也该跟着消失，否则 routers 会随会话数一直长。
+    dispatch.forgetRouter(agent?.id)
+    dispatch.forgetSubagent(agent?.id)
     const task = dispatch.table.byWorker(agent.id)
     if (!task || SETTLED.has(task.status)) return
     dispatch.settle(task, 'interrupted')
@@ -59,7 +62,30 @@ export async function apply(ctx, config) {
 
   // 会话新建时按当前模式挂上提示段：模式是「必派发」就装强制段，否则装轻提示。
   // 段文本是函数，之后切模式只换求值函数，不用重载插件。
-  ctx.on('agent/created', ({ agent }) => { dispatch.refreshHint(agent) })
+  ctx.on('agent/created', ({ agent }) => {
+    dispatch.refreshHint(agent)
+    // worker 派生出来的 subagent 收走 dispatch_*，否则它能无限往下派生任务。
+    dispatch.decorateSubagent(agent)
+  })
+
+  // worker 的回合抛错：瞬时故障（408/429/5xx、连接重置、限流）退避续跑，其余直接 failed。
+  // 0.8.1 及更早没有这个订阅，模型 5xx 之后 worker 走到 idle 就被当成「回合正常结束」，
+  // 主会话收到一条「本轮没有输出」，看起来像任务做完了。
+  //
+  // 宿主版本不认识这个事件时，订阅本身不该让插件起不来——包一层 try 只是保险，
+  // 真正的代价是「续跑不生效」，其余功能照常。
+  try {
+    ctx.on('agent/error', ({ agent, error }) => { dispatch.onWorkerError(agent, error) })
+  } catch (error) {
+    ctx.logger?.warn?.('%s 订阅 agent/error 失败（瞬时故障续跑不可用）: %s', LOG_PREFIX, String(error))
+  }
+
+  // 读回执：worker 把某条派发消息真正读进上下文时，清掉任务上的「已投递未读」。
+  try {
+    ctx.on('session/event', (session, event) => { dispatch.onSessionEvent(session, event) })
+  } catch (error) {
+    ctx.logger?.warn?.('%s 订阅 session/event 失败（读回执不可用）: %s', LOG_PREFIX, String(error))
+  }
 
   // 任务看板的 HTTP 路由（宿主没有 webServer 时安静跳过）。
   const disposeBoard = registerBoardRoutes(ctx, dispatch)
