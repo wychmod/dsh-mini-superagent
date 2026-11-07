@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>任务看板 · 改版预览</title>
+<style>
+  :root {
+    color-scheme: light;
+    --dsw-alias-label-primary: #1b1f27;
+    --dsw-alias-label-secondary: #4a5260;
+    --dsw-alias-label-tertiary: #7a828e;
+    --dsw-alias-border-l1: #e6e9ef;
+    --dsw-alias-bg-layer-2: #eff1f5;
+    --dsw-alias-interactive-bg-hover: #f4f6fa;
+    --dsw-alias-state-business-primary: #2563eb;
+    --dsw-alias-state-success-primary: #15803d;
+    --dsw-alias-state-warn-primary: #b45309;
+    --dsw-alias-state-error-primary: #b42318;
+    --dsw-alias-state-info-primary: #2563eb;
+  }
+  body {
+    margin: 0;
+    padding: 28px;
+    background: #f4f5f7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--dsw-alias-label-primary);
+  }
+  .stage { max-width: 620px; margin: 0 auto; }
+  .cap { font-size: 12px; line-height: 1.7; color: #6b7280; margin: 0 0 10px 2px; }
+  .frame {
+    background: #fff;
+    border: 1px solid #e2e6ee;
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.06);
+  }
+  .frame .dsh-sa { height: auto; }
+  .fail { padding: 20px; font-size: 13px; color: #b42318; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+</head>
+<body>
+<div class="stage">
+  <p class="cap">真实面板组件 + 假数据，2 秒轮询一次（本页拦截了 fetch）。改的只是呈现，数据仍来自 <code>GET /dsh-mini-superagent/board</code>。</p>
+  <div class="frame"><div id="root"><div class="fail">正在加载…（需要能访问 cdn.jsdelivr.net 取 React）</div></div></div>
+</div>
+
+<script>
+/* ── 假 ModuleLoader：client/index.js 会把模块塞进 window.__mod ── */
+window.__ModuleLoader__ = {
+  load: function (pack) {
+    window.__mod = pack.factory(function (name) {
+      if (name === 'react') return React
+      if (name === 'react-dom') return ReactDOM
+      throw new Error('unexpected require: ' + name)
+    })
+  }
+}
+
+/* ── 假宿主 ctx：只实现插件用到的那几个面 ── */
+var registrations = []
+var slots = {
+  inject: function (name, fn) {
+    var real = slots.register
+    slots.register = function (options, component) {
+      registrations.push({ slot: name, options: options || {}, component: component })
+      return function () {}
+    }
+    try { fn() } finally { slots.register = real }
+    return function () {}
+  },
+  register: function () { return function () {} }
+}
+var ctx = {
+  slots: slots,
+  logger: { info: function () {}, warn: function () {}, error: function () {} },
+  get: function () { return undefined },
+  effect: function (fn) { if (typeof fn === 'function') fn(); return function () {} },
+  inject: function (names, fn) { if (typeof fn === 'function') fn() }
+}
+
+/* ── 假数据：覆盖在跑 / 排队 / 失败 / 阻塞 / 后台收尾 / 待读 / 完成 / 归档 ── */
+function iso(msAgo) { return new Date(Date.now() - msAgo).toISOString() }
+var board = {
+  version: '0.8.2',
+  generatedAt: new Date().toISOString(),
+  concurrency: { running: 3, queued: 1, max: 6 },
+  counts: { total: 11, running: 3, queued: 1, done: 4, blocked: 1, failed: 1, cancelled: 0, ended: 0, interrupted: 1, archived: 2 },
+  workspaces: [
+    { id: 'ws-1', title: 'dsh-mini-superagent', path: 'D:/idea/dsh-mini-superagent' },
+    { id: 'ws-2', title: '结算服务', path: 'D:/work/billing' }
+  ],
+  targets: { 'session-a': { workspace_id: 'ws-1', title: 'dsh-mini-superagent', path: 'D:/idea/dsh-mini-superagent' } },
+  tasks: [
+    { task_id: 't-1a9f-1', title: '重构 auth 模块的令牌刷新', status: 'running', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', group: 'g-7f21', worker_session_id: 'dispatch-t-1a9f-1', elapsed_ms: 412000, started_at: iso(412000), created_at: iso(420000), updated_at: iso(2000), report_count: 2, last_report: { at: iso(95000), status: 'progress', summary: '已替换 refresh 调用点 6 处，剩余 2 处在 webhook 模块' }, input_read_at: iso(30000) },
+    { task_id: 't-1a9f-2', title: '重构 billing 模块的幂等键', status: 'running', attempt: 1, workspace_id: 'ws-2', workspace_title: '结算服务', group: 'g-7f21', worker_session_id: 'dispatch-t-1a9f-2', elapsed_ms: 386000, started_at: iso(386000), created_at: iso(420000), updated_at: iso(1000), report_count: 1, last_report: { at: iso(120000), status: 'progress', summary: '幂等键已统一到 order_id + version，正在补测试' }, input_pending_at: iso(8000) },
+    { task_id: 't-1a9f-3', title: '重构 notify 模块的模板渲染', status: 'running', attempt: 1, workspace_id: 'ws-2', workspace_title: '结算服务', group: 'g-7f21', worker_session_id: 'dispatch-t-1a9f-3', elapsed_ms: 355000, started_at: iso(355000), created_at: iso(420000), updated_at: iso(3000), report_count: 0, background: { jobs: 1, subagents: 0, since: iso(40000) } },
+    { task_id: 't-1a9f-4', title: '重构 search 模块的分页', status: 'queued', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', group: 'g-7f21', worker_session_id: 'dispatch-t-1a9f-4', elapsed_ms: 0, created_at: iso(415000), updated_at: iso(415000), report_count: 0 },
+    { task_id: 't-2b3c-1', title: '给结算接口补一个集成测试', status: 'failed', attempt: 2, workspace_id: 'ws-2', workspace_title: '结算服务', worker_session_id: 'dispatch-t-2b3c-1', elapsed_ms: 73000, started_at: iso(240000), created_at: iso(250000), updated_at: iso(160000), report_count: 1, error: '模型侧 503：provider overloaded（已重试 3 次）', last_report: { at: iso(170000), status: 'failed', summary: '压测环境无法连接，未能完成' } },
+    { task_id: 't-2b3c-2', title: '把 CI 缓存换到 pnpm store', status: 'blocked', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', worker_session_id: 'dispatch-t-2b3c-2', elapsed_ms: 51000, started_at: iso(190000), created_at: iso(200000), updated_at: iso(120000), report_count: 1, last_report: { at: iso(125000), status: 'blocked', summary: '需要 GitHub 组织级 token 才能改 cache 权限' } },
+    { task_id: 't-2b3c-3', title: '升级 eslint 到 9', status: 'interrupted', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', worker_session_id: 'dispatch-t-2b3c-3', elapsed_ms: 96000, started_at: iso(900000), created_at: iso(910000), updated_at: iso(800000), report_count: 0 },
+    { task_id: 't-3d4e-1', title: '修复 webhook 重试风暴', status: 'done', attempt: 1, workspace_id: 'ws-2', workspace_title: '结算服务', worker_session_id: 'dispatch-t-3d4e-1', elapsed_ms: 268000, started_at: iso(1500000), created_at: iso(1520000), updated_at: iso(1200000), report_count: 3, last_report: { at: iso(1200000), status: 'done', summary: '加了退避与去重，跑了 200 次压测无重复投递' } },
+    { task_id: 't-3d4e-2', title: '抽出共用的日期工具', status: 'done', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', group: 'g-70aa', worker_session_id: 'dispatch-t-3d4e-2', elapsed_ms: 142000, started_at: iso(2000000), created_at: iso(2020000), updated_at: iso(1800000), report_count: 1, last_report: { at: iso(1800000), status: 'done', summary: '三个模块的重复实现已合并' } },
+    { task_id: 't-3d4e-3', title: '补 i18n 缺失键', status: 'done', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', group: 'g-70aa', worker_session_id: 'dispatch-t-3d4e-3', elapsed_ms: 98000, started_at: iso(2000000), created_at: iso(2020000), updated_at: iso(1850000), report_count: 1 },
+    { task_id: 't-4f5a-1', title: '清理旧的 feature flag', status: 'done', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', worker_session_id: 'dispatch-t-4f5a-1', elapsed_ms: 61000, started_at: iso(3000000), created_at: iso(3020000), updated_at: iso(2800000), archived_at: iso(7200000), report_count: 1 },
+    { task_id: 't-4f5a-2', title: '迁移日志到结构化输出', status: 'failed', attempt: 1, workspace_id: 'ws-2', workspace_title: '结算服务', worker_session_id: 'dispatch-t-4f5a-2', elapsed_ms: 44000, updated_at: iso(90000000), archived_at: iso(86400000), report_count: 0, archive_error: '会话已不存在' }
+  ]
+}
+
+window.fetch = function (url, options) {
+  var target = String(url)
+  if (target.indexOf('/board') >= 0 && (!options || !options.method || options.method === 'GET')) {
+    return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve(JSON.parse(JSON.stringify(board))) } })
+  }
+  return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({ ok: true }) } })
+}
+</script>
+
+<!--CLIENT_SOURCE-->
+
+<script>
+(function boot() {
+  var root = document.getElementById('root')
+  try {
+    if (!window.__mod) throw new Error('client/index.js 没有加载成功（客户端模块需要 window.__ModuleLoader__）')
+    window.__mod.apply(ctx)
+    var main = registrations.filter(function (item) { return item.slot === 'main' })[0]
+    if (!main) throw new Error('没有找到 main 槽的注册')
+    root.innerHTML = ''
+    ReactDOM.createRoot(root).render(React.createElement(main.component))
+  } catch (error) {
+    root.innerHTML = '<div class="fail">预览失败：' + (error && error.message ? error.message : String(error)) + '</div>'
+  }
+})()
+</script>
+</body>
+</html>

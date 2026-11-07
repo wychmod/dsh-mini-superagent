@@ -283,8 +283,8 @@ function boardFixture() {
     workspaces: WORKSPACES,
     targets: { 'session-a': { workspace_id: 'ws-1', title: '主工作区', path: 'C:/w1' } },
     tasks: [
-      { task_id: 't-run-1', title: '批次任务甲', status: 'running', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', group: 'g1', worker_session_id: 'dispatch-t-run-1', elapsed_ms: 12345, report_count: 1, last_report: { summary: '第一行摘要\n第二行不该出现' } },
-      { task_id: 't-run-2', title: '单跑任务', status: 'running', attempt: 1, workspace_id: 'ws-2', workspace_title: '副工作区', group: null, worker_session_id: 'dispatch-t-run-2', elapsed_ms: 800, report_count: 0 },
+      { task_id: 't-run-1', title: '批次任务甲', status: 'running', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', group: 'g1', worker_session_id: 'dispatch-t-run-1', elapsed_ms: 12345, report_count: 1, background: { jobs: 1, subagents: 0, since: hoursAgo(0) }, last_report: { summary: '第一行摘要\n第二行不该出现' } },
+      { task_id: 't-run-2', title: '单跑任务', status: 'running', attempt: 1, workspace_id: 'ws-2', workspace_title: '副工作区', group: null, worker_session_id: 'dispatch-t-run-2', elapsed_ms: 800, report_count: 0, input_pending_at: hoursAgo(0) },
       { task_id: 't-q-3', title: '批次任务乙', status: 'queued', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', group: 'g1', worker_session_id: 'dispatch-t-q-3', elapsed_ms: 0, report_count: 0 },
       { task_id: 't-f-4', title: '失败任务', status: 'failed', attempt: 2, workspace_id: 'ws-2', workspace_title: '副工作区', worker_session_id: 'dispatch-t-f-4', elapsed_ms: 4000, report_count: 1, error: 'spawn 失败：ENOENT' },
       { task_id: 't-done-5', title: '完成的任务', status: 'done', attempt: 1, workspace_id: null, workspace_title: null, worker_session_id: 'dispatch-t-done-5', elapsed_ms: 65000, report_count: 1 },
@@ -364,6 +364,22 @@ check('进行中 3', chips[1].includes('3'), chips[1])
 check('需要处理 2', chips[2].includes('2'), chips[2])
 check('已归档 3', chips[3].includes('3'), chips[3])
 check('归档行不出现在「全部」里', !text(panel.tree).includes('t-arc-1'))
+
+/* 改版后的信息架构：三段 + 效果数字 + 批次进度 + 两个异常标签 */
+const nowText = () => text(panel.tree)
+check('总览分成「需要你处理 / 在跑与排队 / 最近完成」三段',
+  ['需要你处理', '在跑与排队', '最近完成'].every((label) => nowText().includes(label)))
+const statBlocks = findAll(panel.tree, (item) => item && item.props && item.props.className === 'dsh-sa-stat')
+  .map((item) => text(item).replace(/\s+/g, ' ').trim())
+check('有四个「效果」数字：完成 / 成功率 / 平均耗时 / 并行节省',
+  ['完成', '成功率', '平均耗时', '并行节省'].every((label) => statBlocks.some((line) => line.includes(label))),
+  JSON.stringify(statBlocks))
+check('失败行直接把原因摊出来', nowText().includes('原因') && nowText().includes('spawn 失败：ENOENT'))
+const batchCounts = findAll(panel.tree, (item) => item.props && item.props.className === 'dsh-sa-batch-count')
+  .map((item) => text(item).trim())
+check('批次头给出 0/2 的进度', batchCounts.includes('0/2'), JSON.stringify(batchCounts))
+check('「后台收尾」徽标可见', nowText().includes('后台收尾'))
+check('「待读」徽标可见', nowText().includes('待读'))
 
 chipFor('已归档').props.onClick()
 update(panel)

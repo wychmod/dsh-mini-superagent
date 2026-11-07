@@ -114,6 +114,33 @@ window.__ModuleLoader__.load({
       noWorkerSession: '这个任务没有可打开的子会话',
       noUiWorkspace: '会话导航服务不可用',
       clickHint: '点击打开子会话',
+      backgroundTag: '后台收尾',
+      backgroundHint: '回合已结束，但 shell job / subagent 还在跑；任务仍占着并发位，到上限会被终止',
+      unreadTag: '待读',
+      unreadHint: '追问已投递，但 worker 还没把它读进上下文',
+      'sec.attention': '需要你处理',
+      'sec.attentionEmpty': '没有需要你处理的任务',
+      'sec.active': '在跑与排队',
+      'sec.activeEmpty': '现在没有在跑或排队的任务',
+      'sec.done': '最近完成',
+      'sec.archived': '已归档',
+      'sec.batch': '批次',
+      'sec.single': '独立任务',
+      'stat.done': '完成',
+      'stat.doneHint': '已结算任务里 status=done 的数量',
+      'stat.rate': '成功率',
+      'stat.rateHint': '完成 ÷ 已结算；取消与中断也算进分母',
+      'stat.average': '平均耗时',
+      'stat.averageHint': '已结算任务耗时的中位数，用来判断「这一条算不算慢」',
+      'stat.saved': '并行节省',
+      'stat.savedHint': '粗算：各任务耗时之和 − 实际占用的墙钟时间（快照只含最近 200 条）',
+      'stat.none': '—',
+      reason: '原因',
+      noReason: '没有给出原因，可以打开子会话看它停在哪',
+      showAll: '显示全部',
+      showLess: '收起',
+      reportAgo: '报告',
+      batchOf: '批次',
       justNow: '刚刚',
       minutesAgo: '{n} 分钟前',
       hoursAgo: '{n} 小时前',
@@ -195,6 +222,33 @@ window.__ModuleLoader__.load({
       noWorkerSession: 'This task has no worker session to open',
       noUiWorkspace: 'session navigation is unavailable',
       clickHint: 'Open the worker session',
+      backgroundTag: 'wrapping up',
+      backgroundHint: 'The turn ended, but shell jobs or subagents still run; the task still holds a slot and is stopped at the limit',
+      unreadTag: 'unread',
+      unreadHint: 'The message was delivered but the worker has not taken it into context yet',
+      'sec.attention': 'Needs you',
+      'sec.attentionEmpty': 'Nothing needs you right now',
+      'sec.active': 'Running and queued',
+      'sec.activeEmpty': 'Nothing is running or queued',
+      'sec.done': 'Recently finished',
+      'sec.archived': 'Archived',
+      'sec.batch': 'Batch',
+      'sec.single': 'Standalone',
+      'stat.done': 'Done',
+      'stat.doneHint': 'Settled tasks whose status is done',
+      'stat.rate': 'Success',
+      'stat.rateHint': 'Done ÷ settled; cancellations and interruptions count',
+      'stat.average': 'Median time',
+      'stat.averageHint': 'Median duration of settled tasks, the baseline for "is this one slow?"',
+      'stat.saved': 'Saved by parallel',
+      'stat.savedHint': 'Rough: sum of task durations minus the wall-clock span they actually took',
+      'stat.none': '—',
+      reason: 'Reason',
+      noReason: 'No reason given; open the worker session to see where it stopped',
+      showAll: 'Show all',
+      showLess: 'Show less',
+      reportAgo: 'report',
+      batchOf: 'Batch',
       justNow: 'just now',
       minutesAgo: '{n} min ago',
       hoursAgo: '{n} h ago',
@@ -423,6 +477,94 @@ window.__ModuleLoader__.load({
         }
       }
       return out
+    }
+
+    /* ───────────────── 面板的「效果」计算（纯函数，便于离线断言） ───────────────── */
+
+    /** 已结算：不再占并发位、也不会再有报告。 */
+    const SETTLED_STATUS = new Set(['done', 'blocked', 'failed', 'cancelled', 'ended', 'interrupted'])
+    /** 需要人处理：失败、阻塞、被中断。 */
+    const ATTENTION_STATUS = new Set(['failed', 'blocked', 'interrupted'])
+    /** 处理优先级：失败最急，其次阻塞，最后中断（通常只是宿主重启过）。 */
+    const ATTENTION_RANK = { failed: 0, blocked: 1, interrupted: 2 }
+
+    /** 中位数；空数组返回 0。用中位数而不是平均，避免一个 40 分钟的任务把基线拉飞。 */
+    function median(values) {
+      const list = (values || [])
+        .filter(function (value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 })
+        .sort(function (a, b) { return a - b })
+      if (!list.length) return 0
+      const mid = Math.floor(list.length / 2)
+      return list.length % 2 ? list[mid] : Math.round((list[mid - 1] + list[mid]) / 2)
+    }
+
+    /** 一条任务算不算「今天」做的（本地日历日）。 */
+    function isToday(stamp, now) {
+      const at = Date.parse(stamp || '')
+      if (!Number.isFinite(at)) return false
+      const a = new Date(at)
+      const b = new Date(now)
+      return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+    }
+
+    /**
+     * 「派发带来了什么」的一组近似值。
+     *
+     * 并行节省的定义：所有已结算任务的耗时之和，减去它们实际占用的墙钟跨度
+     * （最早开始 → 最近更新）。串行做这些活要花前者，实际只花了后者，差额就是省下来的。
+     * 明确是粗算：快照只含最近 200 条，跨天的任务也会算进来。宁可标注「粗算」，也不编一个好看的数字。
+     */
+    function effectStats(tasks, now) {
+      const list = Array.isArray(tasks) ? tasks.filter(function (task) { return task && typeof task === 'object' }) : []
+      const settled = list.filter(function (task) { return SETTLED_STATUS.has(task.status) })
+      const done = settled.filter(function (task) { return task.status === 'done' }).length
+      const durations = settled.map(function (task) { return num(task.elapsed_ms, 0) }).filter(function (value) { return value > 0 })
+      const sum = durations.reduce(function (a, b) { return a + b }, 0)
+      const starts = list.map(function (task) { return Date.parse(task.started_at || task.created_at || '') })
+        .filter(function (value) { return Number.isFinite(value) })
+      const ends = list.map(function (task) { return Date.parse(task.updated_at || '') })
+        .filter(function (value) { return Number.isFinite(value) })
+      const span = starts.length && ends.length ? Math.max(0, Math.max.apply(null, ends) - Math.min.apply(null, starts)) : 0
+      const saved = span > 0 && sum > span ? sum - span : 0
+      return {
+        settled: settled.length,
+        done: done,
+        todayDone: settled.filter(function (task) { return task.status === 'done' && isToday(task.updated_at, now) }).length,
+        rate: settled.length ? Math.round((done / settled.length) * 100) : null,
+        average: median(durations),
+        saved: saved,
+      }
+    }
+
+    /** 需要处理的排前面：先按急迫度，再按等得最久的靠前。 */
+    function sortAttention(tasks) {
+      return tasks.slice().sort(function (a, b) {
+        const rank = (ATTENTION_RANK[a.status] ?? 9) - (ATTENTION_RANK[b.status] ?? 9)
+        if (rank !== 0) return rank
+        const at = Date.parse(a.updated_at || a.created_at || '') || 0
+        const bt = Date.parse(b.updated_at || b.created_at || '') || 0
+        return at - bt
+      })
+    }
+
+    /** 活跃任务按批次分组：批次在前（按首次出现顺序），散任务在后。 */
+    function groupActive(tasks) {
+      const groups = new Map()
+      const singles = []
+      for (const task of tasks) {
+        const group = task && typeof task.group === 'string' && task.group ? task.group : ''
+        if (!group) { singles.push(task); continue }
+        if (!groups.has(group)) groups.set(group, [])
+        groups.get(group).push(task)
+      }
+      return { groups: [...groups.entries()].map(function ([name, members]) { return { name: name, members: members } }), singles: singles }
+    }
+
+    /** 一个批次在所有可见任务里的进度（含已结算的，才算得出 3/5）。 */
+    function batchProgress(tasks, name) {
+      const members = tasks.filter(function (task) { return task && task.group === name })
+      const done = members.filter(function (task) { return SETTLED_STATUS.has(task.status) }).length
+      return { done: done, total: members.length }
     }
 
     /* ───────────────────────── 网络 ───────────────────────── */
@@ -851,6 +993,110 @@ window.__ModuleLoader__.load({
 .dsh-sa-tag-group,
 .dsh-sa-tag-archived {
   background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+/* 后台收尾 / 待读：两个「状态之外还在发生的事」，用强调色但不抢状态点的注意力。 */
+.dsh-sa-tag-bg {
+  background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
+  color: var(--dsw-alias-state-warn-primary, #b45309);
+}
+.dsh-sa-tag-unread {
+  background: var(--dsw-alias-state-info-surface, rgba(37,99,235,.12));
+  color: var(--dsw-alias-state-info-primary, #2563eb);
+}
+/* ── 面板改版：效果数字、并发条、分节、批次、原因行 ── */
+.dsh-sa-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 26px;
+  padding: 10px 0 4px;
+}
+.dsh-sa-stat { display: flex; flex-direction: column; gap: 1px; min-width: 54px; }
+.dsh-sa-stat-value {
+  font-size: var(--dsw-font-md-17, 17px);
+  font-weight: 500;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-stat-label {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-conc { display: flex; flex-direction: column; gap: 5px; padding: 6px 0 2px; }
+.dsh-sa-conc-meta {
+  display: flex;
+  gap: 14px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-warn { color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dsh-sa-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.16));
+  overflow: hidden;
+}
+.dsh-sa-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--dsw-alias-state-business-primary, #3b82f6);
+  transition: width .3s ease;
+}
+.dsh-sa-bar-slow { background: var(--dsw-alias-state-warn-primary, #d97706); }
+.dsh-sa-progress { margin: 2px 0 0 15px; }
+.dsh-sa-sections { display: flex; flex-direction: column; gap: 16px; padding-bottom: 8px; }
+.dsh-sa-sec { padding-top: 12px; }
+.dsh-sa-sec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; padding: 0 16px; }
+.dsh-sa-sec-title { font-size: var(--dsw-font-sm-13, 13px); font-weight: 500; }
+.dsh-sa-sec-count {
+  min-width: 18px;
+  padding: 0 5px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-sec-hint {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-batch { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; padding: 0 16px; }
+.dsh-sa-batch-name {
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-batch-count {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-batch-bar { flex: 0 1 160px; }
+.dsh-sa-subhead {
+  margin: 12px 0 2px;
+  padding: 0 16px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-reason {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: var(--dsw-font-xs-12, 12px);
+  color: var(--dsw-alias-state-error-primary, #dc2626);
+}
+.dsh-sa-reason-label { flex: none; opacity: .78; }
+.dsh-sa-reason-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-sa-row-dense { padding: 7px 16px; gap: 2px; }
+.dsh-sa-row-attention { box-shadow: inset 2px 0 0 var(--dsw-alias-state-error-primary, #dc2626); }
+.dsh-sa-dense-meta {
+  flex: none;
+  font-size: var(--dsw-font-xxxs-11, 11px);
   color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
 }
 .dsh-sa-btn-confirm { color: var(--dsw-alias-state-warn-primary, #b45309); }
@@ -1537,12 +1783,93 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 一条任务。props.handlers 由面板传下来，避免每行都闭包一份。 */
-    function TaskRow(props) {
+    /** 指标：值在上（大号等宽数字），标签在下；`hint` 挂在 title 上，不占视觉空间。 */
+    function Stat(props) {
+      return h(
+        'span',
+        { className: 'dsh-sa-stat', title: props.hint || undefined },
+        h('span', { className: 'dsh-sa-stat-value' }, String(props.value)),
+        h('span', { className: 'dsh-sa-stat-label' }, props.label),
+      )
+    }
+
+    /** 分节：标题 + 计数 + 可选说明 + 右侧动作。空节由调用方决定渲染什么。 */
+    function Section(props) {
+      return h(
+        'section',
+        { className: 'dsh-sa-sec' },
+        h(
+          'div',
+          { className: 'dsh-sa-sec-head' },
+          h('span', { className: 'dsh-sa-sec-title' }, props.title),
+          typeof props.count === 'number' ? h('span', { className: 'dsh-sa-sec-count' }, String(props.count)) : null,
+          props.hint ? h('span', { className: 'dsh-sa-sec-hint' }, props.hint) : null,
+          h('span', { key: 'grow', className: 'dsh-sa-grow' }),
+          props.action || null,
+        ),
+        props.body || null,
+      )
+    }
+
+    /** 并发条：把「在跑 / 上限」画成一条，比两个数字更快看出还有没有空位。 */
+    function ConcurrencyBar(props) {
+      const max = Math.max(1, num(props.max, 1))
+      const running = Math.max(0, num(props.running, 0))
+      const ratio = Math.min(1, running / max)
+      return h(
+        'div',
+        { className: 'dsh-sa-conc' },
+        h(
+          'div',
+          { className: 'dsh-sa-bar', role: 'img', 'aria-label': tr('concurrency') + ' ' + running + '/' + max },
+          h('div', { className: 'dsh-sa-bar-fill', style: { width: Math.round(ratio * 100) + '%' } }),
+        ),
+        h(
+          'div',
+          { className: 'dsh-sa-conc-meta' },
+          h('span', null, tr('concurrency') + ' ' + running + '/' + max),
+          num(props.queued, 0) > 0 ? h('span', null, tr('queuedOne') + ' ' + num(props.queued, 0)) : null,
+          num(props.background, 0) > 0
+            ? h('span', { className: 'dsh-sa-warn' }, tr('backgroundTag') + ' ' + num(props.background, 0))
+            : null,
+        ),
+      )
+    }
+
+    /** 批次头：一个 group 的进度条与计数（含已结算成员，否则永远显示 0/1）。 */
+    function BatchHead(props) {
+      const total = num(props.total, 0)
+      const done = num(props.done, 0)
+      const percent = total > 0 ? Math.round((done / total) * 100) : 0
+      return h(
+        'div',
+        { className: 'dsh-sa-batch' },
+        h('span', { className: 'dsh-sa-tag dsh-sa-tag-group' }, tr('groupTag')),
+        h('span', { className: 'dsh-sa-batch-name' }, String(props.name || '')),
+        h('span', { className: 'dsh-sa-batch-count' }, done + '/' + total),
+        h(
+          'div',
+          { className: 'dsh-sa-bar dsh-sa-batch-bar', 'aria-hidden': 'true' },
+          h('div', { className: 'dsh-sa-bar-fill', style: { width: percent + '%' } }),
+        ),
+      )
+    }
+
+    /**
+     * 一条任务卡。
+     *
+     * 三种密度共用一个组件：
+     * - 默认（在跑 / 排队 / 需要处理）：两行，可选的进度条或原因行；
+     * - `dense=true`（最近完成 / 已归档）：单行，只留标题、状态、耗时与时间。
+     *
+     * 刻意保留 `dsh-sa-row` 这个类名与 `data-archived` / `data-status` 属性：
+     * 离线冒烟脚本按它们找行、点行，不能因为换布局就改掉契约。
+     */
+    function TaskCard(props) {
       const task = props.task
+      const dense = Boolean(props.dense)
       const archived = Boolean(task.archived_at)
       const meta = STATUS_META[task.status] || STATUS_FALLBACK
-      // 归档行是只读历史：整体降透明度、状态点转灰、不给取消/重试按钮。
       const dotColor = archived ? 'var(--dsw-alias-label-tertiary, #8b8b8b)' : meta.color
       const pulse = archived ? false : meta.pulse
       const statusText = tr('status.' + task.status)
@@ -1557,12 +1884,29 @@ window.__ModuleLoader__.load({
       const reportCount = num(task.report_count, 0)
       const title = typeof task.title === 'string' && task.title ? task.title : tr('noTitle')
       const group = typeof task.group === 'string' ? task.group : ''
+      const background = task.background && typeof task.background === 'object' ? task.background : null
+      const unread = Boolean(task.input_pending_at) && !task.input_read_at
       const clickable = Boolean(task.worker_session_id)
+      const reportAgo = task.last_report && task.last_report.at ? formatRelative(task.last_report.at, props.now) : ''
+
+      // 「为什么停在这」直接摊在行里，不要求人点进子会话再自己找。
+      const reason = !dense && props.variant === 'attention'
+        ? (typeof task.error === 'string' && task.error ? task.error : (firstLine(summary) || tr('noReason')))
+        : ''
+
+      // 进度条只对在跑的任务有意义：拿它和「已结算任务的中位耗时」比。
+      // 基线为 0（还没完成过任何任务）时不画，免得给出一个假的 0%。
+      const baseline = num(props.baseline, 0)
+      const percent = !archived && task.status === 'running' && baseline > 0
+        ? Math.min(100, Math.round((num(task.elapsed_ms, 0) / baseline) * 100))
+        : 0
+
       const tip = [
         task.task_id,
         task.cwd ? 'cwd: ' + task.cwd : '',
+        task.task_dir ? 'dir: ' + task.task_dir : '',
         task.worker_session_id ? 'worker: ' + task.worker_session_id : '',
-      ].filter(Boolean).join('\n') + (clickable ? '\n' + tr('clickHint') : '')
+      ].filter(Boolean).join('\n') + (clickable ? '\n' + tr('clickHint') : '') + (archived ? '\n' + tr('archivedHint') : '')
 
       /** 整行可点（按钮除外）：打开这个任务的子会话。 */
       function activate(event) {
@@ -1599,16 +1943,35 @@ window.__ModuleLoader__.load({
           )
         : null
 
+      const tags = [
+        attempt > 1
+          ? h('span', { key: 'attempt', className: 'dsh-sa-tag' }, tr('attemptPrefix') + attempt + tr('attemptSuffix'))
+          : null,
+        background
+          ? h('span', { key: 'bg', className: 'dsh-sa-tag dsh-sa-tag-bg', title: tr('backgroundHint') }, tr('backgroundTag'))
+          : null,
+        unread
+          ? h('span', { key: 'unread', className: 'dsh-sa-tag dsh-sa-tag-unread', title: tr('unreadHint') }, tr('unreadTag'))
+          : null,
+        archived
+          ? h('span', { key: 'archived', className: 'dsh-sa-tag dsh-sa-tag-archived' }, tr('archivedTag'))
+          : null,
+        dense && group ? h('span', { key: 'group', className: 'dsh-sa-tag dsh-sa-tag-group' }, tr('groupTag')) : null,
+      ]
+
       return h(
         'div',
         {
           className: 'dsh-sa-row'
             + (archived ? ' dsh-sa-row-archived' : '')
+            + (dense ? ' dsh-sa-row-dense' : '')
+            + (props.variant === 'attention' ? ' dsh-sa-row-attention' : '')
             + (clickable ? ' dsh-sa-row-clickable' : ''),
           role: 'listitem',
           'data-status': task.status,
+          'data-variant': props.variant || 'active',
           'data-archived': archived ? 'true' : undefined,
-          title: archived ? tip + '\n' + tr('archivedHint') : tip,
+          title: tip,
           tabIndex: clickable ? 0 : undefined,
           onClick: clickable ? activate : undefined,
           onKeyDown: clickable ? activate : undefined,
@@ -1624,47 +1987,61 @@ window.__ModuleLoader__.load({
           }),
           h('span', { key: 'status', className: 'dsh-sa-state', style: { color: dotColor } }, statusText),
           h('span', { key: 'title', className: 'dsh-sa-title', title: tip }, title),
-          attempt > 1
-            ? h(
-                'span',
-                { key: 'attempt', className: 'dsh-sa-tag' },
-                tr('attemptPrefix') + attempt + tr('attemptSuffix'),
-              )
-            : null,
+          tags,
           h('span', { key: 'grow', className: 'dsh-sa-grow' }),
-          group ? h('span', { key: 'group', className: 'dsh-sa-tag dsh-sa-tag-group' }, tr('groupTag')) : null,
           archived
-            ? h(
-                'span',
-                { key: 'archived', className: 'dsh-sa-tag dsh-sa-tag-archived' },
-                tr('archivedTag'),
-              )
-            : null,
-          archived
-            ? h(
-                'span',
-                { key: 'archived-at', className: 'dsh-sa-meta' },
-                formatRelative(task.archived_at, props.now),
-              )
+            ? h('span', { key: 'archived-at', className: 'dsh-sa-meta' }, formatRelative(task.archived_at, props.now))
             : null,
           elapsed ? h('span', { key: 'elapsed', className: 'dsh-sa-meta dsh-sa-elapsed' }, elapsed) : null,
           action,
         ),
-        h(
-          'div',
-          { className: 'dsh-sa-sub' },
-          h(
-            'span',
-            { key: 'workspace', className: 'dsh-sa-workspace', title: task.workspace_title || '' },
-            workspaceTitleOf(task),
-          ),
-          h('code', { key: 'id', className: 'dsh-sa-id' }, task.task_id),
-          reportCount > 0
-            ? h('span', { key: 'count', className: 'dsh-sa-meta' }, tr('reports') + ' ' + reportCount)
-            : null,
-          h('span', { key: 'report', className: 'dsh-sa-report', title: summary || reportLine }, reportLine),
-        ),
-        typeof task.error === 'string' && task.error
+        percent > 0
+          ? h(
+              'div',
+              {
+                key: 'progress',
+                className: 'dsh-sa-bar dsh-sa-progress',
+                title: formatDuration(num(task.elapsed_ms, 0)) + ' / ' + formatDuration(baseline),
+                'aria-hidden': 'true',
+              },
+              h('div', {
+                className: 'dsh-sa-bar-fill' + (num(task.elapsed_ms, 0) > baseline ? ' dsh-sa-bar-slow' : ''),
+                style: { width: percent + '%' },
+              }),
+            )
+          : null,
+        reason
+          ? h(
+              'div',
+              { key: 'reason', className: 'dsh-sa-reason', title: reason },
+              h('span', { className: 'dsh-sa-reason-label' }, tr('reason')),
+              h('span', { className: 'dsh-sa-reason-text' }, firstLine(reason)),
+            )
+          : null,
+        dense
+          ? (reportCount > 0
+              ? h('span', { key: 'dense-count', className: 'dsh-sa-dense-meta' }, tr('reports') + ' ' + reportCount)
+              : null)
+          : h(
+              'div',
+              { key: 'sub', className: 'dsh-sa-sub' },
+              h(
+                'span',
+                { key: 'workspace', className: 'dsh-sa-workspace', title: task.workspace_title || '' },
+                workspaceTitleOf(task),
+              ),
+              h('code', { key: 'id', className: 'dsh-sa-id' }, task.task_id),
+              reportCount > 0
+                ? h('span', { key: 'count', className: 'dsh-sa-meta' }, tr('reports') + ' ' + reportCount)
+                : null,
+              h(
+                'span',
+                { key: 'report', className: 'dsh-sa-report', title: summary || reportLine },
+                reportLine,
+              ),
+              reportAgo ? h('span', { key: 'report-at', className: 'dsh-sa-meta' }, reportAgo) : null,
+            ),
+        typeof task.error === 'string' && task.error && props.variant !== 'attention'
           ? h('div', { key: 'error', className: 'dsh-sa-errorline', title: task.error }, task.error)
           : null,
         typeof task.archive_error === 'string' && task.archive_error
@@ -1695,6 +2072,8 @@ window.__ModuleLoader__.load({
       /** 顶部提示条：{ tone: 'error'|'warn'|'info', text }，可关闭。 */
       const [notice, setNotice] = useState(null)
       const [filter, setFilter] = useState('all')
+      /** 「最近完成」默认只露 5 条，展开看全部。 */
+      const [showDone, setShowDone] = useState(false)
       /** 工作区筛选；'' 表示全部工作区。与状态 chip 是「与」关系。 */
       const [workspace, setWorkspace] = useState('')
       const [busy, setBusy] = useState({})
@@ -1939,12 +2318,62 @@ window.__ModuleLoader__.load({
       const totalNow = Math.max(0, num(counts.total, allTasks.length) - archivedNow)
       const failedNow = num(counts.failed, 0)
 
-      // 工作区筛选与状态 chip 取交集；同 group 的行再聚到一起。
+      // 工作区筛选与状态 chip 取交集；之后的「效果」数字也只看这个范围。
       const scopedTasks = workspace
         ? allTasks.filter(function (task) { return task.workspace_id === workspace })
         : allTasks
       const currentFilter = FILTERS.filter(function (item) { return item.id === filter })[0] || FILTERS[0]
-      const visibleTasks = clusterByGroup(scopedTasks.filter(currentFilter.match))
+
+      const live = scopedTasks.filter(function (task) { return !task.archived_at })
+      const stats = effectStats(live, now)
+      const backgroundNow = live.filter(function (task) { return Boolean(task.background) }).length
+
+      // 三段：需要人处理 / 在跑与排队 / 最近完成。归档只在它自己的视图里出现。
+      const attention = sortAttention(live.filter(function (task) { return ATTENTION_STATUS.has(task.status) }))
+      const activeTasks = live.filter(function (task) {
+        return task.status === 'running' || task.status === 'queued'
+      })
+      const finished = live
+        .filter(function (task) {
+          return !ATTENTION_STATUS.has(task.status) && task.status !== 'running' && task.status !== 'queued'
+        })
+        .sort(function (a, b) {
+          return (Date.parse(b.updated_at || '') || 0) - (Date.parse(a.updated_at || '') || 0)
+        })
+      const activeGroups = groupActive(clusterByGroup(activeTasks))
+      const shownFinished = showDone ? finished : finished.slice(0, 5)
+      const archivedTasks = scopedTasks.filter(function (task) { return Boolean(task.archived_at) })
+
+      const card = function (task, variant, dense) {
+        return h(TaskCard, {
+          key: task.task_id || 'row-' + variant,
+          task: task,
+          variant: variant,
+          dense: dense,
+          baseline: stats.average,
+          now: now,
+          fetchedAt: fetchedAt,
+          busy: busy,
+          handlers: handlers,
+        })
+      }
+
+      /** 在跑与排队：批次的成员聚在一起，批次头给出 3/5 这样的进度。 */
+      const activeList = function () {
+        const rows = []
+        for (const group of activeGroups.groups) {
+          const progress = batchProgress(live, group.name)
+          rows.push(h(BatchHead, { key: 'batch-' + group.name, name: group.name, done: progress.done, total: progress.total }))
+          for (const task of group.members) rows.push(card(task, 'active', false))
+        }
+        if (activeGroups.singles.length) {
+          if (activeGroups.groups.length) {
+            rows.push(h('div', { key: 'single-head', className: 'dsh-sa-subhead' }, tr('sec.single')))
+          }
+          for (const task of activeGroups.singles) rows.push(card(task, 'active', false))
+        }
+        return rows
+      }
 
       const header = h(
         'div',
@@ -1961,6 +2390,22 @@ window.__ModuleLoader__.load({
           h('span', { key: 'grow', className: 'dsh-sa-grow' }),
           fetchedAt > 0 ? h('span', { key: 'time', className: 'dsh-sa-meta' }, tr('updatedAt') + ' ' + formatClock(fetchedAt)) : null,
         ),
+        // 「派发到底带来了什么」：完成数、成功率、中位耗时、并行节省。
+        // 都是快照里的近似值，hover 有定义，避免被当成账目。
+        h(
+          'div',
+          { className: 'dsh-sa-stats' },
+          h(Stat, { key: 'done', label: tr('stat.done'), value: stats.done, hint: tr('stat.doneHint') }),
+          h(Stat, { key: 'rate', label: tr('stat.rate'), value: stats.rate === null ? tr('stat.none') : stats.rate + '%', hint: tr('stat.rateHint') }),
+          h(Stat, { key: 'avg', label: tr('stat.average'), value: stats.average > 0 ? formatDuration(stats.average) : tr('stat.none'), hint: tr('stat.averageHint') }),
+          h(Stat, {
+            key: 'saved',
+            label: tr('stat.saved'),
+            value: stats.saved > 0 ? formatDuration(stats.saved) : tr('stat.none'),
+            hint: tr('stat.savedHint'),
+          }),
+        ),
+        h(ConcurrencyBar, { running: runningNow, max: maxWorkers, queued: queuedNow, background: backgroundNow }),
         h(
           'div',
           { className: 'dsh-sa-chips', role: 'group', 'aria-label': tr('title') },
@@ -2073,23 +2518,73 @@ window.__ModuleLoader__.load({
           title: tr('empty'),
           hint: h('code', null, 'dispatch_launch'),
         })
-      } else if (visibleTasks.length === 0) {
-        body = h(Blank, { title: tr('emptyFiltered') })
-      } else {
-        body = h(
-          'div',
-          { role: 'list', 'aria-label': tr('title') },
-          visibleTasks.map(function (task, index) {
-            return h(TaskRow, {
-              key: task.task_id || 'row-' + index,
-              task: task,
-              now: now,
-              fetchedAt: fetchedAt,
-              busy: busy,
-              handlers: handlers,
+      } else if (filter === 'archived') {
+        body = archivedTasks.length
+          ? h(Section, {
+              title: tr('sec.archived'),
+              count: archivedTasks.length,
+              body: h('div', { role: 'list', 'aria-label': tr('sec.archived') }, archivedTasks.map(function (task) {
+                return card(task, 'archived', true)
+              })),
             })
-          }),
-        )
+          : h(Blank, { title: tr('emptyFiltered') })
+      } else if (filter === 'attention') {
+        body = attention.length
+          ? h(Section, {
+              title: tr('sec.attention'),
+              count: attention.length,
+              body: h('div', { role: 'list', 'aria-label': tr('sec.attention') }, attention.map(function (task) {
+                return card(task, 'attention', false)
+              })),
+            })
+          : h(Blank, { title: tr('sec.attentionEmpty') })
+      } else if (filter === 'active') {
+        body = activeTasks.length
+          ? h(Section, {
+              title: tr('sec.active'),
+              count: activeTasks.length,
+              body: h('div', { role: 'list', 'aria-label': tr('sec.active') }, activeList()),
+            })
+          : h(Blank, { title: tr('sec.activeEmpty') })
+      } else {
+        // 总览：需要你处理 → 在跑与排队 → 最近完成。
+        const parts = []
+        if (attention.length) {
+          parts.push(h(Section, {
+            key: 'attention',
+            title: tr('sec.attention'),
+            count: attention.length,
+            body: h('div', { role: 'list', 'aria-label': tr('sec.attention') }, attention.map(function (task) {
+              return card(task, 'attention', false)
+            })),
+          }))
+        }
+        if (activeTasks.length) {
+          parts.push(h(Section, {
+            key: 'active',
+            title: tr('sec.active'),
+            count: activeTasks.length,
+            body: h('div', { role: 'list', 'aria-label': tr('sec.active') }, activeList()),
+          }))
+        }
+        if (finished.length) {
+          parts.push(h(Section, {
+            key: 'done',
+            title: tr('sec.done'),
+            count: finished.length,
+            action: finished.length > 5
+              ? h('button', {
+                  type: 'button',
+                  className: 'dsh-sa-btn',
+                  onClick: function () { setShowDone(function (value) { return !value }) },
+                }, showDone ? tr('showLess') : tr('showAll') + ' ' + finished.length)
+              : null,
+            body: h('div', { role: 'list', 'aria-label': tr('sec.done') }, shownFinished.map(function (task) {
+              return card(task, 'done', true)
+            })),
+          }))
+        }
+        body = parts.length ? h('div', { className: 'dsh-sa-sections' }, parts) : h(Blank, { title: tr('emptyFiltered') })
       }
 
       return h(
