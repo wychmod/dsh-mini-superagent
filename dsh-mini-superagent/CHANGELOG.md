@@ -2,6 +2,168 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 未发布
+
+### 任务看板改版：从「流水账」到「指挥台」
+
+问题：原面板是一张按状态排序的平铺列表，只能回答「有哪些任务」，回答不了「派发到底带来了什么」
+「现在哪条需要我」「这条为什么停住」。列表一长就成了记账本。
+
+- **总览分三段**（`全部` 视图）：`需要你处理` → `在跑与排队` → `最近完成`。
+  - 需要处理：failed / blocked / interrupted，按「失败优先、等得久的优先」排序，**行内直接给原因**；
+  - 在跑与排队：同批次聚在一起，批次头给 `2/5` 进度条与计数；
+  - 最近完成：默认 5 条，可展开。
+- **效果条**：新增 `完成`、`成功率`、`平均耗时`（中位）、`并行节省` 四个数字，随工作区筛选联动。
+  `并行节省` 是粗算（各任务耗时之和 − 实际墙钟），定义写在 hover 里。
+- **并发条**：4px 进度条 + 排队 / 后台收尾计数，替代「只看两个数字猜还有没有空位」。
+- **运行中任务**多一条「耗时 / 中位耗时」的细进度条，超过中位转橙——用来判断某条是不是跑偏了。
+- **视图 chip 语义**：`全部` 现在是「总览」（三段），`进行中` / `需要处理` 只显示对应一节，
+  `已归档` 是紧凑单行列表。计数口径不变。
+- 活跃行不再重复显示「批次」徽标（批次头已经说明）；归档行只留标题、状态、耗时与时间。
+- 保留的契约：行元素仍带 `dsh-sa-row` / `data-status` / `data-archived`，点行仍打开子会话；
+  离线冒烟据此断言，并新增 6 条结构断言（三段、四个效果数字、原因、批次进度、两个异常标签）。
+- 新增 [`preview/board-preview.html`](preview/board-preview.html)：真实面板组件 + 假数据，用来在宿主之外目视版式。
+
+### 路由模式：主会话不能改代码
+
+- **新增 `restrictRouter`（默认 `true`）与 `routerDenyTools`（默认 `["write","edit"]`）**（`src/dispatch.js` `enforceRouter()` /
+  `syncRouter()`、`src/sessions.js` `restrictTools()`）：**「必派发」的会话**（输入框把派发目标设成某个工作区或「自动」）
+  在它的 `agent.ctx` 上 `tools.restrict({ deny })`，模型看不到 `write` / `edit`，改代码只能派给子会话；
+  把目标选回「不派发」时 `syncRouter()` 立刻把工具还回去。语义对齐上游 `dsh-superagent` 的
+  `dsh-superagent-router` preset，但实现方式不同——我们的主会话是用户自己的会话、改不了它的 preset，
+  作用域 `restrict` 是当前 API 里唯一能按 agent 收窄工具面的口子。
+
+  四个必须记住的细节：
+  0. **只对「必派发」生效**：任何会话都可能是主会话，而且「不派发」是默认选项。
+     初版按「第一次派发」判定，等于派过一次就永久收走 write/edit——与产品语义冲突，已改。
+  1. **worker 跳过**：worker 递归派发时 `table.byWorker(agent.id)` 命中，不收窄——否则它自己干不了活。
+  2. **只 deny 真实存在的工具**：`restrict` 对未知名字直接抛错，所以先 `tools.get(name, agent)` 探一遍，缺哪个跳哪个。
+  3. **可逆**：disposer 由 `SessionGateway.restrictDisposers` 持有，插件卸载或 `agent/disposed` 时收回；
+     否则重载后主会话仍然看不到 write/edit，用户会以为插件坏了。
+
+  边界说清：`bash` 默认保留，`echo > file` 仍能写文件（上游同样如此）。要硬边界就把它也加进 `routerDenyTools`。
+  关掉整件事：`restrictRouter: false`，行为回到 0.8.1。
+- **提示段同步**（`src/prompt.js` `ROUTER_LOCKED`）：已上锁的会话在 `SOFT_HINT` / `FORCED_HINT` 之后追加一段，
+  点明「write/edit 已被收窄、改代码请派发」。模型看不到工具时的默认反应是「我做不到」或反复换写法，一句话能省一轮试错。
+
+### 修复：`dispatch_launch` 的 `model` 参数被静默丢弃
+
+`tools.js` 的工具描述承诺了 `model`，`dispatch.js` 也把它存进 `task.model`，但 `start()` 调用
+`createWorker()` 时只传了 `agentPreset` / `permissionPreset` / `workspaceId` —— 这个参数**一路没有下文**，
+用户以为在用便宜/更强的模型，实际用的是部署默认，且没有任何提示。
+
+现在（`src/sessions.js` `applyModel()`）：接受 `model` 或 `provider/model`，经 `llm.resolveCallConfig` 解析后
+在首个请求之前记一条 `model/selection`（与官方原型同样的做法，且避开会改全局默认的 `selectModel`）。
+拿不到能力（没有 `llm.resolveCallConfig`、session 不支持 `append`）时**该次派发直接失败并回报原因**，
+不静默降级——静默用默认模型比报错更贵。
+
+### 修复：报告重试可能投两条
+
+`#deliverWithRetry` 原来把 `nextMessageId()` 写在重试循环**里面**，每次重试换一个新 id。
+只要「第一次其实已投进收件箱、只是后面抛错」，第二次就会用新 id 再投一遍，主会话看到两条一样的报告。
+
+现在：`requestId` 在循环外算一次（三次重试逐字相同），重试前用 `SessionGateway.holds()`
+查收件箱（`nextTurn`/`nextStep`）与会话历史（`user/message` 事件），命中就按已送达处理。
+`relayRetryMs` 可配，默认仍是 2s/4s/8s。
+
+### 对齐上游：恢复与容错四件事
+
+四条都不改状态机（对照见 `plans/05-superagent-router-worker.md` §七）。
+
+- **重启后排队任务重新入队**（`restore()`）：`queued` 且 `startedAt` 为空（说明 `createWorker()` 从没跑过）
+  的任务保持 `queued` 并重新进队，`pump()` 接着跑；跑过的仍标 `interrupted`。
+  0.8.1 及更早一律 `interrupted`，重启前排队的任务要人工重派——上游 `resume()` 会重排 pending，这里对齐。
+- **瞬时故障续跑**（`onWorkerError()` / `resumeAfterError()` / `isTransient()`）：订阅 `agent/error`，
+  408/429/5xx/连接类错误退避（默认 15s/30s/60s）后投一条「从中断处继续」，任务保持 `running`；
+  次数用完或非瞬时错误走 `failTurn()` → `failed` + 回报。
+  0.8.1 及更早没订这个事件：模型 5xx 之后 worker 走到 `idle`，被自动回报成 `ended`，
+  主会话收到的是一条「本轮没有输出」，看起来像任务做完了。
+- **读回执**（`onSessionEvent()`）：`dispatch_message` 投递成功后记 `inputPendingAt`，
+  等 `session/event` 出现对应 `user/message` 才写 `inputReadAt`；只认 `msg`/`retry`，`relay` 不算。
+  看板与 `dispatch_inspect` 因此能区分「已投递」与「已读」。
+- **progress 节流**（`report()`）：同一任务 `progressRelayIntervalMs`（默认 60s）内的第二条不再回流，
+  但仍入库。上游用通知合并，我们没有队列，退化成按时间节流；`0` 可关。
+- **worker preset 暂不抄**：上游给 worker 一个把前台命令压到 5 秒的 preset，但 preset 的 `plugins`
+  是完整清单、不继承，抄过来等于复制两百行绑定宿主包名的配置，宿主升级就碎。
+  折中：新增 `workerAgentPreset` 配置 + worker 提示里要求「长命令用 `run_in_background` 或 `timeoutMs ≤ 30000`」。
+- 新增配置：`retryTransient`、`retryBackoffMs`、`progressRelayIntervalMs`、`workerAgentPreset`；
+  `selfCheck()` 回显 `router` / `delivery` / `retry` 三块，便于确认「配了但没生效」。
+
+### 对齐上游：后台活占位、subagent 收窄、每任务目录
+
+- **回合结束 ≠ 任务结束**（`handOffToBackground()` / `watchBackground()` / `backgroundOfWork()`）：
+  `agent/status → idle` 时先看宿主 `jobs` 与 `subagents`，有活就不结算——任务继续 `running`、占着并发位、
+  看板显示「后台收尾」；每 `backgroundPollMs`（默认 15s）巡检，清空后正常收尾；
+  到 `backgroundLimitMs`（默认 30 分钟）终止剩余 shell job 再结算，并在兜底报告里写明终止数。
+  0.8.1 及更早直接 `ended`，于是「留了个 dev server」的任务被判完成、槽位被释放，后台还在改同一个目录。
+- **worker 的 subagent 收窄**（`decorateSubagent()`）：沿 `session.header.parentSession` 找最近的 worker
+  （最多 8 层，防成环），找到就用 `restrict({ deny: TOOL_NAMES })` 收走全部 `dispatch_*`。
+  subagent 保留读写与执行，但不能再派发/汇报——否则一个任务能无限往下派生，而 `maxTasksPerSession` 只算主会话。
+  **没做**「任务结算后收走工作工具」：我们的 `dispatch_message` 允许续跑，收走会让续跑失效。
+- **每任务目录 + prepare 命令**（新增 `src/prepare.js`）：配 `taskDirRoot` 后每个任务得到
+  `<root>/<标题安全名>-<id后6位>`；目录不存在时在**父目录**跑一次 `prepareCommand`
+  （环境变量 `DSH_DISPATCH_DIR` / `_TASK` / `_TITLE` / `_WORKSPACE` / `_CWD`），已存在则跳过。
+  之后 `task.cwd` 指向任务目录，会话仍挂在目标/【派发】工作区，由 `enterDirectory()` 切进去。
+  失败即 `failed` + 回报，**不建子会话、不自动重试**（目录可能已被写了一半）。
+- 看板：任务卡新增 `task_dir` / `prepare_at` / `background` / `background_killed`，
+  行内新增「后台收尾」「待读」两个徽标（`dsh-sa-tag-bg` / `-unread`）。
+- 新增配置：`backgroundPollMs`、`backgroundLimitMs`、`taskDirRoot`、`prepareCommand`、`prepareTimeoutMs`。
+
+### 验证
+
+- `node --test` **158 个用例 / 152 pass / 6 cancelled / 0 fail**（新增 `test/router.test.js` 16 条、
+  `test/recovery.test.js` 10 条、`test/background.test.js` 6 条、`test/subagent.test.js` 6 条、
+  `test/prepare.test.js` 9 条；6 条 cancelled 是 `tasks.test.js` 里依赖父用例超时语义的既有用例）。
+- 新增用例做了**变异验证**：把 `enforceRouter` 的 `byWorker` 跳过去掉，worker 用例立即失败；
+  把 `requestId` 移回循环内，「重试复用同一 id」用例立即失败。
+
+### 工作区放置
+
+- **明确指定了目标工作区，子会话仍被塞进【派发】**（`src/dispatch.js`）：
+  `placementFor()` 的判据原来是 `workerWorkspace === 'target' && target`，而 `workerWorkspace` 默认是 `day`，
+  于是**用户选了目标也被默认值压掉**，每次派发都凭空多出一个 `【派发】YYYY-MM-DD` 工作区并登记到侧边栏。
+  现在语义是「**有目标用目标，没有/找不到目标才退回日期工作区**」：目标存在就直接用，`workerWorkspace` 管不到；
+  只有目标缺失或目标已被删除时才走兜底。
+- **`workerWorkspace` 重新定义为「无目标时的兜底」**（`src/constants.js`）：
+  取值从 `day` / `target` 改为 `day`（默认，当天【派发】）/ `cwd`（直接用任务 cwd，不建【派发】）。
+  旧值 `target` 已废弃——它表达的「用目标工作区」现在是无条件默认行为——配成它会被
+  `normalizeWorkerWorkspace()` 归一成 `day`，**不报错**（旧 profile 升级不该让插件起不来）。
+- **日期工作区保持惰性创建**：`provision()` 只建默认工作区，从不建【派发】；`placementFor()` 也只在实际需要
+  兜底时才调 `dayWorkspace()`。有目标的派发全程不碰它——这正是「不再凭空多出日期工作区」的前半段。
+
+### 提示词：把「非阻塞」讲清楚
+
+- **`FORCED_HINT` 的「派下去，然后结束本轮」误导了模型**（`src/prompt.js`）：
+  这句话读起来像「派完就没事了」，既没交代派发是**非阻塞**的、也没交代报告会**自己回来**。
+  结果是主会话倾向于原地等着看结果，或者干脆自己把活干了。
+
+  现在把「机制契约」抽成共享常量 `BACKGROUND_CONTRACT`，`DISPATCH_HINT`（轻提示）与
+  `FORCED_HINT`（必派发）**共用同一份文字**，从结构上杜绝两种模式各说各话（之前确实漂过）。
+  契约明确四件事：
+  1. 派发立即返回，派完就有空了，不要原地等；
+  2. 但边界要诚实——`dispatch_wait` 是真阻塞，会等到超时；
+  3. 报告不用取：它自动成为本会话的一条消息，在跑时下一步看到、空闲时被唤醒；
+  4. 可以连续派多批，上一批没回来不是等下去的理由。
+
+  注意：这**只是措辞修复**。派发本身在更早的版本里就已经是非阻塞的
+  （`launch()` 从不 await 子会话），所以用户感知到的「卡死」来自模型行为被措辞误导，
+  而不是机制缺陷。下面新增的行为级测试把「不阻塞」这件事钉成了运行时契约。
+
+### 验证
+
+- `node --test` **111 pass**（0.8.0 为 95；新增 `test/placement.test.js` 12 条 +
+  `test/nonblocking.test.js` 4 条）。
+- **行为级回归测试**（`test/nonblocking.test.js`）：不满足于断言提示词文本，而是真正驱动
+  `dispatch_launch.execute`，用计时和「子会话那步尚未完成」两个信号证明它提前返回；
+  另有三条覆盖并发不互斥、报告自动投递、`dispatch_wait` 确实阻塞。
+  做了变异验证：把 `launch()` 尾部改成 `await this.pump()` 后，非阻塞用例立即失败；
+  恢复后全绿。
+- 工作区用例同样做了变异验证：把 `placementFor()` 回退成 0.8.0 行为后，
+  6 条与目标相关的用例全部失败；修复后全部通过。所以这些用例钉的是缺陷本身，不是摆设。
+- `verify-placement.mjs` 8/8：用假宿主驱动 `launch() → pump() → start()` 全流程，
+  断言的是「子会话真被建在哪个工作区」，而不只是 `placementFor()` 的返回值。
+- `verify-prompt.mjs` 36/36：断言两种提示都讲了非阻塞、报告回流、`dispatch_wait` 边界，且表述不矛盾。
+
 ## 0.8.0 — 2026-11-06
 
 修掉 0.7.0 评审里剩下的 P1/P2。这些问题单个看都不致命，但都是「用久了会咬人」的类型：

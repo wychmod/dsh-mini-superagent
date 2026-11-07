@@ -78,7 +78,7 @@ node --check dsh-mini-superagent/src/index.js
 # 对正在运行的宿主拉一遍 HTTP 接口（只读 + 一个可逆写；26 项断言）
 node scripts/http-smoke.mjs
 
-# 离线渲染冒烟：不连宿主，用假 ModuleLoader/ctx/fetch 跑浏览器半边（71 项断言）
+# 离线渲染冒烟：不连宿主，用假 ModuleLoader/ctx/fetch 跑浏览器半边（87 项断言）
 node scripts/client-smoke.mjs
 ```
 

@@ -196,6 +196,8 @@ worker 回合结束（`agent/status` → `idle`）时，如果它这一轮没给
 作为「一轮执行结束（worker 未显式报告）」回报给主会话；用 `reportOnTurnEnd: false` 可关掉。
 所以即使 worker 忘了报告，主会话也不会永远干等——实测收到过 `PONG-OK`。
 
+如果这时它的 shell job / subagent 还在跑，回报会**推迟到后台清空**（或到 30 分钟上限）再发，见下一节。
+
 ---
 
 ## 任务看板
@@ -205,20 +207,32 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 
 **装完/升级后必须刷新一次 GUI 页面**，图标才会出现——客户端模块在页面刷新后加载，插件已激活不影响这一点。
 
-面板从上到下（0.5.0）：
+面板从上到下：
 
-- **顶部指标**：并发 `N/max`、排队、**总计（= `counts.total − counts.archived`）**、失败（有失败时红字）；右侧「更新于 HH:MM:SS」。
-- **四个过滤 chip**：`全部`（默认，**不含已归档**）/ `进行中`（running + queued）/ `需要处理`（failed + interrupted + blocked）/ `已归档`，各带计数（按当前工作区筛选后计算）。
-- **工作区下拉**：`全部工作区` + 快照 `workspaces`；选中的工作区与状态 chip 取交集。
+- **头部数字**：`并发 N/max`、`排队`、`总计`（不含已归档）、失败数；右侧「更新于 HH:MM:SS」。
+- **效果条**：`完成`、`成功率`、`平均耗时`（中位数）、`并行节省`——粗算「各任务耗时之和 − 实际占用的墙钟」，
+  定义写在每个数字的 hover 里，不让人误当账目。
+- **并发条**：一条 4px 进度条 + 排队 / 后台收尾计数，比两个数字更快看出还有没有空位。
+- **四个视图 chip**：`全部`（总览）/ `进行中` / `需要处理` / `已归档`，各带计数（按当前工作区筛选后计算）。
+- **总览三段**：
+  - `需要你处理`：failed / blocked / interrupted，按「失败的先、等得久的先」排序，**行内直接给原因**，
+    不用点进子会话才知道它为什么停住；
+  - `在跑与排队`：同批次的成员聚在一起，批次头给 `2/5` 的进度条；运行中的行带一条
+    「耗时 / 中位耗时」的细进度条（超过中位转橙），一眼看出哪条跑偏了；
+  - `最近完成`：默认 5 条，超过可「显示全部」。
+- **任务行**：状态点（只有 running 脉动，`prefers-reduced-motion` 下关闭）、状态文字、标题、
+  `第 N 次`、`后台收尾`、`待读`、耗时、取消/重试按钮；第二行是工作区标题、`task_id`、报告数、
+  摘要首行与「报告 3 分钟前」。失败任务额外一行错误，归档失败额外一行「归档失败：…」。
+- **工作区下拉**：`全部工作区` + 快照 `workspaces`；选中的工作区与视图 chip 取交集，效果数字也跟着这个范围走。
 - **立即归档**：两步确认（首次点击变「确认归档」，4 秒无操作自动回落），调 `POST /board/archive`，结果用提示条显示扫描/归档/失败数。
-- **任务行**：状态点（只有 running 脉动，`prefers-reduced-motion` 下关闭）、状态文字、标题、`批次` 徽标（`group` 非空）、
-  `第 N 次`（attempt > 1）、`已归档` 徽标与相对时间、走表耗时、取消/重试按钮；
-  第二行是工作区标题（为空显示「跟随会话目录」）、`task_id`、报告数、摘要首行。失败任务额外一行错误，归档失败额外一行「归档失败：…」。
-- **归档行**：整行 0.55 透明度、灰点、无按钮，只出现在「已归档」chip。
+- **归档视图**：紧凑单行（标题、状态、耗时、归档相对时间），整行 0.55 透明度、灰点、无按钮；归档失败的原因照常显示。
 - **点行跳子会话**：整行可点，`Enter`/`Space` 也可以；失败提示「打不开子会话 `<id>`：<原因>」，归档行先提醒但仍尝试打开。
 - **占位与提示**：加载中 / 空列表 / 筛选后为空 / 取不到数据（保留上次成功快照并提示）；取消/重试/归档失败用顶部红条显示原因。
 - **刷新节奏**：页面隐藏时停表并中止在途请求，切回来立刻重取；面板卸载时清掉定时器与所有在途请求。
 - **主题**：颜色全部走 `var(--dsw-alias-*, fallback)`，不写死明暗两套。
+
+> 想先看效果不装宿主：打开 [`preview/board-preview.html`](preview/board-preview.html)（真实面板组件 + 假数据，
+> 自包含单文件，只需联网取 React）。改完 `client/index.js` 后跑 `node scripts/board-preview.mjs` 重新生成。
 
 安全取舍（细节见 [docs/board.md](docs/board.md)）：
 
@@ -256,18 +270,23 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 
 失败只记日志（`创建默认工作区失败（不影响派发）`），不影响派发。`dispatch_workspaces` 可以看到这个工作区与会话数。
 
-### 每天一个【派发】工作区
+### 子会话放在哪个工作区
 
-子会话默认（`workerWorkspace: day`）挂到**当天的**工作区：
+**有目标工作区就用目标**（不可关闭）；只有**没有目标 / 目标已被删除**时才退回当天的【派发】工作区：
 
 ```text
-<workspaceRoot>/派发/<YYYY-MM-DD>      标题：【派发】YYYY-MM-DD
+<workspaceRoot>/派发/<YYYY-MM-DD>      标题：【派发】YYYY-MM-DD     ← 仅在需要兜底时按需创建
 ```
 
-于是侧边栏里子会话按天收拢，而不是散落在每个项目下。想按项目看会话就设 `workerWorkspace: target`。
+于是选了目标项目的派发就待在项目里，不会凭空多出日期工作区；没指定目标时才按天收拢、用完归档，
+侧边栏不至于散落在每个项目下。完全不想让兜底建工作区，就把 `workerWorkspace` 设成 `cwd`。
 
-**会话住【派发】，活干在目标目录**：建完会话后插件会调 `workingDirectory.set` 把工作目录切到任务的目标路径，
-所以子会话的会话归属与 `Get-Location` 不是一回事。切目录失败只记 warn，任务照跑。
+> 0.8.1 变更：旧版 `workerWorkspace` 决定「用不用目标」，默认 `day` 使目标被忽略。
+> 现在这个配置**只决定无目标时的兜底**（`day` = 当天【派发】，`cwd` = 任务目录）；
+> 旧值 `target` 已废弃，会被当作 `day` 处理（不报错）。
+
+**会话归属与工作目录是两件事**：建完会话后插件会调 `workingDirectory.set` 把工作目录切到任务的目标路径，
+所以子会话的会话归属与 `Get-Location` 不一定是同一个地方。切目录失败只记 warn，任务照跑。
 
 ### 派发到哪个工作区
 
@@ -342,10 +361,22 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 | `maxBriefChars` | `12000` | 投给 worker 的任务简报最大字符数 |
 | `workspaceRoot` | `''` | 工作区根；空表示 `<用户文档目录>/mini-superagent` |
 | `provisionDefaultWorkspace` | `true` | 启动时创建默认工作区与默认主会话（失败只记日志） |
-| `workerWorkspace` | `day` | 子会话放哪：`day` = 当天【派发】工作区；`target` = 任务指定的目标工作区 |
+| `workerWorkspace` | `day` | **无目标时**的兜底：`day` = 当天【派发】工作区；`cwd` = 直接用任务 cwd。有目标时与它无关 |
 | `archiveAfterHours` | `24` | 子会话结束多少小时后自动归档；`0` 表示不归档 |
 | `archiveSweepMinutes` | `10` | 归档巡检间隔（分钟）；`0` 表示不巡检 |
 | `leadSessionId` | `mas-lead` | 默认主会话的固定 id；改值等于换一个新默认主会话 |
+| `restrictRouter` | `true` | 「必派发」的会话收窄 `write` / `edit`，改代码只能派下去（选回「不派发」立刻解锁，见「路由模式」） |
+| `routerDenyTools` | `["write","edit"]` | 路由模式收走哪些工具。注意 `bash` 默认保留，`echo > file` 仍能写；要硬边界就把它也加进来 |
+| `relayRetryMs` | `[2000,4000,8000]` | 报告投递失败的退避序列（毫秒），用完即放弃 |
+| `retryTransient` | `true` | worker 回合遇到瞬时故障（408/429/5xx/网络）时自动续跑 |
+| `retryBackoffMs` | `[15000,30000,60000]` | 续跑的退避序列；长度即最大重试次数 |
+| `progressRelayIntervalMs` | `60000` | 同一任务 `progress` 报告的最短回流间隔；`0` 表示不节流（被挡下的仍然入库） |
+| `workerAgentPreset` | `''` | 子会话默认 preset；指向一个收紧的 preset 可以让 worker 的前台命令更早转后台 |
+| `backgroundPollMs` | `15000` | 回合结束后后台还有 job/subagent 时的巡检间隔 |
+| `backgroundLimitMs` | `1800000` | 后台活最多再占多久（30 分钟）；到点终止剩余 job 再结算，`0` 不限 |
+| `taskDirRoot` | `''` | 每任务目录的根；留空不启用（子会话仍在工作区/调用者目录里干活） |
+| `prepareCommand` | `''` | 任务目录不存在时在父目录执行一次的命令，典型是 `git worktree add` |
+| `prepareTimeoutMs` | `600000` | prepare 命令超时（10 分钟） |
 
 单个任务还可以在 `dispatch_launch` / `dispatch_launch_many` 时覆盖 `cwd` / `workspace` / `create_workspace` /
 `model` / `agent_preset` / `permission_preset`。
@@ -357,7 +388,8 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - 任务表在 `<stateDir>/tasks.json`（默认 `$DSH_HOME/dsh-mini-superagent/tasks.json`），UTF-8，覆盖写，800ms 防抖。
 - 文件结构 `{version: 3, savedAt, tasks: [...], targets: {...}}`；读取时不强校验版本，坏文件只记日志、不阻止插件启动。
   旧文件没有 `targets` 时按空处理。
-- 插件重启后读回历史任务；进程之间没有活的 worker，所以**未结算的一律标 `interrupted`**，不假装还活着。
+- 插件重启后读回历史任务：**还在排队、且从没启动过的任务会重新入队接着跑**（判据 `startedAt` 为空）；
+  已经在跑的标 `interrupted`，因为新进程里那个 worker 可能已经做了一半，重跑会重复执行。
 - 子会话本身是普通 DSH Session，内容由 DSH 自己持久化，在侧边栏里可以直接打开。
 - 每个任务最多保留 50 条报告；简报落盘时截到 2000 字符（完整简报在 worker 首条消息里）。
 - 任务新增 `attempt` 字段（默认 1，重试 +1），随任务表落盘；旧任务读回时按 1 处理，看板不会误显示「第 0 次」。
@@ -367,21 +399,80 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 
 ## 工作方式提示
 
-第一次从某个会话派发任务时，插件往**那个会话**的系统提示里加一段，段名 `dsh-mini-superagent`、`order: 9998`，
-首行是 `[dsh-mini-superagent 工作方式]`，内容是「派发—收报告—再派发，不要用 dispatch_wait 空等」。
-只加一次，且只影响这个会话；没用过派发的会话完全不受影响。
+每个新建会话都会挂上提示段（段名 `dsh-mini-superagent`、`order: 9998`），文本是**函数**：
+输入框里切「派发目标」时下一轮就换文案，不需要重载插件。
 
-worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简报，加 6 条工作规则（直接开工、完成后必须
-`dispatch_report`、只有真被阻塞才报 `blocked`、汇报后收尾、不要调主会话的工具、不伪造结果）。
+- 没设目标：`SOFT_HINT`（首行 `[dsh-mini-superagent 工作方式]`），只说「可以派」，不强制；
+- 设了目标：`FORCED_HINT`（首行 `[dsh-mini-superagent 强制派发]`），除纯问答外都要派下去；
+- 已进路由模式：在上面两段之后追加 `ROUTER_LOCKED`，说明 `write` / `edit` 已被收窄、改代码请派发。
+
+两段提示共用同一份「机制契约」（`BACKGROUND_CONTRACT`）：派发非阻塞、报告会自己回来、
+`dispatch_wait` 才是真阻塞——这是刻意的，避免两种模式各说一套。
+
+worker 的首条消息由插件拼装：任务 ID、标题、工作目录、简报，加 7 条工作规则（直接开工、完成后必须
+`dispatch_report`、只有真被阻塞才报 `blocked`、汇报后收尾、不要调主会话的工具、不伪造结果、简报与规则冲突时以规则为准）。
+
+---
+
+## 路由模式（必派发的会话不许改代码）
+
+**只对「必派发」的会话生效**——也就是你把输入框里的「派发目标」设成某个工作区或「自动」的时候。
+这时插件在那个会话的 agent 作用域上 `tools.restrict({ deny: ["write", "edit"] })`：
+模型看不到这两个工具，改代码只能派给子会话。
+
+- **默认状态（不派发）什么都不变**：任何会话都可能是主会话，所以只要没选派发目标，工具一个都不少。
+- **切回「不派发」立刻解锁**：`setTarget` 会调 `syncRouter`，把收窄收回去，工具马上还回来。
+- **触发点是模式，不是「派发过一次」**：上一版按「第一次派发」判定，等于因为派过一次就永久收走
+  `write`/`edit`——与「任何会话都可以是主会话、也有不派发这个选项」的产品语义冲突。
+- **worker 不受影响**：worker 自己再派发（递归）时会被跳过——收窄它等于让它干不了活。
+- **可逆**：`restrictRouter: false` 全局关掉；插件卸载或会话关闭时也会收回收窄，不留残余。
+- **边界**：`bash` 默认保留，`echo > file` 依然能写文件（上游同样如此）。要硬边界就把
+  `routerDenyTools` 配成 `["write","edit","bash","pwsh"]`。
+- **宿主不支持时不上锁**：没有 `agent.ctx.tools.restrict` 时只记一条 warn，派发照常，别的地方不退化。
+
+## 报告投递为什么不会重复
+
+同一份报告的 3 次重试共用一个 message id；重试前先查这条消息是否已经在会话里
+（收件箱 `nextTurn`/`nextStep` 或历史里的 `user/message`），命中就按已送达处理。
+
+0.8.1 及更早把 id 生成写在重试循环里，于是「第一次其实投进去了、只是后面抛错」会变成两条一样的报告。
+
+## 后台收尾：回合结束 ≠ 任务结束
+
+worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任务**不结算**：
+并发位继续占着，看板上显示「后台收尾」标签，每 `backgroundPollMs`（默认 15 秒）巡检一次。
+后台清空后自动收尾并回报；到 `backgroundLimitMs`（默认 30 分钟）会终止还剩的 shell job，
+再结算，并在报告里写明终止了几个。
+
+没有 `jobs` / `subagents` 服务的部署（headless）视为「没有后台活」，行为和以前一致。
+`dispatch_message` 唤醒的下一轮会让上一轮的巡检作废，不会把正在跑的这一轮结算掉。
+
+## 每任务目录与 prepare 命令
+
+配了 `taskDirRoot` 时，每个任务得到 `<root>/<标题安全名>-<id后6位>` 作为工作目录：
+
+- 会话仍挂在目标/【派发】工作区（侧边栏干净），真正读写的是任务目录；
+- 目录**不存在**时才跑一次 `prepareCommand`（典型：`git worktree add "$DSH_DISPATCH_DIR"`），
+  已存在就跳过——否则重试会在同一个 checkout 上再 worktree 一次；
+- 命令在**父目录**执行，环境变量：`DSH_DISPATCH_DIR` / `_TASK` / `_TITLE` / `_WORKSPACE` / `_CWD`；
+- 失败即任务 `failed` 并回报原因，**不建子会话、不自动重试**（目录可能已被写了一半）。
 
 ---
 
 ## 已知限制
 
-- **没有持久队列**：重启时在排队的任务不会自动重跑，标 `interrupted`，由主会话决定是否重派。
+- **排队只在内存里**：重启时排队中且没启动过的任务会重新入队，但队列本身不落盘（顺序靠登记顺序重建）；
+  已经在跑的一律 `interrupted`，要不要重派由主会话决定。
+- **瞬时续跑依赖宿主事件**：`retryTransient` 靠 `agent/error` 触发。宿主不发这个事件时续跑不生效，
+  但不会报错——任务照常会走到 `idle` 并被自动回报成 `ended`。
+- **读回执依赖 `session/event`**：收不到 `user/message` 时，`dispatch_message` 之后的
+  `input_pending_at` 会一直留着（看板显示「已投递未读」），这只影响显示，不影响投递本身。
+- **后台活只终止 shell job**：到 `backgroundLimitMs` 时被终止的是 job；subagent 允许继续（上游同样如此）。
+- **任务目录不自动清理**：`taskDirRoot` 下的目录随任务一直留着（和归档只收起不删除一致），需要清理请让 `prepareCommand` 或外部脚本处理。
 - **`maxWorkers` 是软的**：`dispatch_message` 唤醒已结算的 worker 会直接置 `running`，可能短暂超过上限
   （有意的：人的追问不该排在批量任务后面）。
-- **worker 能看到全部全局工具**，包括 `dispatch_launch`。插件不做 `restrict`；要更严的白名单，用 `agent_preset` 给子会话指定收紧的 preset。
+- **worker 能看到全部全局工具**，包括 `dispatch_launch`。插件只对**主会话**做 `restrict`（路由模式，收走 write/edit），
+  不对 worker 收窄；要更严的 worker 工具面，用 `agent_preset` 给子会话指定收紧的 preset。
 - **`dispatch_wait` 阻塞当前 step**：只适合「没有它就真的没法继续」。系统提示也会劝模型别用。
 - **状态文件是单写的**：多个 Harness 实例共用同一个 `DSH_HOME` 时可能互相覆盖；`stateDir` 可指到别处。
 - **报告与简报有截断**：单任务 50 条报告；`dispatch_inspect` 只展示最近 5 条、简报 2000 字符、最后输出 3000 字符。

@@ -69,7 +69,7 @@
 | `cwd` | string | 否 | 子会话工作目录的绝对路径；省略则继承主会话目录，再不行用进程 cwd。给了 `workspace` 时被工作区路径覆盖 |
 | `workspace` | string | 否 | 工作区 id / 绝对路径 / 标题；解析顺序见 [workspaces.md](workspaces.md) |
 | `create_workspace` | boolean | 否 | 默认 `true`；`workspace` 解析不到时是否新建（绝对路径就地建，名字在工作区根下建） |
-| `model` | string | 否 | 子会话模型 id；省略用 DSH 默认 |
+| `model` | string | 否 | 子会话模型：`model` 或 `provider/model`；省略用部署默认。宿主不支持切换模型时这次派发失败并说明原因（不会静默改用默认） |
 | `agent_preset` | string | 否 | 子会话 agent preset id；省略用部署默认 |
 | `permission_preset` | string | 否 | 子会话权限预设（如 `danger-full-access`）；省略用插件配置，再省略用 DSH 默认 |
 
@@ -84,7 +84,8 @@
 3. 生成任务 id 与子会话 id（`dispatch-<task_id>`），登记为 `queued`。
 4. 首次从这个会话派发时，把 `[dsh-mini-superagent 工作方式]` 注入该会话系统提示（只一次）。
 5. `pump()` 有空位就立刻建会话、投递简报、置 `running`；没空位就留在 `queued`。
-   子会话按 `workerWorkspace` 放到当天【派发】工作区或目标工作区，再把工作目录切到任务 `cwd`。
+   有目标工作区时子会话就挂在目标里；没有目标才按 `workerWorkspace` 兜底到【派发】或任务目录，
+   然后把工作目录切到任务 `cwd`（见 [workspaces.md](workspaces.md)）。
 6. 返回，不等结果。
 
 ### 返回
@@ -171,7 +172,7 @@
 ```
 
 - `root`：工作区根（`workspaceRoot` 或默认值）。
-- `worker_workspace`：当前 `workerWorkspace` 配置。
+- `worker_workspace`：当前 `workerWorkspace` 配置（原始值；只影响无目标时的兜底）。
 - `archive_after_hours`：当前归档保留期。
 - `sessions`：该工作区的会话数，不是任务数。
 - 注册表不可用时返回 `count: 0`、空数组。
@@ -179,7 +180,7 @@
 ### 何时用 / 何时别用
 
 - 用：派发前确认目标工作区的 id / 标题 / 路径。
-- 用：排查「为什么子会话不在项目里」——先看 `worker_workspace`。
+- 用：排查「为什么子会话不在项目里」——先确认 `workspace` 或派发目标是否存在（有目标一定在目标里），再看 `worker_workspace`（它只管无目标时的兜底）。
 - 别用：它不是任务列表；看任务用 `dispatch_list` / 看板。
 
 ---

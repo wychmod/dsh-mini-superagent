@@ -20,7 +20,7 @@ Host 侧实现全在 `src/workspaces.js`（约 160 行），`dispatch.js` 负责
 | 工作区根 | `workspaceRoot` 或 `<homedir>/Documents/mini-superagent` | — | 插件（`mkdir -p`）+ 注册 |
 | 默认工作区 | 根目录本身 | `mini-superagent` | 启动时 `provision()` |
 | 默认主会话 | 默认工作区内 | 会话 id `mas-lead`，标题「mini-superagent 主会话」 | 启动时 `provision()` |
-| 【派发】工作区 | `<根>/派发/<YYYY-MM-DD>`（本地日期） | `【派发】YYYY-MM-DD` | 第一次当天派发时按需 |
+| 【派发】工作区 | `<根>/派发/<YYYY-MM-DD>`（本地日期） | `【派发】YYYY-MM-DD` | 第一次**需要兜底**时按需（有目标时不建） |
 | 命名工作区 | `<根>/<safeDirName(标题)>` | 传入的标题 | `create_workspace` 解析不到时 |
 
 `safeDirName` 把 `\ / : * ? " < > |` 与控制字符换成 `-`，去掉开头连续的点，空白压成一个空格，截到 60 字符；
@@ -56,26 +56,44 @@ Host 侧实现全在 `src/workspaces.js`（约 160 行），`dispatch.js` 负责
 
 这是 0.4.0 最需要理解的一条：**会话归属**与**工作目录**是两件事。
 
+0.8.1 之前，「会话归属」默认放【派发】，即使明确指定了目标工作区也一样 —— 于是每次派发都产生一个新的
+`【派发】YYYY-MM-DD` 工作区。现在放置规则改成「**有目标用目标，没有目标才退回日期工作区**」：
+
 ```text
 dispatch_launch({ workspace: "某项目", ... })
   1. 解析工作区 → target（id/title/path）
   2. 任务 cwd = target.path（目标目录）
-  3. 建子会话：
-       workerWorkspace: day    → 会话挂到当天【派发】工作区
-       workerWorkspace: target → 会话挂到 target 工作区
+  3. 建子会话，会话归属按下面的顺序决定：
+       a. 有 target 且注册表里查得到  → 挂到 target 工作区（无条件，不可关闭）
+       b. 没有 target / target 已失效 → workerWorkspace 决定：
+            day（默认）→ 当天【派发】工作区
+            cwd        → 直接挂到任务 cwd
   4. 若 会话所在地 ≠ 任务 cwd：workingDirectory.set(agent, 任务 cwd)
 ```
 
-- 默认 `workerWorkspace: day`：侧边栏只在【派发】工作区下看到当天的子会话，不会把每个项目的会话列表塞满。
-- `workerWorkspace: target`：子会话直接混在项目工作区里，便于按项目看会话。
+- **有目标就一定在目标里**：这是 0.8.1 的核心修复。旧实现把「用不用目标」交给 `workerWorkspace`，
+  而它默认 `day`，等于用户的明确选择被默认值压掉。
+- **日期工作区是惰性的**：只有真的需要兜底（无目标，或目标已被删除）时才 `mkdir` + 注册。
+  有目标的派发从头到尾不碰 `dayWorkspace()`，`provision()`（启动准备）也不建它。
+- `workerWorkspace: cwd` 是给「连兜底都不要工作区」的场景留的开关：不建【派发】，会话直接按目录归属。
 - `workingDirectory.set` 失败只记 warn：子会话照样跑，只是落在会话自己的工作区目录里（不是目标目录）。
 
-实测：子会话里 `Get-Location` 返回 `C:\Users\…\Documents\mini-superagent`（目标工作区根），
-而它的会话挂在【派发】工作区下 —— 两者确实是分开的。
+实测：**没有目标**时，子会话挂在当天的【派发】工作区下，而 `Get-Location` 返回目标目录 —— 两者确实是分开的。
+（有目标时两者会重合：会话直接住在目标工作区里，`workingDirectory.set` 因此被跳过。）
 
 **没有指定 `workspace` 时**：先看输入框里选的「派发目标」（0.5.0，见 [composer.md](composer.md)）；没有目标时任务 cwd 才用调用者会话的工作目录
-（`inheritWorkingDirectory` 或显式 `cwd`）。无论哪种，子会话仍然被放进当天【派发】工作区（`day` 模式）。
-也就是说会话归属从 0.3.0 的「按目录反查工作区」改成了「统一住【派发】」。
+（`inheritWorkingDirectory` 或显式 `cwd`）。无论哪种，子会话的归属按上面的 a→b 顺序决定。
+也就是说会话归属从 0.3.0 的「按目录反查工作区」改成了「有目标进目标，没目标统一住【派发】」。
+
+### `workerWorkspace` 的语义变更（0.8.0 → 0.8.1）
+
+| 版本 | 取值 | 含义 |
+| --- | --- | --- |
+| ≤ 0.8.0 | `day`（默认）/ `target` | 决定**用不用**目标工作区。默认 `day` = 一律放【派发】 |
+| ≥ 0.8.1 | `day`（默认）/ `cwd` | 只决定**无目标时**的兜底。有目标就用目标，不可关闭 |
+
+旧值 `target` 已废弃：它想表达的「用目标工作区」现在是无条件默认行为，配成 `target` 会被归一成 `day`，
+不报错（旧 profile 升级不该让插件起不来）。归一化见 `src/constants.js` 的 `normalizeWorkerWorkspace()`。
 
 ---
 
@@ -191,7 +209,7 @@ dispatch_launch({ workspace: "某项目", ... })
 | --- | --- | --- |
 | `workspaceRoot` | `''` | 工作区根；空表示 `<用户文档目录>/mini-superagent` |
 | `provisionDefaultWorkspace` | `true` | 启动时创建默认工作区与主会话；失败只记日志 |
-| `workerWorkspace` | `day` | 子会话放哪：`day` = 当天【派发】；`target` = 任务的目标工作区 |
+| `workerWorkspace` | `day` | **无目标时**的兜底：`day` = 当天【派发】工作区；`cwd` = 直接用任务 cwd。有目标时与它无关 |
 | `archiveAfterHours` | `24` | 结束多少小时后归档；`0` 不归档 |
 | `archiveSweepMinutes` | `10` | 巡检间隔（分钟）；`0` 不巡检 |
 | `leadSessionId` | `mas-lead` | 默认主会话的固定 id |
@@ -202,8 +220,9 @@ dispatch_launch({ workspace: "某项目", ... })
 
 - **`workspaceRegistry.create` 要求目录已存在**：插件先 `mkdir -p` 再注册。目录不可写时（权限/盘符不存在）
   默认工作区创建失败，只记日志，派发仍按调用者目录工作；显式指定 `workspace` 的派发会因新建失败而报错。
-- **没有 `workspaceRegistry` 时**：默认工作区、【派发】工作区都建不出来，`day` 模式退化为「会话按任务 cwd 建」；
+- **没有 `workspaceRegistry` 时**：默认工作区、【派发】工作区都建不出来，`day` 兜底退化为「会话按任务 cwd 建」；
   显式指定 `workspace` 的派发会报「找不到工作区…，且允许新建被关闭」（实际是注册表不可用，报错文案没区分这一种）。
+  注意有目标时的放置只查 `list()`，注册表不可用 = 查不到目标 = 等于没有目标，同样走兜底。
 - **标题匹配是模糊的**：先精确、再包含；包含匹配可能命中不想派发的那个工作区。宁可用 id 或绝对路径。
 - **同名工作区不合并**：按标题新建时只看目录名，已存在就复用；不同标题可能落到同一个 `safeDirName` 目录，此时复用已有工作区。
 - **不会自动清理目录**：归档只收起会话，不删 `<workspaceRoot>/派发/<日期>` 下的文件，也不删工作区。
@@ -218,7 +237,8 @@ dispatch_launch({ workspace: "某项目", ... })
 | --- | --- | --- |
 | 没有默认工作区 | 日志 `创建默认工作区失败`；`workspaceRoot` 是否可写 | 修目录权限/换 `workspaceRoot`；`provisionDefaultWorkspace` 为 true 才自动建 |
 | `dispatch_launch` 报「找不到工作区 … 且允许新建被关闭」 | `create_workspace` 是否为 false；`dispatch_workspaces` 里有没有 | 去掉 `create_workspace: false`，或用 id/绝对路径 |
-| 子会话不在预期的项目工作区 | `workerWorkspace` | 要按项目看会话就设 `target`；默认 `day` 是有意把会话收进【派发】 |
+| 子会话不在预期的项目工作区 | 目标工作区是否还在注册表里（`dispatch_workspaces`）；`workspace_title` 与 `host_workspace` 分别是什么 | 目标被删了才会退回【派发】；重新指定一个存在的目标。有目标时它一定在目标里，与 `workerWorkspace` 无关 |
+| 冒出 `【派发】YYYY-MM-DD` 工作区 | 是否真的没给目标（或目标已被删除） | 这是兜底行为，不是 bug；不想要兜底就设 `workerWorkspace: cwd` |
 | 子会话工作目录不对 | 是否同时给了 `workspace` 和 `cwd` | 两者同时给时 workspace 路径优先；改用 `cwd` |
 | 看板 `counts.archived` 不涨 | `archiveAfterHours` 是否为 0；任务是否已结算；`updatedAt` 是否够旧 | 调小保留期或手动 `POST /board/archive` |
 | 归档一直失败 | 看板任务卡的 `archive_error`；日志 `归档子会话 … 失败` | 宿主是否提供 `workspaceRegistry.archiveSession`；目录/会话是否还在 |
