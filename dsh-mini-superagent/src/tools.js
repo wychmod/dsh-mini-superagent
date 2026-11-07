@@ -70,7 +70,9 @@ export function toolDefinitions(dispatch) {
       name: 'dispatch_launch',
       description: '把一个任务派发给新的后台子会话执行，立即返回、不等待结果。子会话在自己的 Session 里独立工作，'
         + '完成或被阻塞时会用 dispatch_report 汇报，报告会作为消息回流到本会话（本会话空闲时会被唤醒）。'
-        + '并发位满时任务进入 queued，有空位自动开始。适合可以并行、彼此独立的工作。',
+        + '并发位满时任务进入 queued，有空位自动开始。适合可以并行、彼此独立的工作。'
+        + '**派发即移交**：返回之后，该任务的任何执行环节（读代码、搜索、跑脚本、开浏览器、查网络、验数据）'
+        + '都不再由本会话进行；派完之后默认动作是结束本轮，不要去重做一遍，也不要原地等结果。',
       parameters: {
         type: 'object',
         properties: {
@@ -98,13 +100,15 @@ export function toolDefinitions(dispatch) {
           agentPreset: args.agent_preset,
           permissionPreset: args.permission_preset,
         })
-        return { task: dispatch.card(task), note: '已入队/启动；不要在本轮等待它完成，报告会自己回来。' }
+        return { task: dispatch.card(task), note: '已入队/启动；接下来默认结束本轮，不要在本轮等它完成，报告会自己回来。' }
       },
     },
     {
       name: 'dispatch_launch_many',
       description: '一次派发多个互相独立的任务（批量版 dispatch_launch）。每个任务各自一个子会话，全部立即入队，'
-        + '不会阻塞；完成的报告会陆续回流。适合“把这 5 个模块分别重构”这类可并行工作。',
+        + '不会阻塞；完成的报告会陆续回流。适合“把这 5 个模块分别重构”这类可并行工作。'
+        + '**派发即移交**：返回之后这些任务的活就都是子会话的，本会话不要去重做，也不要原地等结果；'
+        + '接下来默认结束本轮。',
       parameters: {
         type: 'object',
         properties: {
@@ -263,8 +267,11 @@ export function toolDefinitions(dispatch) {
     },
     {
       name: 'dispatch_wait',
-      description: '阻塞等待若干个任务结算，最多 timeout_ms 毫秒。只在“没有这些结果就无法继续下一步”时使用；'
-        + '能先做别的就不要等——报告本来就会自己回流。',
+      description: '阻塞等待若干个任务结算，最多 timeout_ms 毫秒。**默认不要调用它**：报告会自己作为消息回流，'
+        + '派发之后的默认动作是结束本轮（结束本轮 ≠ 没回答——你这一轮末尾说的话就是回答，报告随后自动回来并唤醒本会话）。'
+        + '唯一允许调用的情形：用户在**同一条消息里**明确要求「等结果再继续」，且不拿到结果就无法产出他要的东西。'
+        + '除此之外一律结束本轮，不要用本工具代替结束本轮，也不要连续多次调用（实测有人这样累计原地阻塞约 33 分钟、零产出）。'
+        + '它不是 sleep：超时后任务可能仍在 running，再等一次只是再阻塞一次。',
       parameters: {
         type: 'object',
         properties: {
