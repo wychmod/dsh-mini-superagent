@@ -42,6 +42,19 @@ console.log(`大小: ${source.split('\n').length} 行\n`)
  */
 let active = null
 
+/**
+ * 旁路捕获 TaskCard 的 props。
+ *
+ * `BoardPanel` 自己持有 `handlers`（`{ act, open }`），但它只把 `handlers` 传给
+ * `TaskCard`，**不**落到 DOM 属性上；归档行的 `onClick`/`onKeyDown` 还都是
+ * `undefined`（第一道闸）。所以想验证"第二道闸单独也能拦住"（即 `openWorker`
+ * 自己判断 `archived_at`），就必须拿到那个 handler 本身。
+ *
+ * 拿到的方式不改生产代码：在这里记下每一次 `createElement(TaskCard, …)` 的 props。
+ * 这是**旁路观察**，不影响渲染结果，也不给组件加任何测试钩子。
+ */
+const cardProps = []
+
 const React = {
   Fragment: Symbol('Fragment'),
   createElement(type, props, ...children) {
@@ -50,6 +63,8 @@ const React = {
       if (Array.isArray(child)) flat.push(...child.flat(Infinity))
       else if (child !== null && child !== undefined && child !== false && child !== true) flat.push(child)
     }
+    // 只在真有 handlers 时记一笔（TaskCard 唯一带 handlers 的组件）。
+    if (props && props.handlers && props.handlers.open) cardProps.push(props)
     return { type, props: Object.assign({}, props || {}, { children: flat }) }
   },
   useState(initial) {
@@ -520,8 +535,8 @@ check('点归档行之后 openSession 一次都没被调用', opened.length === 
 
 /*
  * 第二道闸：即使渲染层判断被绕过（键盘事件、将来的新调用方），`openWorker` 自己
- * 也必须拒绝归档任务。这里直接经由一个「可点」行的处理器验证正常行仍能打开，
- * 再用归档任务调用同一个处理器，断言它只给提示、不碰 uiWorkspace。
+ * 也必须拒绝归档任务。先用一个「可点」行验证正常行仍能打开，再**直接调用同一个
+ * 处理器**并传入归档任务，断言它只给提示、不碰 uiWorkspace。
  */
 chipFor('全部').props.onClick()
 update(panel)
@@ -534,6 +549,112 @@ update(panel)
 check('未归档行点击仍然打开子会话（本修复没有误伤正常行）',
   opened.length === openedBeforeNormal + 1 && opened[opened.length - 1] === 'dispatch-t-run-1',
   JSON.stringify(opened.slice(openedBeforeNormal)))
+
+/* ═════════════════════ 第二道闸：openWorker 自己拒绝归档任务 ═════════════════════ */
+
+/*
+ * 为什么必须单独测这一层：
+ *
+ * 第一道闸（TaskCard 不给归档行 onClick/tabIndex）已经在上面的断言里钉住了，
+ * 但它拦不住**绕过渲染层**的调用方 —— 键盘事件、将来新增的调用方、脚本
+ * `dispatchEvent`。`openWorker` 里的 `if (task && task.archived_at)` 是最后一道
+ * 防线（`openSession()` 在归档会话上会触发宿主侧 `clearMain()`，表现为
+ * 「点一下归档任务，跳到了一个空白新会话」）。
+ *
+ * 这里不点击任何行：直接取出 `BoardPanel` 传给 TaskCard 的 `handlers.open`，
+ * 用**归档任务对象**调用它。断言的是这道闸自己的行为，与渲染层无关。
+ */
+console.log('\n第二道闸：openWorker 拒绝归档任务')
+
+/** 每一次渲染都会把 handlers 递给每一张 TaskCard；取最后一次渲染的就够。 */
+const liveHandlers = () => (cardProps.length ? cardProps[cardProps.length - 1].handlers : null)
+const handlersRef = liveHandlers()
+check('能够拿到 BoardPanel 的内部 handlers（旁路捕获到 TaskCard props）',
+  Boolean(handlersRef) && typeof handlersRef.open === 'function',
+  handlersRef ? Object.keys(handlersRef).join(',') : `捕获 ${cardProps.length} 次`)
+// 形状断言：handlers 就是 { act, open } 两个键，open 是 async 处理器。
+check('handlers 的形状是 { act, open }，且 open 是异步处理器',
+  Boolean(handlersRef) && Object.keys(handlersRef).sort().join(',') === 'act,open'
+    && handlersRef.open.constructor && handlersRef.open.constructor.name === 'AsyncFunction',
+  handlersRef ? `${Object.keys(handlersRef).sort().join(',')} / ${handlersRef.open.constructor.name}` : 'null')
+
+const archivedTask = boardResponse.tasks.find((item) => item.task_id === 't-arc-1')
+const openedBeforeGate = opened.length
+// 直接调用处理器 —— 归档行的渲染层闸门被完全绕过。
+const gateResult = handlersRef.open(archivedTask)
+await tick()
+update(panel)
+check('归档任务经 openWorker 也不会打开会话',
+  opened.length === openedBeforeGate,
+  `新增调用 ${opened.length - openedBeforeGate} 次（${JSON.stringify(opened.slice(openedBeforeGate))}）`)
+check('归档分支提前 return（处理器结果为空，没有把错误往上抛）',
+  gateResult instanceof Promise && (await gateResult) === undefined,
+  String(gateResult))
+
+const notices = findAll(panel.tree,
+  (item) => item && item.props && typeof item.props.className === 'string'
+    && item.props.className.includes('dsh-sa-strip'))
+const warnStrip = notices.find((item) => item.props.className.includes('dsh-sa-strip-warn'))
+check('归档任务给出的是可关闭的警告条（warn 语气）', Boolean(warnStrip),
+  JSON.stringify(notices.map((item) => item.props.className)))
+const noticeText = warnStrip ? text(warnStrip).replace(/\s+/g, ' ').trim() : ''
+check('提示文案就是 archivedHint', noticeText.includes('该子会话已归档，不可直接打开；请在会话列表里取消归档后再查看'),
+  noticeText.slice(0, 160))
+check('提示条用 role=status 播报（不是 error 的 alert）', Boolean(warnStrip) && warnStrip.props.role === 'status',
+  warnStrip && String(warnStrip.props.role))
+check('提示条上带着可关闭的按钮', Boolean(warnStrip) && buttonsOf(warnStrip).some((item) => text(item).includes('关闭提示')))
+
+/*
+ * 归档 + 没有 worker_session_id 的组合：必须落到「归档」而不是「没有子会话」。
+ * 源码里归档判断在 `!target` 之前，正是为了让归档任务得到一个能指导下一步的
+ * 提示，而不是被当成数据缺失。顺序颠倒了这条会失败。
+ */
+const archivedNoSession = {
+  task_id: 't-arc-nosession',
+  title: '归档且没有子会话的任务',
+  status: 'done',
+  archived_at: hoursAgo(1),
+}
+const openedBeforeNoId = opened.length
+await handlersRef.open(archivedNoSession)
+await tick()
+update(panel)
+const noIdText = text(panel.tree)
+check('归档判断先于「没有子会话」判断（归档 + 无 id 仍给归档提示）',
+  noIdText.includes('该子会话已归档，不可直接打开') && !noIdText.includes('这个任务没有可打开的子会话'),
+  noIdText.replace(/\s+/g, ' ').slice(0, 200))
+check('归档 + 无 id 也不打开会话', opened.length === openedBeforeNoId,
+  `新增调用 ${opened.length - openedBeforeNoId} 次`)
+
+/*
+ * 反向对照：同一个处理器、同一个入口，只把 archived_at 去掉就应该真的打开。
+ * 没有这条，上面的「没打开」可能只是因为处理器整体坏了（或根本没被调用）。
+ */
+const liveTask = boardResponse.tasks.find((item) => item.task_id === 't-run-1')
+const openedBeforeLive = opened.length
+await handlersRef.open(liveTask)
+await tick()
+update(panel)
+check('同一个处理器打开未归档任务会真的调 openSession（说明上一条不是空转）',
+  opened.length === openedBeforeLive + 1 && opened[opened.length - 1] === 'dispatch-t-run-1',
+  JSON.stringify(opened.slice(openedBeforeLive)))
+check('打开成功后清掉归档提示，不留残影', !text(panel.tree).includes('该子会话已归档，不可直接打开'),
+  text(panel.tree).replace(/\s+/g, ' ').slice(0, 160))
+
+/*
+ * 再补一条「没有子会话」的对照：非归档 + 无 worker_session_id 才是 noWorkerSession。
+ * 三条路径各归各的文案，才不会把「归档了」误报成「数据缺失」。
+ */
+const noSession = { task_id: 't-nosession', title: '没有子会话的任务', status: 'done' }
+const openedBeforeMissing = opened.length
+await handlersRef.open(noSession)
+await tick()
+update(panel)
+check('未归档 + 无子会话才报 noWorkerSession',
+  text(panel.tree).includes('这个任务没有可打开的子会话'),
+  text(panel.tree).replace(/\s+/g, ' ').slice(0, 160))
+check('未归档 + 无子会话也不打开会话', opened.length === openedBeforeMissing,
+  `新增调用 ${opened.length - openedBeforeMissing} 次`)
 
 /* ── P0-5 退休可查：独立只读路由 + 紧凑单行列表 ── */
 console.log('\n已退休视图')
