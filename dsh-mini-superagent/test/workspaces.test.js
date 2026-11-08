@@ -87,6 +87,60 @@ test('resolve 找不到时返回 undefined', async () => {
   assert.equal(await gatewayWith(registry).resolve(''), undefined)
 })
 
+// ------------------------------------------------- 精确匹配的歧义（0.8.0 的静默取第一个）
+
+/** 造一个会把 warn 记下来的网关。 */
+function gatewayRecordingWarns(registry) {
+  const warns = []
+  const ctx = {
+    get: name => (name === 'workspaceRegistry' ? registry : undefined),
+    logger: { warn: (...args) => warns.push(args.map(value => String(value)).join(' ')), info() {} },
+  }
+  // 走 logger 探针：断言必须能证明「没有静默」这件事，所以不能塞一个空 logger。
+  return { gateway: new WorkspaceGateway(ctx, { workspaceRoot: '' }), warns }
+}
+
+test('resolve 两个同名工作区：返回 undefined 且 warn 出候选（含 path）', async () => {
+  // 现场数据（2026-11-08 12:10）：仓库根与包根同名，路径不同。
+  const registry = fakeRegistry([
+    { id: 'w-repo', path: 'D:\\idea\\dsh-mini-superagent', title: 'dsh-mini-superagent' },
+    { id: 'w-pkg', path: 'D:\\idea\\dsh-mini-superagent\\dsh-mini-superagent', title: 'dsh-mini-superagent' },
+  ])
+  const { gateway, warns } = gatewayRecordingWarns(registry)
+
+  // 关键：0.8.0 这里会返回注册表里的第一个（w-repo），且一条日志都不写。
+  assert.equal(await gateway.resolve('dsh-mini-superagent'), undefined,
+    '两个同名工作区时必须返回 undefined，不能静默取第一个')
+
+  assert.equal(warns.length, 1, `歧义必须 warn 且只 warn 一次，实际：${warns.join(' | ') || '（无日志）'}`)
+  const line = warns[0]
+  // 候选必须带 path：同名时 id 对人没有区分度，看不出是包根还是仓库根。
+  assert.match(line, /D:\\idea\\dsh-mini-superagent/, 'warn 里必须有仓库根的 path')
+  assert.match(line, /D:\\idea\\dsh-mini-superagent\\dsh-mini-superagent/, 'warn 里必须有包根的 path')
+  assert.match(line, /精确/, '精确匹配的歧义要说明是精确命中，否则读日志的人以为是模糊匹配撞的')
+})
+
+test('resolve 唯一同名时照常解析（别把正常路径改坏）', async () => {
+  const registry = fakeRegistry([{ id: 'w-1', path: 'D:\\idea\\proj', title: 'dsh-mini-superagent' }])
+  const { gateway, warns } = gatewayRecordingWarns(registry)
+
+  assert.equal((await gateway.resolve('dsh-mini-superagent')).id, 'w-1')
+  // 大小写不同也仍然算精确命中。
+  assert.equal((await gateway.resolve('DSH-Mini-SuperAgent')).id, 'w-1')
+  assert.deepEqual(warns, [], '唯一命中时不该有任何 warn')
+})
+
+test('resolve quiet:true 时精确歧义不写日志（内部约定：日志由 resolveOrCreate 统一写）', async () => {
+  const registry = fakeRegistry([
+    { id: 'w-a', path: 'C:\\a', title: '同名' },
+    { id: 'w-b', path: 'C:\\b', title: '同名' },
+  ])
+  const { gateway, warns } = gatewayRecordingWarns(registry)
+
+  assert.equal(await gateway.resolve('同名', { quiet: true }), undefined)
+  assert.deepEqual(warns, [], 'quiet 只压制日志，不改变「歧义返回 undefined」这个结果')
+})
+
 test('没有注册表时所有解析都安全返回 undefined', async () => {
   const gateway = new WorkspaceGateway({ get: () => undefined, logger: {} }, {})
   assert.equal(await gateway.resolve('w-1'), undefined)

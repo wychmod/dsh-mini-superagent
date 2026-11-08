@@ -7,6 +7,21 @@
  */
 import { LOG_PREFIX, PROMPT_SECTION, SOURCE_KIND } from './constants.js'
 
+/**
+ * 两条路径是否指向同一个目录（用于「这个标题是不是被**别的**目录占着」）。
+ *
+ * 只在工作区登记这一处用得上，所以不进 `workspaces.js` 的公开表面。
+ * 大小写不敏感：Windows 上 `D:\Idea\X` 与 `d:\idea\x` 是同一个目录，宿主 realpath 之后
+ * 也可能把盘符/大小写规范化成另一种写法；不做这一步会因为「看起来不一样」而误判成撞车，
+ * 于是明明同一个目录却拿到一个被加长过的标题。
+ * 不做 realpath：那是 async 且可能抛错，而这里只是给标题做去重，粗粒度比较足够。
+ */
+function samePath(left, right) {
+  const norm = value => String(value ?? '').trim().replace(/[\\/]+$/, '').toLowerCase().replace(/\//g, '\\')
+  const a = norm(left)
+  return !!a && a === norm(right)
+}
+
 export class SessionGateway {
   /**
    * @param {import('@deepseek-ai/cordis').Context} ctx 插件 context
@@ -257,7 +272,17 @@ export class SessionGateway {
     return process.cwd()
   }
 
-  /** 解析或登记一个 workspace，让子会话在工作区列表里可见。 */
+  /**
+   * 解析或登记一个 workspace，让子会话在工作区列表里可见。
+   *
+   * **标题为什么必须显式给**：`workspaceRegistry.create(path)` 不传 title 时，宿主用目录 basename
+   * 当标题。于是「仓库根 `...\dsh-mini-superagent`」和「包根 `...\dsh-mini-superagent\dsh-mini-superagent`」
+   * 各自登记出一条**同名**工作区。实测（2026-11-08 12:10）就是这么冒出两个 title 相同的条目的：
+   * 一个在 `C:\...\派发\2026-11-07`，另一个在 `C:\...\mini-superagent`，用户在列表里根本分不清。
+   * 而且它不是一次性脏数据 —— 每次按目录反查登记都会再撞一次，所以修在登记这一侧。
+   *
+   * 已注册的目录仍然原样返回（不改已有工作区的标题，那是用户可能已经认过的名字）。
+   */
   async workspaceFor(cwd) {
     const registry = this.ctx.get('workspaceRegistry')
     if (!registry) return undefined
@@ -265,7 +290,53 @@ export class SessionGateway {
       const existing = await registry.resolveByPath(cwd)
       if (existing) return existing
     } catch { /* 该目录尚未登记，下面新建 */ }
-    return registry.create(cwd)
+    // 注册表读不到时按「没有已占用标题」处理：宁可这次可能撞名，也不能因此不登记工作区。
+    let items = []
+    try { items = registry.list?.() ?? [] } catch { items = [] }
+    return registry.create(cwd, this.distinctTitle(cwd, items))
+  }
+
+  /**
+   * 给 `cwd` 挑一个不与**已有工作区**撞车的标题。
+   *
+   * 三条硬约束（来自实际踩坑）：
+   * - **人能从标题看出是哪个目录**：用路径末段拼接，而不是 uuid、随机数或自增号；
+   * - **不与已有标题重复**：先试 basename，撞了就逐段加长（`proj` → `idea/proj` → `D:/idea/proj`）；
+   * - **不改已有工作区的标题**：只决定本次新建那一个；谁先登记谁拿短名，先后顺序变了标题会变，
+   *   但已有条目一个字都不动 —— 改别人的标题等于把用户认过的名字偷偷换掉。
+   *
+   * 为什么用 `/` 拼：标题是给人读的，`/` 任何平台都不需要转义，且天然表示「父/子」，
+   * 与路径语序一致（`idea/proj` 读作「idea 下的 proj」）。
+   *
+   * 极端情况下（不同路径末段全同且都很深）才退回数字后缀 —— 有后缀总比再产出一条同名工作区好。
+   *
+   * @param {string} cwd 目录
+   * @param {Array<{id?:string,title?:string,path?:string}>} items 注册表现有条目
+   * @returns {string}
+   */
+  distinctTitle(cwd, items) {
+    const path = String(cwd ?? '')
+    const parts = path.split(/[\\/]+/).filter(Boolean)
+    // 同一目录的既有条目不算撞车：那种情况宿主会复用同一个工作区，传去的标题会被忽略。
+    const taken = new Set(
+      (Array.isArray(items) ? items : [])
+        .filter(item => !samePath(item?.path, path))
+        .map(item => String(item?.title ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    )
+    // 从「只有末段」逐段加长：最短的可读形式优先，只有真的撞了才变得更长。
+    for (let count = 1; count <= parts.length; count += 1) {
+      const candidate = parts.slice(-count).join('/')
+      if (!taken.has(candidate.toLowerCase())) return candidate
+    }
+    const base = parts.at(-1) ?? path ?? 'workspace'
+    let suffix = 2
+    let candidate = base
+    while (taken.has(candidate.toLowerCase())) {
+      candidate = `${base}（${suffix}）`
+      suffix += 1
+    }
+    return candidate || 'workspace'
   }
 
   /**
