@@ -51,7 +51,7 @@
 | `dispatch_message` 报 `session/writer-held` / `session/agent-busy` | 是否多开 Harness 实例、或子会话被 subagent 路由占用 | 关掉其它实例；被占用的会话不能从这边投递 |
 | worker 卡在权限审批 | `permissionPreset` 是否为空 | 后台无人看管时设 `danger-full-access`（或给 worker 预授权的 preset），否则它会停在审批上 |
 | 子会话工作目录不对 | `dispatch_inspect().cwd` | 检查 `inheritWorkingDirectory`、主会话的 working directory 服务、或显式传 `cwd` |
-| `tasks.json` 损坏 / 状态错乱 | 文件能否 JSON 解析 | 备份后删掉，重载插件；只影响历史展示，不影响子会话内容 |
+| `tasks.json` 损坏 / 状态错乱 | 文件能否 JSON 解析；同目录有没有 `tasks.json.bak` | 主文件坏时 `readState()` 会自动回退 `.bak`（日志写「已从备份 … 恢复」）；两者都坏才需要备份后删掉重载。**它是派发事实的权威源**（见 architecture.md §26），不是可随手丢的展示缓存 |
 | 多实例状态互相覆盖 | 是否共用同一个 `DSH_HOME` | 给每个实例配不同的 `stateDir` |
 | 同一请求报 `message "<id>" is already pending` | 是否重复投递同一条消息 | 消息 id 带随机前缀与序号，正常不会重复；出现说明有其它路径在用同一 id，重启插件即可换前缀 |
 
@@ -92,7 +92,7 @@ plugin_manager(action="list_bundles")
 | 任务跑偏/太久 | `dispatch_cancel(task_id)`；已产生的工作不回滚，自己检查工作目录 |
 | 想让它换个方向继续 | `dispatch_message(task_id, "…")`，保留上下文与已有工作 |
 | 队列在 0.1.0 上卡住 | 升级到 0.2.0（结算会触发 `pump()`），或再派发一个任务临时触发 |
-| 状态文件损坏 | 停插件 → 备份并删除 `<stateDir>/tasks.json` → 重载；历史列表清空，子会话内容不受影响 |
+| 状态文件损坏 | 先看 `tasks.json.bak`（主文件坏会自动回退）；两者都坏才：停插件 → 备份并删除 `<stateDir>/tasks.json` → 重载。删掉后历史任务、报告与派发目标都会清空，但子会话内容不受影响 |
 | 从 0.1.0 迁移 | 卸载旧 bundle → 装 `dsh-mini-superagent` → 可选复制旧 `tasks.json` 到新目录；未结算任务会被标 `interrupted` |
 | 插件没激活 | 重装 bundle；确认 `inject` 的三个服务（`tools`/`agents`/`sessionController`）都存在 |
 | 报告没送到 | 确认主会话还活着；用 `dispatch_inspect` 直接从任务表读报告；必要时 `dispatch_message` 让 worker 再报一次 |
@@ -110,7 +110,7 @@ plugin_manager(action="list_bundles")
 
 ## 不要做
 
-- **不要手改 `tasks.json` 当数据库**：它只是展示用快照，写坏了启动会读不回来。
+- **不要手改 `tasks.json` 当数据库**：它是派发事实的权威源（见 architecture.md §26），结构由 `writeState()` 统一写、`normalize()` 读回，手改坏了两者都读不回来。
 - **不要同时安装 `dsh-dispatch` 和 `dsh-mini-superagent`**：旧插件的 8 个工具名在新插件里都存在，同一全局层重复注册会抛错。
 - **不要把 `dispatch_wait` 当 sleep**：它占着当前 step，期间什么也做不了。
 - **不要删完子会话还指望任务继续**：`agent/disposed` 会把任务标 `interrupted`，恢复不了就重新派发。

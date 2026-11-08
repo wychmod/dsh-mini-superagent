@@ -21,7 +21,7 @@ Host 侧实现是 `POST /dsh-mini-superagent/board/target` 与会话目标表；
 派发目标的存储：
 
 - Host 内存 `Dispatch.targets: Map<sessionId, {workspace_id, title, path}>`；
-- 落盘 `tasks.json` 的 `targets`（状态文件 `version: 3`）；
+- 落盘 `tasks.json` 的 `targets`（状态文件 `version: 4`；v4 新增 `retired` 数组，旧文件（无此键）读成 `[]`）；
 - HTTP 接口：`POST /dsh-mini-superagent/board/target`，body `{session_id, workspace}`，`workspace` 为空串表示清除；
   成功 `{ok:true, target}`，缺 `session_id` → 400，解析失败 → 409（错误文本带现有工作区候选）。
 

@@ -66,8 +66,8 @@
 | --- | --- | --- | --- |
 | `title` | string | 是 | 任务短标题，超过 120 字符会被截断；用于列表与子会话标题 `[派发] <title>` |
 | `brief` | string | 是 | 自包含简报：目标、约束、验收、已知事实。子会话看不到主会话历史 |
-| `cwd` | string | 否 | 子会话工作目录的绝对路径；省略则继承主会话目录，再不行用进程 cwd。给了 `workspace` 时被工作区路径覆盖 |
-| `workspace` | string | 否 | 工作区 id / 绝对路径 / 标题；解析顺序见 [workspaces.md](workspaces.md) |
+| `cwd` | string | 否 | 子会话工作目录的绝对路径。**显式 `cwd` 优先于**会话记住的派发目标（auto / 目标）；与 `workspace` 同时给时 `workspace` 决定会话归属、`cwd` 决定实际工作目录（两者分工，不是二选一丢弃）。都没有才退到继承主会话目录、进程 cwd |
+| `workspace` | string | 否 | 工作区 id / 绝对路径 / 标题；解析顺序见 [workspaces.md](workspaces.md)。**任何一级命中多个都会抛错**（本版未发布起不再静默取第一个），错误里带现有工作区清单 |
 | `create_workspace` | boolean | 否 | 默认 `true`；`workspace` 解析不到时是否新建（绝对路径就地建，名字在工作区根下建） |
 | `model` | string | 否 | 子会话模型：`model` 或 `provider/model`；省略用部署默认。宿主不支持切换模型时这次派发失败并说明原因（不会静默改用默认） |
 | `agent_preset` | string | 否 | 子会话 agent preset id；省略用部署默认 |
@@ -81,12 +81,25 @@
 2. 给了 `workspace` 就先解析（id → 绝对路径 → 标题精确 → 标题包含）；解析不到且 `create_workspace !== false` 时按需新建，
    仍失败则抛错并列出已有工作区。没给 `workspace` 时用该会话的「派发目标」（输入框选择器/`@` 写入，见 [composer.md](composer.md)）；
    没有目标才沿用调用者目录。任务 `cwd` 取目标工作区路径。
+   **歧义时不会新建**：`resolveOrCreate()` 返回 `reason: 'ambiguous'`，`launch()` 直接抛错——
+   0.8.0 及更早会把歧义当成「不存在」然后凭空建出一个同名目录（第三个），比原来的问题更糟。
 3. 生成任务 id 与子会话 id（`dispatch-<task_id>`），登记为 `queued`。
 4. 首次从这个会话派发时，把 `[dsh-mini-superagent 工作方式]` 注入该会话系统提示（只一次）。
 5. `pump()` 有空位就立刻建会话、投递简报、置 `running`；没空位就留在 `queued`。
    有目标工作区时子会话就挂在目标里；没有目标才按 `workerWorkspace` 兜底到【派发】或任务目录，
    然后把工作目录切到任务 `cwd`（见 [workspaces.md](workspaces.md)）。
 6. 返回，不等结果。
+
+**工作目录的优先级**（这张表的判据只有一条：**显式参数高于记住的设置**）：
+
+| 调用方给了什么 | 结果 |
+| --- | --- |
+| 只给 `cwd`（会话有 auto / 记住的目标） | `cwd` 胜，auto 与记住的目标这一轮当没设过 |
+| 只给 `workspace` | 用 `workspace` |
+| `workspace` 与 `cwd` 同时给 | `workspace` 胜（会话住在它里面），`cwd` 仍是任务的工作目录，由 `enterDirectory()` 切过去 |
+| 都不给 | 会话记住的派发目标 → 调用者目录 |
+
+显式 `cwd` 也**不再触发日期工作区兜底**：调用方明确给了目录，就不该再被塞进当天的【派发】。
 
 ### 返回
 
@@ -245,10 +258,28 @@
 
 `{ "task": detail }`，字段见上文[任务对象](#任务对象)。
 
+**退休任务也能查**（本版未发布起）：`dispatch_inspect` 走 `resolveTask()`，先查活表、再查退休留痕，所以
+「记录已移出活表」不等于「查不到」。此时返回：
+
+```json
+{
+  "task": { "task_id": "t-m0abc-1", "status": "done", "retired_at": "…", "retired_reason": "cap-count", "summary": "…" },
+  "retired": true,
+  "note": "该任务已退休：只保留留痕（何时、为什么、最后一条摘要），报告正文不可用。"
+}
+```
+
+- 形状与活任务**同构**（都是 `{task: {...}}`），调用方不必为「退休」学一套新字段，只看 `retired` 这个布尔。
+- `recent_reports` **缺席**（不是空数组）：正文随任务记录一起消失了，这是退休的定义。
+  `note` 必须读——否则「`recent_reports` 缺失」会被误读成「它没报告过」。
+- `retired_reason` 是机器串（`cap-count` / `cap-days`），别直接甩给用户。
+- 归属校验照样做：退休记录带 `parentSessionId`，别人的任务仍然报「不属于本会话」。
+
 ### 何时用 / 何时别用
 
 - 用：判断「它到底做到哪了」；`failed` 时看 `error`；`running` 太久时看 `cwd` 与 `last_worker_text`。
 - 用：追问前确认上一轮报告说了什么。
+- 用：任务从看板上消失、`dispatch_list` 里也没有时——它可能已退休，这里能看到「何时、为什么」。
 - 别用：把 `last_worker_text` 当结论——它只是最后一条 assistant 文本，可能是不完整的过程描述。
 
 ---
@@ -377,25 +408,54 @@ worker 向派发者汇报。主会话不要调用。
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `status` | string | 是 | `done` / `blocked` / `failed` / `progress` |
-| `summary` | string | 是 | 3–6 行：做了什么、结果、需要主会话做什么（如有）。空字符串会报错 |
-| `detail` | string | 否 | 长详情：改动清单、验证命令与输出、遗留问题；回流时截到 4000 字符 |
+| `summary` | string | 是 | 3–6 行：做了什么、结果、需要主会话做什么（如有）。空字符串会报错；**入库上限 6000 字符**（`maxReportSummaryChars`） |
+| `detail` | string | 否 | 长详情：改动清单、验证命令与输出、遗留问题；**入库上限 4000 字符**（`maxReportDetailChars`） |
 
 ### 行为
 
 1. 找不到调用者对应的任务 → 抛错（说明它不是被派发的 worker）。
 2. 任务已 `cancelled` → 返回 `{recorded:false}`，不再回流。
-3. 追加一条 `{at, status, summary, detail?}` 到任务的报告列表（每任务最多 50 条，超出丢最早的）。
-4. `done` / `blocked` / `failed` 会把任务结算为同名状态；`progress` 只记录，不结束任务。
-5. 回流主会话：
-   - `progress`：仅当主会话**正在跑**时并入下一步，不为了它唤醒空闲会话。
-   - 其余：立即投递；主会话空闲时唤醒它。
+3. **入库即截断**（本版未发布，P0-3）：条目在写进 `task.reports` **之前**就按上面两个上限 `clip`，
+   被截的条目记 `truncated: { summary: 原始长度, detail: 原始长度 }`（只在真被截时出现这个键）。
+   0.8.x 只在**外发**时截，账本里存的是调用方给的原样长度——单任务体积由调用方决定是容量膨胀的根之一。
+4. 追加一条 `{at, status, summary, detail?, truncated?}` 到任务的报告列表（每任务最多 50 条，超出丢最早的）。
+5. `done` / `blocked` / `failed` 会把任务结算为同名状态；`progress` 只记录，不结束任务。
+6. **准入分级**（本版未发布，P0-2）：决定这条报告要不要回流主会话。
+   - `done` / `blocked` / `failed` / `cancelled` → **恒 `direct`**（回流）；
+   - 配置 `directReportStatuses` 点名的状态（默认 `blocked` / `failed`）→ `direct`；
+   - 其余（含 `progress` 与未知状态）→ **`ledger`，只入库不回流**。
+
+   > **终态硬直通，配置只能扩展、不能降级。** 把 `directReportStatuses` 清空**不会**让 `done` 静默——
+   > 结论与「需要人处理」是主会话唯一必须知道的两类事。这条与直觉相反，别以为配了这个列表就能关掉 `done`。
+
+7. 回流主会话（仅 `direct` 命中时）：
+   - `progress`：仅当主会话**正在跑**时并入下一步，不为了它唤醒空闲会话；
+   - 其余：立即投递；主会话空闲时唤醒它；
    - 主会话已不在运行：只落任务表并记日志。
+   - **批次成员例外**：`group` 非空的成员自己只入库，等整批结束时由批次汇总回流一条；
+     但如果这一批已经汇总过、或任务被重开过，就等不到汇总了，此时它必须自己回流（否则彻底静默）。
 
 ### 返回
 
 ```json
-{ "recorded": true, "task_id": "t-m0abc-1", "status": "done" }
+{ "recorded": true, "task_id": "t-m0abc-1", "status": "done", "admission": "direct" }
 ```
+
+只入库、不回流时（`progress` 的默认行为）：
+
+```json
+{ "recorded": true, "task_id": "t-m0abc-1", "status": "running", "admission": "ledger", "relayed": false }
+```
+
+被截断时多一个 `truncated` 字段：
+
+```json
+{ "recorded": true, "task_id": "t-m0abc-1", "status": "done", "admission": "direct", "truncated": { "summary": 9000 } }
+```
+
+> `truncated` 里的数字是**原始长度**，不是被截到的长度。想算「截到多少」，看 `dispatch_inspect` 里那条
+> `recent_reports[].summary` 的字符数——它就是入库后的值（`clip` 头尾各半 + 一句提示语，总长 ≤ 上限，
+> 不是「恰好 N 字」）。
 
 任务已取消时：
 
@@ -407,7 +467,10 @@ worker 向派发者汇报。主会话不要调用。
 
 - 用：任务完成 → `done`；缺凭据/需人决策/外部依赖不可用 → `blocked` 并写清需要什么；真的失败 → `failed`。
 - 用：长任务阶段性进展 → `progress`（有实质进展再报，别刷屏）。
+  **注意它默认只入库**（`admission: 'ledger'`），主会话不会因此被叫醒；想让它回流，得把 `progress` 加进
+  `directReportStatuses`——那时 `progressRelayIntervalMs`（默认 60s）会开始节流。
 - 别用：编造结果。做不到就 `blocked`。
+- 别用：把结论写进 `progress`。终态才有「必须让人知道」的保证；`progress` 只是台账。
 - 注意：报完 `done` 后还在同一回合里继续做别的，主会话已经按 `done` 处理了；要续做请让主会话 `dispatch_message`。
 
 ---
@@ -418,7 +481,7 @@ worker 向派发者汇报。主会话不要调用。
 | --- | --- | --- |
 | `该工具只能在某个会话（Agent）中调用` | 工具在无 Agent 的上下文里被调用 | 正常会话里调用即可 |
 | `本会话已派发 N 个任务，达到上限 64；请先收束旧任务` | 超过 `maxTasksPerSession` | 取消/收束旧任务，或调大配置 |
-| `没有任务 <id>` | `task_id` 不存在（或已不在任务表） | 用 `dispatch_list` 取正确 id |
+| `没有任务 <id>` | `task_id` 不存在（或已不在任务表） | 用 `dispatch_list` 取正确 id。**退休任务不算「没有」**：`dispatch_inspect` 能查到留痕（带 `retired: true`），但 `dispatch_message` / `dispatch_cancel` / `dispatch_wait` 只认活表 |
 | `任务 <id> 不属于本会话` | 操作别人的任务 | 只操作本会话派出的任务 |
 | `dispatch_report 只能由被派发的 worker 调用；当前会话不属于任何派发任务` | 主会话/无关会话调用 report | 主会话不要调 report |
 | `dispatch_report 需要 summary` | `summary` 为空 | 写 3–6 行摘要 |

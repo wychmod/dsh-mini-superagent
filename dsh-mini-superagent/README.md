@@ -213,7 +213,8 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - **效果条**：`完成`、`成功率`、`平均耗时`（中位数）、`并行节省`——粗算「各任务耗时之和 − 实际占用的墙钟」，
   定义写在每个数字的 hover 里，不让人误当账目。
 - **并发条**：一条 4px 进度条 + 排队 / 后台收尾计数，比两个数字更快看出还有没有空位。
-- **四个视图 chip**：`全部`（总览）/ `进行中` / `需要处理` / `已归档`，各带计数（按当前工作区筛选后计算）。
+- **四个视图 chip 之外还有第五个**：`全部`（总览）/ `进行中` / `需要处理` / `已归档` / **`已退休`**，各带计数（按当前工作区筛选后计算）。
+  「已退休」不从快照取数——它走独立的只读路由 `GET /board/retired`，选中时才取一次。
 - **总览三段**：
   - `需要你处理`：failed / blocked / interrupted，按「失败的先、等得久的先」排序，**行内直接给原因**，
     不用点进子会话才知道它为什么停住；
@@ -226,7 +227,7 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - **工作区下拉**：`全部工作区` + 快照 `workspaces`；选中的工作区与视图 chip 取交集，效果数字也跟着这个范围走。
 - **立即归档**：两步确认（首次点击变「确认归档」，4 秒无操作自动回落），调 `POST /board/archive`，结果用提示条显示扫描/归档/失败数。
 - **归档视图**：紧凑单行（标题、状态、耗时、归档相对时间），整行 0.55 透明度、灰点、无按钮；归档失败的原因照常显示。
-- **点行跳子会话**：整行可点，`Enter`/`Space` 也可以；失败提示「打不开子会话 `<id>`：<原因>」，归档行先提醒但仍尝试打开。
+- **点行跳子会话**：整行可点，`Enter`/`Space` 也可以；失败提示「打不开子会话 `<id>`：<原因>」，**已归档的行不可点**（归档会话在宿主里一 opened 就会被清成空白会话，故不给点击入口，`aria-disabled` 说明原因）。
 - **占位与提示**：加载中 / 空列表 / 筛选后为空 / 取不到数据（保留上次成功快照并提示）；取消/重试/归档失败用顶部红条显示原因。
 - **刷新节奏**：页面隐藏时停表并中止在途请求，切回来立刻重取；面板卸载时清掉定时器与所有在途请求。
 - **主题**：颜色全部走 `var(--dsw-alias-*, fallback)`，不写死明暗两套。
@@ -241,8 +242,11 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - 原因：插件注册的具名路由排在 DSH 页面鉴权之前。若全放开，把 Web 暴露到局域网时任何人都能读到任务标题、工作目录与报告摘要。
   代价是远程访问只能用同源页面，远程 `curl` 读不到看板。
 
-看板接口（0.5.0）：`GET /board`、`POST /board/cancel`、`POST /board/retry`、`POST /board/archive`、`POST /board/target`。
-快照带 `workspaces`、`targets`、`counts.archived`，任务卡带 `workspace_*` / `archived_*` / `group`。
+看板接口（0.5.0 起，本版未发布新增退休视图）：`GET /board`、`GET /board/retired`、`POST /board/cancel`、`POST /board/retry`、
+`POST /board/archive`、`POST /board/target`。
+快照带 `workspaces`、`targets`、`counts.archived`、`counts.retired` 与 `memory` 块，任务卡带 `workspace_*` / `archived_*` / `group` / `input_*`。
+`memory` 是记忆治理口径（窗口、账本容量、准入计数、待读/不知道、退休数），`null` 表示宿主没提供。
+细节见 [docs/board.md](docs/board.md)。
 
 **重试语义**（看板按钮，不是新工具）：
 
@@ -377,6 +381,17 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 | `taskDirRoot` | `''` | 每任务目录的根；留空不启用（子会话仍在工作区/调用者目录里干活） |
 | `prepareCommand` | `''` | 任务目录不存在时在父目录执行一次的命令，典型是 `git worktree add` |
 | `prepareTimeoutMs` | `600000` | prepare 命令超时（10 分钟） |
+| `memoryWindowDays` | `7` | 派生指标的窗口：最近 N 天。只影响指标口径，不影响任务是否存在 |
+| `memoryWindowTasks` | `200` | 派生指标的窗口：最近 M 条已结算（与天数取交集） |
+| `maxReportSummaryChars` | `6000` | 单条报告 `summary` 的**入库**上限（与外发同一口径）；超长时头尾各半并记 `truncated` |
+| `maxReportDetailChars` | `4000` | 单条报告 `detail` 的入库上限 |
+| `maxLastTextChars` | `5000` | `task.lastText`（worker 最后一段输出）的入库上限 |
+| `inputPendingTtlMs` | `1800000` | 「已投递未读」的存活上限（30 分钟）；超时改写成 `inputUnknownAt` 而不是假装读过 |
+| `clearTargetsOnDispose` | `true` | 会话销毁时清掉它的派发目标。不清的话 `targets` 只增不减 |
+| `ledgerMaxTasks` | `1000` | 账本全局条数上限；超出按「已归档优先 → 最老 `updatedAt`」退休。`<= 0` 不限制 |
+| `ledgerMaxDays` | `90` | 账本保留天数；非活跃且更早的任务退休。`<= 0` 不限制 |
+| `ledgerMaxRetired` | `5000` | 退休留痕列表上限；超出丢最老的并累加 `retiredDropped`（**该计数不落盘、重启归零**） |
+| `directReportStatuses` | `["blocked","failed"]` | **额外**直通主会话的报告状态。终态（`done`/`blocked`/`failed`/`cancelled`）恒直通，**配置只能扩展、不能降级** |
 
 单个任务还可以在 `dispatch_launch` / `dispatch_launch_many` 时覆盖 `cwd` / `workspace` / `create_workspace` /
 `model` / `agent_preset` / `permission_preset`。
@@ -385,9 +400,12 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 
 ## 落盘与重启
 
-- 任务表在 `<stateDir>/tasks.json`（默认 `$DSH_HOME/dsh-mini-superagent/tasks.json`），UTF-8，覆盖写，800ms 防抖。
-- 文件结构 `{version: 3, savedAt, tasks: [...], targets: {...}}`；读取时不强校验版本，坏文件只记日志、不阻止插件启动。
-  旧文件没有 `targets` 时按空处理。
+- 任务表在 `<stateDir>/tasks.json`（默认 `$DSH_HOME/dsh-mini-superagent/tasks.json`），UTF-8，原子替换写（`tmp` → `fsync` → `rename`，另留 `.bak`），800ms 防抖。
+- 文件结构 `{version: 4, savedAt, tasks: [...], targets: {...}, retired: [...]}`；读取时不强校验版本，坏文件只记日志、不阻止插件启动。
+  旧文件没有 `targets` 时按空对象、没有 `retired` 时按空数组（**不迁移、不报错**）。
+- `retired` 是**退休留痕**：任务被移出活表后只剩 13 个字段（含 `retiredAt` / `retiredReason` 与 200 字摘要），
+  **不搬报告正文**。它落盘是为了重启后还能回答「这条任务什么时候、为什么不见了」。
+  格式细节见 [docs/architecture.md](docs/architecture.md) §29。
 - 插件重启后读回历史任务：**还在排队、且从没启动过的任务会重新入队接着跑**（判据 `startedAt` 为空）；
   已经在跑的标 `interrupted`，因为新进程里那个 worker 可能已经做了一半，重跑会重复执行。
 - 子会话本身是普通 DSH Session，内容由 DSH 自己持久化，在侧边栏里可以直接打开。
@@ -486,14 +504,27 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
   无法区分（都要 `read` / `pwsh`），加守卫只会误伤；防回归靠 `test/handoff.test.js` 的文本断言。
   硬边界只有一种做法：路由模式（见上）收走 `write` / `edit`，但那只在「必派发」模式下成立。
 - **状态文件是单写的**：多个 Harness 实例共用同一个 `DSH_HOME` 时可能互相覆盖；`stateDir` 可指到别处。
-- **报告与简报有截断**：单任务 50 条报告；`dispatch_inspect` 只展示最近 5 条、简报 2000 字符、最后输出 3000 字符。
+- **报告与简报有截断**：单任务 50 条报告；**入库**按 `maxReportSummaryChars`（6000）/ `maxReportDetailChars`（4000）截，
+  `lastText` 按 `maxLastTextChars`（5000）截，被截的条目记 `truncated`；`dispatch_inspect` 只展示最近 5 条、简报 2000 字符、最后输出 3000 字符。
+  注意 `clip()` 是「头尾各半 + 一句提示语」且提示语也占预算，**不是截到恰好 N 字**。
+- **`progress` 默认不回流**：它只入库（`admission: 'ledger'`），主会话不会被叫醒。这是有意的——
+  过程信息不该进会话长期历史。想恢复旧行为，把 `progress` 加进 `directReportStatuses`（此时才轮到 `progressRelayIntervalMs` 节流）。
+- **终态报告不能被配置关掉**：`done` / `blocked` / `failed` / `cancelled` 恒直通。`directReportStatuses` 只能往里加，
+  **不能把结论类状态降级成静默**——那样主会话会永远等不到「做完了」。
+- **账本会退休老任务**：超过 `ledgerMaxTasks`（1000 条）或 `ledgerMaxDays`（90 天）的非活跃任务被移出活表，
+  只留 13 个字段的薄记录（无报告正文）。看板「已退休」视图与 `dispatch_inspect`（带 `retired: true`）能查到，但正文取不回来。
+  `retiredDropped`（留痕列表本身超 `ledgerMaxRetired` 被丢弃的条数）**不落盘、重启归零**，它不是累计值。
+- **指标有窗口**：成功率 / 中位耗时 / 并行节省只算最近 `memoryWindowDays`（7）天 / `memoryWindowTasks`（200）条内的已结算任务，
+  且排除已归档与已退休。拿它跟旧版本的数字比会不一致——先看卡片 hover 里的窗口口径。
 - **看板依赖 `webServer`**：headless 形态没有这个服务时不注册路由（日志会写「没有 webServer，跳过任务看板路由」），面板取不到数据；工具与派发不受影响。
 - **看板最多返回 200 条**：计数按全量算，列表只截前 200；没有分页、没有历史归档。
 - **远程访问受限**：非回环地址只能通过同源页面看看板，远程 `curl` 会被 403；这是有意的（见「任务看板」的安全取舍）。
 - **重试有边界**：`running` / `queued` / `cancelled` 不能重试；重试沿用同一个任务 id，只把 `attempt` +1（会话无法恢复时换一个 worker 会话）。
 - **工作区目录必须可写**：`workspaceRegistry.create` 要求目录已存在，插件会先 `mkdir`；目录不可写时默认工作区创建失败（只记日志），
   显式指定 `workspace` 的派发会直接报错。没有 `workspaceRegistry` 时，`day` 模式退化为按任务 cwd 建会话。
-- **`workspace` 优先于 `cwd`**：两者同时给时，任务工作目录取工作区路径，`cwd` 被忽略。
+- **`workspace` 胜 `cwd`，但 `cwd` 不被丢弃**：两者同时给时，会话归属按工作区、任务工作目录仍是 `cwd`
+  （由 `enterDirectory()` 切过去）。只给 `cwd` 时它优先于会话里记住的派发目标。
+- **显式 `cwd` 不触发日期兜底**：调用方明确给了目录，就不会再被塞进当天的【派发】工作区。
 - **未指定 `workspace` 时**：先看输入框选的「派发目标」；没有目标才沿用调用者目录。无论哪种，子会话仍挂在当天【派发】工作区。
 - **派发目标 ≠ 会话归属**：输入框的选择器只影响下一次 `dispatch_launch`；DSH 里会话的工作区建完不可迁移。
 - **`@` chip 外观不可定制**：`appearance` 只认 session/file/folder，插件省略它；也因为没有纯文本插入形态，`@中文名` 不可行。

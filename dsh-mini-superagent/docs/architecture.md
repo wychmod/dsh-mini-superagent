@@ -73,6 +73,7 @@ apply()
 浏览器侧（client/index.js）
   ├─ 看板（sidebar.panellist + main）
   │    GET  /dsh-mini-superagent/board          （2s 轮询）
+  │    GET  /dsh-mini-superagent/board/retired  （选中「已退休」chip 时按需取一次）
   │    POST /dsh-mini-superagent/board/cancel   （看板「取消」）
   │    POST /dsh-mini-superagent/board/retry    （看板「重试」）
   │    POST /dsh-mini-superagent/board/archive  （「立即归档」/手动巡检）
@@ -82,10 +83,10 @@ apply()
   └─ @ 工作区（inputTriggers 的 @ source）
        GET  /board（10s 缓存）→ POST /board/target + 插入 chip
   ▼
-src/board.js ── boardSnapshot / Dispatch.cancel / retry / archiveStale / setTarget ──▶ TaskTable + targets
+src/board.js ── boardSnapshot / retiredSnapshot / Dispatch.cancel / retry / archiveStale / setTarget ──▶ TaskTable + targets + retired
 ```
 
-Host 与 Client 不共享内存：Client 只认这几个同源 HTTP 端点（GET /board、GET /selfcheck、POST /client-ready、POST /archive、POST /target、POST /cancel、POST /retry），Host 把任务表与目标表拍平成快照返回。
+Host 与 Client 不共享内存：Client 只认这几个同源 HTTP 端点（GET /board、GET /board/retired、GET /selfcheck、POST /client-ready、POST /archive、POST /target、POST /cancel、POST /retry），Host 把任务表、目标表与退休留痕拍平成快照返回。
 
 ## 模块与职责
 
@@ -94,15 +95,15 @@ Host 与 Client 不共享内存：Client 只认这几个同源 HTTP 端点（GET
 | `src/index.js` | 插件入口：建 `Dispatch`、`restore` + `provision`、注册 9 个工具、接宿主事件、注册看板路由、启动归档巡检、`ctx.effect` 清理 | `dispatch` / `tools` / `board` / `constants` | 不含业务逻辑 |
 | `src/constants.js` | 名称、版本、日志前缀、消息来源 kind、提示段名、状态集合、默认配置（含工作区/归档）、任务 id 与消息 id 生成 | 无 | 不读文件、不碰 ctx |
 | `src/tasks.js` | `TaskTable`：并发位、排队、结算、等待者；纯函数 `clip` / `oneLine` / `lastAssistantText` | `constants` | 不做 I/O，不调宿主 API |
-| `src/store.js` | `tasks.json` 读回与覆盖写；`{version, savedAt, tasks, targets}`（`version: 3`，缺 `targets` 按空） | Node 内置模块 | 不校验业务字段、不做迁移 |
+| `src/store.js` | `tasks.json` 读回与原子替换写；`{version, savedAt, tasks, targets, retired}`（`version: 4`，缺 `targets` 按空对象、缺 `retired` 按空数组） | Node 内置模块 | 不校验业务字段、不做迁移 |
 | `src/sessions.js` | `SessionGateway`：`freezeMessage` 懒加载、构造插件来源消息、双通道投递、`holds`（投递判重）、按目录取 cwd、workspace 解析、建子会话、权限预设、`applyModel`（model 透传）、`restrictTools`（路由模式收窄工具面）、系统提示注入、`enterDirectory`（切工作目录） | `constants` / `prompt` | 不管任务状态 |
 | `src/prompt.js` | 给模型看的文本：主会话工作方式提示 `DISPATCH_HINT`、worker 首条消息 `workerPrompt` | `constants` / `tasks` | 不含判断逻辑 |
 | `src/tools.js` | 9 个工具定义（含只读的 `dispatch_workspaces`）、`TOOL_NAMES`、参数 schema、结果卡片拼装、归属校验 | `constants` | 不直接操作会话 |
-| `src/dispatch.js` | `Dispatch`：`launch` / `pump` / `settle` / `start` / `report` / `relay` / `message` / `cancel` / `retry` / `placementFor` / `provision` / `startArchiveSweep` / `archiveStale` / `targetFor` / `setTarget` / `enforceRouter` / `forgetRouter`、视图 `card` / `detail`、落盘 `persist` / `restore` / `dispose` | 其余全部 | 不直接调 `sessionController` / `agent.*`（走 gateway） |
-| `src/board.js` | 看板 Host 半边：`boardTask` / `boardSnapshot`（拍平、计数、排序、200 条、工作区列表、`targets`）、`createBoardHandler`（5 条路由 + 同源校验）、`registerBoardRoutes` | `constants` | 不自己改任务状态（取消/重试/归档/目标转调 `Dispatch`） |
-| `src/workspaces.js` | 工作区网关：`defaultRoot` / `rootOf` / `dayKey` / `dayTitle` / `safeDirName`、`WorkspaceGateway`（`ensure` / `defaultWorkspace` / `dayWorkspace` / `createNamed` / `list` / `resolve` / `resolveOrCreate` / `archiveSession`） | `constants` | 不碰任务表、不投递消息 |
+| `src/dispatch.js` | `Dispatch`：`launch` / `pump` / `settle` / `start` / `report` / `admissionOf` / `relay` / `message` / `cancel` / `retry` / `placementFor` / `provision` / `startArchiveSweep` / `archiveStale` / `targetFor` / `setTarget` / `forgetTargets` / `enforceLedgerCap` / `memoryStats` / `sweepMemory` / `resolveTask` / `isRetired` / `retiredCard` / `enforceRouter` / `forgetRouter`、视图 `card` / `detail`、落盘 `persist` / `restore` / `dispose` | 其余全部 | 不直接调 `sessionController` / `agent.*`（走 gateway） |
+| `src/board.js` | 看板 Host 半边：`boardTask` / `boardSnapshot`（拍平、计数、排序、200 条、工作区列表、`targets`、`memory` 块）、`retiredSnapshot`（退休视图）、`createBoardHandler`（8 条路由 + 同源校验）、`registerBoardRoutes` | `constants` | 不自己改任务状态（取消/重试/归档/目标转调 `Dispatch`） |
+| `src/workspaces.js` | 工作区网关：`defaultRoot` / `rootOf` / `dayKey` / `dayTitle` / `safeDirName`、`WorkspaceGateway`（`ensure` / `defaultWorkspace` / `dayWorkspace` / `createNamed` / `list` / `resolve` / `resolveOrCreate` / `archiveSession`）；内部 `exactMatches` / `fuzzyMatches` / `describeMatches` / `diagnoseTitleRef` 只服务解析链 | `constants` | 不碰任务表、不投递消息 |
 | `src/prepare.js` | 每任务目录与一次性 prepare 命令：`taskDirectory` / `prepareEnv` / `runPrepare`（目录已存在即跳过、失败不重试、超时可配） | `workspaces`（`safeDirName`）+ Node 内置 | 不碰任务状态、不碰会话 |
-| `client/index.js` | 浏览器半边，三条注册：`sidebar.panellist` 图标 + `main` 看板（2s 轮询、4 chip、工作区筛选、归档、点行跳会话）；`conversation.input.left` 派发目标选择器；`inputTriggers` 的 `@` 工作区 source。共用 `GET /board` 与 `POST /board/target` | 无（`require('react')` + 同源 `fetch` + `createPortal`） | 不 import Host 代码、不共享内存、不打包；不写全局样式 |
+| `client/index.js` | 浏览器半边，三条注册：`sidebar.panellist` 图标 + `main` 看板（2s 轮询、**5 chip**、工作区筛选、归档、已退休只读视图、点行跳会话）；`conversation.input.left` 派发目标选择器；`inputTriggers` 的 `@` 工作区 source。共用 `GET /board`、`GET /board/retired` 与 `POST /board/target` | 无（`require('react')` + 同源 `fetch` + `createPortal`） | 不 import Host 代码、不共享内存、不打包；不写全局样式 |
 
 ### 依赖方向
 
@@ -252,12 +253,21 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 
 ### 11. 落盘单文件 + 800ms 防抖
 
-- 写：`Dispatch.persist()` 覆盖写 `{version: 3, savedAt, tasks, targets}`；密集的状态变化由 800ms 定时器合并（`timer.unref()`，不阻止进程退出）。
-  0.5.0 起多一个 `targets`（会话 id → 派发目标），旧文件缺它时按空对象。
-- 读：`restore()` 启动时读一次；读失败只 warn，不阻止插件启动——任务表是辅助信息，会话内容由 DSH 自己持久化。
-- 恢复语义：未结算任务一律标 `interrupted`，因为新进程里没有活的 worker，不能假装它们还在跑。
+- 写：`Dispatch.persist()` 覆盖写 `{version: 4, savedAt, tasks, targets, retired}`；密集的状态变化由 800ms 定时器合并（`timer.unref()`，不阻止进程退出）。
+  0.5.0 起多一个 `targets`（会话 id → 派发目标），旧文件缺它时按空对象；
+  本版未发布起多一个 `retired`（退休留痕数组），旧文件缺它时按空数组。格式细节见 §29。
+- 落盘的原子性在 `store.js`：先写 `<file>.tmp` + `fsync`，把当前有效文件留一份 `<file>.bak`，再 `rename` 覆盖。
+  `readState()` 主文件损坏时自动回退 `.bak` 并标 `recovered: 'bak'`，两者都坏才抛错。
+- 读：`restore()` 启动时读一次；读失败只 warn，不阻止插件启动——但**读不到的是派发事实，不是会话内容**。
+  两者的区别见 §26：`tasks.json` 是派发事实的权威副本，丢了之后「报告送过没有、任务归谁、它为什么不见了」
+  都无从回答；子会话本身仍由 DSH 自己持久化，所以插件照样能启动。
+- 恢复语义：未结算任务的处置见 §23 ①——`queued` 且从没启动过的保持 `queued` 重新入队，其余一律标 `interrupted`，
+  因为新进程里没有活的 worker，不能假装它们还在跑。
 
-为什么不上数据库：任务表是单写、低频、可丢的展示数据；JSON 文件足够，而且出问题时用户能直接看、直接删。
+为什么不上数据库：账本是单写、低频、体积随任务数线性增长的数据结构，JSON 文件足够，而且出问题时用户能直接看、直接删。
+**「可丢」这个旧说法是错的**（见 §26）：它曾被用来解释「为什么不做事务、不做迁移」，而事实上看板指标、归属校验、
+续跑与 `dispatch_inspect` 全读这份表——把它当缓存丢掉的代价是「历史不可重建」，不是「少一张列表」。
+P0-5 的账本封顶（见 §28 第 5 条）就是给它的体积补上硬界，而不是继续假设它随时可以丢。
 
 ### 12. 提示只注入用过的会话
 
@@ -284,17 +294,23 @@ Client 直接请求。理由：
 - 路由是 prefix 注册，路径、方法、状态码都在一个文件里，排障时看日志就能对上。
 
 代价：契约是「手写的两端一致」——路由前缀 `BASE` 与快照字段在 `src/board.js` 和 `client/index.js` 各有一份，
-改一处要同步另一处；没有类型检查兜底。
+改一处要同步另一处；没有类型检查兜底。新增的 `GET /board/retired` 与 `memory` 块同样是手写的一致：
+**退休视图的 `{ok, count, dropped, entries[]}` 形状与 `memoryStats()` 的 `{window, ledger, admission, pending, retired}`
+形状都是冻结契约，字段名不得改。**
 
-### 15. 看板准入：回环放行，其余同源
+### 15. 看板准入：回环放行 + 写操作要自定义头
 
-插件注册的具名路由排在 DSH 页面鉴权之前，所以看板自己做了准入：
+插件注册的具名路由排在 DSH 页面鉴权之前，所以看板自己做了准入（0.7.0 起，因为旧的「Origin === Host」判据
+可以被 DNS rebinding 绕过）：
 
-- `GET`：`Host` 是回环名（`127.0.0.1` / `localhost` / `::1`）放行；否则要求 `Origin` 与 `Host` 一致。
-- `POST`：带 `Origin` 时必须与 `Host` 一致；不带 `Origin` 的（curl/脚本）放行。
+- `GET`：`Host` 的主机名是回环（`127.0.0.1` / `localhost` / `::1` / `[::1]`）放行，但若有 `Origin` 它也必须指向回环；
+  非回环 `Host` 默认拒绝，需写进 `BOARD_ALLOWED_HOSTS`，且 `Origin` 与 `Host` 一致。
+- `POST`：先满足 `GET` 的规则，**并且**带 `x-dsh-mini-superagent` 头（`BOARD_HEADER`）。
+  自定义头挡不住 rebinding（同源请求不触发预检），它挡的是**同源页面之外的脚本**与简单 CSRF；
+  真正的判据是 `Host`——浏览器无法伪造它。
 
 这是「不把任务标题、工作目录、报告摘要泄露给任意网页」的最低成本方案，不是完整鉴权。
-代价：远程 curl 读不到快照；不带 Origin 的 POST 在端口暴露时仍可取消/重试，需要自己控制网络暴露面。
+代价：非回环地址默认不可访问（远程 curl 读不到快照）；同源页面里的 XSS 仍能带着这个头发请求。
 细节与状态码见 [board.md](board.md)。
 
 ### 16. 客户端不打包、不编译
@@ -306,7 +322,7 @@ React 从 `require('react')` 取。理由：
 - ModuleLoader 的 `factory` 里可以直接 `require` 宿主已提供的 React，不需要自己带运行时。
 - 样式随面板 `<style>` 卸载，只用 `var(--dsw-alias-*, fallback)`，不维护明暗两套。
 
-代价：没有 JSX、没有类型检查；1017 行单文件，改结构时靠测试与人工审查。
+代价：没有 JSX、没有类型检查；单文件三千余行，改结构时靠测试与人工审查。
 
 ### 17. 会话归属：有目标进目标，没目标才兜底进【派发】
 
@@ -545,7 +561,7 @@ subagent 保留读写与执行，但不能再派发、不能再汇报。
 
 **共同的设计约束**：三段文本（`BACKGROUND_CONTRACT` / `HANDOFF_RULE` / `IN_FLIGHT_ALLOWED`）
 由 `DISPATCH_HINT`（轻提示）与 `FORCED_HINT`（必派发）**共享同一份常量**，按同样顺序拼进各自正文。
-理由与 §12 一致：「要不要强制派发」是模式差异，而「派出去就归别人」「有任务在飞时能做什么」
+理由与 §13 一致：「要不要强制派发」是模式差异，而「派出去就归别人」「有任务在飞时能做什么」
 是机制事实，与模式无关。两处各写一遍就会漂移——这个仓库已经被这件事咬过一次。
 
 **为什么仍然只是提示词**：`dispatch_wait` 被滥用不是可以用守卫拦住的错误——「用户真的要求等结果」
@@ -553,6 +569,279 @@ subagent 保留读写与执行，但不能再派发、不能再汇报。
 与「做另一件相关的活」无法区分（都要 `read` / `pwsh`），加守卫只会误伤。
 真要做结构性约束就得改工具面（像 §21 的路由模式那样收走工具），但那只在「必派发」模式下才成立，
 且会挡住主会话合法的只读问答。**代价就是这么记的：这一层靠提示词，防回归靠 `test/handoff.test.js` 的文本断言。**
+
+### 26. 权威源：账本是派发事实的唯一权威，会话是可重建的投影
+
+这一节补的是 [plans/07](../../plans/07-memory-governance.md) §二 的口径冲突，也是该计划书 §十 落地顺序的第 1 条
+（原话是「先把 §二 的口径冲突写进 `docs/architecture.md`（权威源定义），再动代码」）。
+本轮代码先动了，所以这条口径现在补上。
+
+**旧口径（错的，已被本文取代）**：`src/store.js` 的注释与更早的 README 都写着「任务表是辅助信息，
+丢了不影响子会话」。**这个说法必须明确否定。** 它错在把「会话内容由 DSH 持久化」这件事，
+误推成「任务表也可以丢」——两者不是同一份事实。
+
+**事实是：`tasks.json` 已经是派发事实的权威源。** 下列能力全部只读这份表，没有第二份副本：
+
+| 事实 | 只存在于账本的地方 |
+| --- | --- |
+| 任务状态与归属 | `TaskTable`；`dispatch_list` / `dispatch_inspect` 的归属校验读 `parentSessionId` |
+| 报告正文与投递结果 | `task.reports` / `task.delivery`；会话里的那条消息**不记**投递成败 |
+| 续跑与重试 | `attempt`、`workerSessionId`、`groupClosed` 等都只在账本里 |
+| 看板指标 | `boardSnapshot()` 的 `counts`、`truncated`、效果数字的分母 |
+| 归档与冻结 | `archivedAt` / `frozenAt`（`archiveStale()` 写，见 §18 与 §28 第 4 条） |
+| 是否退休、为什么 | `retired` 留痕（见 §28 第 5 条、§29） |
+
+**另一侧：会话里的一切都是投影。** 报告以 `user/message` 写进主会话、idle 兜底文本、
+批次汇总、`dispatch_inspect` 的卡片文本——都是**从账本读出来再渲染**的东西。
+投影可以更短（P0-3 的 `clip`）、可以丢（主会话不在时 `dropped`）、可以重放（重启后从账本重建），
+但它**不得反过来成为事实**：任何「只在会话消息里、账本里没有」的派发事实都是缺陷，不是设计。
+
+一句话记法：**先定权威，再定投影，然后给生命周期和预算。顺序反了就会变成「删历史」或「藏数据」**
+（计划书 §三 的原话）。
+
+**为什么当时会写成「辅助信息」**：0.1.0 只有「派发 + 回报」，账本确实是展示层——任务表丢了，
+子会话照样在跑，报告已经送出的也不受影响。那时这个说法是**对的**。它变成错的，是由于后续每一版
+都在往账本上加事实（0.5.0 的 `targets`、0.6.0 的 `attempt`/`delivery`，0.7.0 的状态跃迁表，
+0.8.x 的后台活与读回执），**而那句注释没人回头改**。这正是计划书 §九 记的「文档再次漂移」风险：
+口径随能力增长而失效，注释不会自己过期提醒。
+
+**代价与边界**（写在文档里，免得下一个人以为是笔误）：
+
+- 账本损坏时**不能**静默拿空表继续跑成「一切正常」：`readState()` 在主文件与 `.bak` 都不可用时抛错，
+  `restore()` 记 `restoreError` 并 warn（原子替换与 `.bak` 回退的细节见 §11）。
+- 但**也不该让插件起不来**：会话仍可创建、派发仍可进行，所以 `restore()` 只 warn。
+  「权威」不等于「不可用就崩」，而是「它的缺失必须被说出来」。
+- 权威性靠**单写入口**保证：`TaskTable.transition()` 是状态唯一写入口（§9），
+  账本封顶只从 `Dispatch.enforceLedgerCap()` 一个地方动删除，退休只经 `#retire()`。
+
+### 27. 归档（archive）与退休（retire）是两个概念，别混
+
+中文里都像「收起来了」，后果完全不同：
+
+| | 归档 archive | 退休 retire |
+| --- | --- | --- |
+| 标记字段 | `archivedAt` + `frozenAt` | `retiredAt` + `retiredReason` |
+| 任务还在活表里吗 | **在**（`table.tasks`，仍可 `dispatch_inspect` 看全文） | **不在**（移出 `table.tasks`，只留 `retired` 薄记录） |
+| 还参与指标吗 | 不参与（客户端按 `archived_at` 排除，见 §28 第 1 条） | 不参与（根本不在快照的 `tasks` 里） |
+| 看得到报告正文吗 | 看得到 | 看不到（只留最后一条 200 字摘要与 `reportCount`） |
+| 谁触发 | `archiveStale()` 巡检 / `POST /board/archive` | `enforceLedgerCap()`：结算后、归档后、重启后各判一次 |
+| 能否撤销 | 会话可从归档恢复（`archivedAt` 可清） | 不能——记录已经不在，只能从留痕看它曾存在 |
+| 可见入口 | 看板「已归档」chip（快照 `counts.archived`） | 看板「已退休」chip（独立路由 `GET /board/retired`） |
+
+**`frozenAt` 存在的理由**：归档是「只读冻结」的开始，冻结时刻必须和归档时刻分开记，
+因为两者可能不同源（归档成功那一刻写 `archivedAt`，`frozenAt` 是同一次写的，
+但语义上「最后一次可写」与「已归档」是两个事实）。`archiveStale()` 里两者取同一个 `at`（`src/dispatch.js` 的
+`task.archivedAt = at` 与 `task.frozenAt = at`），保留两个字段是为了将来「冻结」独立于「归档」时不必改存储。
+
+**为什么不复用 `retiredAt` 表示归档**：`dispatch_inspect` 用 `retiredReason` 是否有值来判定「这是不是退休记录」
+（`src/dispatch.js` 的 `isRetired()`）。把归档写成退休会让详情层认为任务已不可查，
+而它其实还在活表里；`memoryStats()` 也会少算一条活任务。这条见过一次，注释就留在
+`archiveStale()` 与 `detail()` 里。
+
+### 28. 记忆治理 P0 五项：行为与可观察后果
+
+对应 [plans/07](../../plans/07-memory-governance.md) §六 P0。**只改治理，不改状态机、不动 Session 格式、不改工具契约。**
+每一条都写「可观察后果」，因为内部实现随时会变，行为不该变。
+
+**① 指标窗口化（`memoryWindowDays` / `memoryWindowTasks`）**
+
+- `memoryStats()` 返回 `window: { days, tasks, since }`，`since = now - days × 86400000` 的 ISO 串。
+  默认 7 天 / 200 条；非正数或非数字时按默认值算（`days > 0 ? days : 7`）。
+- 客户端（`effectStats()`）只统计 `updated_at >= window.sinceAt` 的已结算任务，
+  且超过 `window.tasks` 条时按 `updated_at` 倒序取前 N。
+- **归档与退休都不进指标**：归档按 `archived_at` 排除（这条与窗口无关，窗口未知时也生效）；
+  退休任务根本不在快照的 `tasks` 数组里。
+- 可观察后果：同一个 86% 在旧口径与新口径下可能不同——所以卡片上必须显示窗口
+  （`最近 7 天 / 最近 200 条`），否则用户会以为数字算错了。
+- 窗口只影响**指标口径**，不影响任务是否存在：看板列表仍然显示窗口外的任务，
+  `dispatch_list` 也照旧。退休/归档由第 5 条管。
+
+**② 准入分级（`directReportStatuses`；`ADMISSION.DIRECT` / `ADMISSION.LEDGER`）**
+
+准入结论由 `admissionOf()` 判定，顺序有意义（先判的不能被配置翻掉）：
+
+1. `TERMINAL_REPORT` 里的状态（`done` / `blocked` / `failed` / `cancelled`）→ **恒 `direct`**；
+2. 配置 `directReportStatuses` 里点名的状态 → `direct`（默认 `['blocked','failed']`，`done` 不在列表里也照样直通）；
+3. 其余（含 `progress` 与**未知状态**）→ `ledger`，只入库不回流。
+
+> **这里与直觉不同，必须写清：终态硬直通，配置只能扩展、不能降级。**
+> 把 `directReportStatuses` 清空**不会**让 `done` 静默——`admissionOf()` 对终态恒 `direct`。
+> 这是有意的：结论与「需要人处理」是主会话唯一必须知道的两类事，任何配置都不该把它们降级成静默，
+> 否则主会话会永远等不到「做完了」。配置的唯一用途是**扩大**（例如把 `progress` 加进去换回旧行为）。
+
+可观察后果：
+
+- `dispatch_report` 的返回值多一个 `admission`（`'direct'` / `'ledger'`），只入库的还带 `relayed: false`；
+- `progress` 默认只入库 → `dispatch_inspect` 看得到，主会话不会因此被叫醒；
+- 批次成员自己的终态只入库，整批结束由 `maybeSummarize()` 汇总一条——但**批次汇总本身恒 `direct`**
+  （`admissionCounts` 在 `maybeSummarize()` 里直接记一次 direct）：否则成员静默 + 汇总静默 = 整批静默；
+- `selfCheck().memory.admission` 给 `{direct, ledger, directStatuses}`，其中 `directStatuses()` 是
+  `TERMINAL_REPORT` 与配置的并集——**自检说直通什么，判定就必须直通什么**，两处读同一份来源。
+
+**③ 单条报告预算（`maxReportSummaryChars` / `maxReportDetailChars` / `maxLastTextChars`）**
+
+- **入库即截断**：`report()` 用 `#admitEntry()` 造条目，`summary` 按 `maxReportSummaryChars`（默认 6000）、
+  `detail` 按 `maxReportDetailChars`（默认 4000）当场 `clip`。0.8.x 只在 `reportText()` 外发时截，
+  账本里存的是调用方给的原样长度——「单任务体积由调用方决定」是容量膨胀的根之一。
+- 被截的条目记 `entry.truncated = { summary: 原始长度, detail: 原始长度 }`；**只在真被截时出现这个键**
+  （一个恒存在的空对象会让「是否截过」永远为真）。`dispatch_report` 的返回值同样透出 `truncated`。
+- `task.lastText`（worker 最后一段输出）在入库时按 `maxLastTextChars`（默认 5000）截；
+  `finishIdleTurn()` 外发兜底文本时用**同一个上限**再过一次。
+- **`clip()` 不是「截到恰好 N 字」**：`clip(text, limit)` 在超长时**头尾各半**，
+  并在中间插一句 `\n…（已截断 X 字符）…\n` 作为提示，而**提示语本身也占这 N 的预算**
+  （`bodyBudget = limit - 40`）。所以 `clip('a'.repeat(1000), 200)` 的实际总长 ≤ 200，
+  不是「200 字正文 + 提示」。极端小 `limit` 下干脆硬截到 `limit`（`out.length <= cap ? out : value.slice(0, cap)`）。
+  这条在 0.6.0 之前是 `limit - 400` + `slice(-400)`，`limit < 400` 时输出反而比 `limit` 还长（实测 417 字）。
+- 内外同一口径是有意的：否则会出现「库里 10 万字、`dispatch_inspect` 看到残版、主会话看到另一个残版」的三方错位。
+  `reportText()` 里仍保留一层 `clip` 兜底，但正常情况下是幂等的（长度没变，原样返回）。
+
+**④ 生命周期清理（`forgetTargets` / `inputPendingTtlMs` / `archiveStale` 的 `frozenAt`）**
+
+三件事分别在三个确定时刻发生：
+
+- **会话销毁清 `targets`**（`forgetTargets()`，由 `index.js` 的 `agent/disposed` 调，`clearTargetsOnDispose` 默认开）：
+  只删 `targets` 不删任务。为什么不在 `dispose()` 里清——插件卸载时所有会话都还在，
+  清空等于把用户的输入框选择全丢掉。`agent/disposed` 才是「这个会话再也不会派发」的确定时刻。
+  顺序上它排在任务结算**之前**（`index.js` 的 `agent/disposed`），避免「即将消失的会话的旧目标被新任务读到」。
+- **「已投递未读」的 TTL**（`inputPendingTtlMs`，默认 30 分钟）：`sweepMemory()` 把超时的
+  `inputPendingAt` 清掉、改写成 `inputUnknownAt`。**看板要区分「待读」与「不知道」**：
+  `card()` 只在「有 pending 且没读且没 unknown」时报 `input_pending_at`，
+  `input_unknown_at` 单独出现；unknown 必须压过 pending（「不知道」是更弱也更诚实的断言，弱断言不该被强断言盖住）。
+  `onSessionEvent()` 真的读到消息时同时清掉 `inputPendingAt` 与 `inputUnknownAt`，写 `inputReadAt`。
+  `sweepMemory()` **不新开定时器**：它挂在 `schedulePersist()` 的防抖回调与 `persist()` 之前——
+  写盘本来就是这些状态变化的汇合点，为一个纯内存清扫起常驻链路不值得。
+- **归档写 `frozenAt`**（`archiveStale()`）：与 `archivedAt` 同一次写，但字段分开（理由见 §27）。
+
+**⑤ 账本封顶（`ledgerMaxTasks` / `ledgerMaxDays` / `ledgerMaxRetired`）**
+
+- 判据两条，任一成立就退休：**条数**超过 `ledgerMaxTasks`（默认 1000）、
+  **天数**上存在「非活跃（已结算、非 running/queued）且 `updatedAt` 早于 `ledgerMaxDays` 天」（默认 90 天）
+  的任务。配置 `<= 0` 或非数字 = **不限制**（与 `archiveAfterHours: 0` 同一套约定）。
+- 退休顺序：**已归档优先，其次最老 `updatedAt`**。归档优先是因为那是用户已经明确表示「不想再看」的动作，
+  它比「单纯很老」更该先走。排序键用 `Date.parse()` 的数字而不是 ISO 串比较
+  （旧格式不带毫秒时，字典序与时间序会分岔）。
+- 触发点三处，**都不新开定时器**（体积增长只发生在这些点，幂等调用没有代价）：
+  `settle()` 之后、`archiveStale()` 之后、`restore()` 之后。
+- 退休做两件事：从 `table.tasks` / `table.queue` 移出；往 `this.retired` 写一条薄记录（**不搬 `reports` 正文**，见 §29）。
+  原因串是稳定的机器值（`RETIRED_REASONS.CAP_COUNT = 'cap-count'` / `CAP_DAYS = 'cap-days'`），
+  要给人看的中文放在投影层（客户端按 `retired_reason` 映射「条数上限 / 超过保留期」）。
+- `ledgerMaxRetired`（默认 5000）是**留痕列表自己的**上限：超出时丢最老的（Map 插入顺序即退休顺序），
+  并把 `retiredDropped` +1。
+
+> **`retiredDropped` 不落盘，重启归零——它是「本次进程内丢弃了多少条留痕」，不是累计值。**
+> 这一点必须写明，否则用户会对不上号：看到 `dropped: 1` 之后重启，数字变 0 会以为「数据回来了」，
+> 而真相是新进程还没丢过任何东西。落盘反而更糟——把「本次丢弃数」持久化，会让人以为那些被丢的留痕
+> 是可追溯的，而它们的定义就是「已经不在了」（`src/dispatch.js` 构造器里 `this.retiredDropped = 0` 的注释）。
+> 看板的「另有 N 条退休记录超出展示上限」同样取这个值，所以它也会在重启后归零。
+
+### 29. 存储格式 v4 与退休留痕的字段
+
+`tasks.json` 现在是：
+
+```json
+{
+  "version": 4,
+  "savedAt": "2026-11-08T04:42:07.000Z",
+  "tasks": [ "…活任务，形状不变…" ],
+  "targets": { "session-…": { "workspace_id": "ws-…", "title": "项目 A", "path": "D:\\proj\\a" } },
+  "retired": [ "…退休留痕（数组，见下）…" ]
+}
+```
+
+- **`version` 只用于人工排查**，读取时不强校验、不迁移（`store.js` 的 `FILE_VERSION = 4`）。
+- **旧文件（无 `retired` 键）读成 `[]`**：`normalize()` 里 `Array.isArray(raw?.retired) ? … : []`，
+  并且只保留对象条目（数组里混进字符串会让 `Map` 构造与 `oneLine(record.summary)` 炸掉）。
+  刻意**不迁移、不报错**：退休留痕丢了只影响「它为什么消失」这一条可查性，不该让升级后的插件起不来。
+- 写盘时 `retired` **显式写空数组而不是省略**：`JSON.stringify` 会直接丢掉 `undefined` 键，
+  落盘文件里就再也看不到它——显式键让读的人知道这是新格式。
+- 留痕**按「最老在前」写盘**（`[...this.retired.values()]`，Map 插入顺序 = 退休顺序），
+  读回来时保持同样顺序，所以 `ledgerMaxRetired` 裁掉的就是队头，不需要在恢复时重排。
+
+**退休记录只有 13 个字段，且不搬 `reports` 正文**（`src/dispatch.js` 的 `#retire()`）：
+
+| # | 字段 | 说明 |
+| --- | --- | --- |
+| 1 | `id` | 任务 id |
+| 2 | `title` | 标题 |
+| 3 | `status` | 退休时的状态（已结算） |
+| 4 | `parentSessionId` | 派发者会话（`dispatch_inspect` 的归属校验仍要靠它） |
+| 5 | `workerSessionId` | 子会话 id（可能已归档/已不存在） |
+| 6 | `createdAt` | 创建时间 |
+| 7 | `updatedAt` | 最后变更时间（也是封顶判据用的那个） |
+| 8 | `archivedAt` | 归档时间；没归档过显式写 `null` |
+| 9 | `retiredAt` | 退休时刻 |
+| 10 | `retiredReason` | `cap-count` / `cap-days` |
+| 11 | `workspaceTitle` | 目标工作区标题；无则 `null` |
+| 12 | `reportCount` | 退休前报告条数（**只有计数**） |
+| 13 | `summary` | 最后一条报告的单行摘要，`oneLine(…, 200)`；没有报告时取 `oneLine(task.lastText, 200)` |
+
+> 字段数是 **13**（`#retire()` 里 `record` 对象的键），不是「十几个」也不含任何正文。
+> 「是不是退休记录」的判据是 `retiredReason` 非空（`isRetired()`），**没有**第二个布尔字段——
+> 想加「它是否可查」之类的标志，请先想清楚谁在两种形态之间分叉。
+
+> 读的人是靠这 13 个字段回答「它什么时候、为什么消失」的，正文不在其中——搬正文等于把容量上限
+> 换了个地方存，`ledgerMaxRetired` 就成了笑话。
+>
+> 可选字段显式写 `null` 而不是留 `undefined`（`archivedAt` / `workspaceTitle` 都是 `?? null`）：
+> `JSON.stringify` 会丢掉 `undefined` 键，落盘后「这条记录有没有归档过」就只能靠字段**不存在**来判断，
+> 读回方再也分不清「没有」与「存的时候就没值」。
+
+**恢复时退休留痕绝不回流成活任务**：`restore()` 把它们放进 `this.retired`，不 `table.add()`。
+塞回 `table.tasks` 会让它们重新给指标投票，等于没退休。读回的留痕若超过上限（旧文件 + 上限调小），
+只裁不留痕、不写回盘，下一次 `persist` 自然收敛——**不在 `restore()` 里对留痕再跑一次退休判据**
+（留痕从来没进过 `table.tasks`，天然不可能被二次退休）。
+
+### 30. 工作区解析语义：每一级命中多个就返回 undefined
+
+这条也属于「文档语义变了、代码才对上」的一类，细节与参数示例见 [workspaces.md](workspaces.md)，
+这里只记录设计判据，因为它牵动 `dispatch_launch` / `dispatch_setTarget` / `resolveOrCreate` 三条路径。
+
+**旧文档写的「标题精确匹配」暗示它是唯一的、没有歧义——那是错的。**
+`resolve()` 的四级（id → 绝对路径 → 标题精确 → 标题包含）现在遵守**同一条规矩**：
+
+```text
+命中 0 个  → undefined（交给调用方决定要不要新建）
+命中 1 个  → 返回它
+命中多个   → undefined + warn 出全部候选，绝不静默取第一个
+```
+
+- **精确匹配也会歧义**，而且比包含匹配更隐蔽：查询看起来「就是这个名字」，调用方很容易以为是唯一的。
+  实测踩到的场景是两个不同路径共用标题——仓库根 `dsh-mini-superagent` 与包根
+  `dsh-mini-superagent\dsh-mini-superagent`（宿主按目录 basename 起标题），于是用户点「dsh-mini-superagent」
+  时被静默送进**另一个盘上的另一个目录**，日志里一行线索都没有。
+- **候选文案必须带 `path`**（`describeMatches()`：`标题（路径，id=…）`）：同名工作区之间 id 对人毫无区分度
+  （都是一串 uuid），而 path 一眼能看出「这是包根不是仓库根」。
+- **warn 而不是 throw**：调用方要的是「解析不到」这个统一信号；抛错会改掉 `setTarget()` 的错误信息
+  并牵动 `dispatch.js`。`setTarget()` 的 `!workspace` 分支本来就会把现有工作区全列给用户。
+- **单字符不做包含匹配**（按码点数，代理对算 1 个）：`'a'` 命中一堆无关工作区，
+  取第一个纯属偶然，比解析不到更糟。
+
+**`resolveOrCreate()` 新增可选 `reason: 'ambiguous' | 'not-found'`**，它只在**没拿到工作区**时出现：
+
+- `'ambiguous'`：注册表里有多个候选，**绝不允许走到新建**——那些目录是真的存在的，再建一个同名目录
+  只会把「有两个候选」的问题变成「多出一个重复工作区」；
+- `'not-found'`：确实不存在，可以按 `create` 决定新建与否；
+- **空引用不给 `reason`**：调用方没给目标，不是「找不到」。给它贴 `'not-found'` 只会让 `dispatch.js`
+  为一句空话编出一段错误文案。
+
+`reason` 是**给调用方选文案用的**，不是日志级别：0.8.0 及更早两者都是 `undefined`，`dispatch.js` 只能把
+所有失败都写成「找不到工作区「…」，且允许新建被关闭」——而这句话在歧义时是假的（并没有人关掉新建）。
+`resolveOrCreate()` 在真正新建**之前**会重跑一遍与 `resolve()` **完全一致**的顺序（`diagnoseTitleRef()`），
+否则会出现「resolve 因精确歧义返回 undefined，这里却判成 not-found 然后新建」的漏洞——
+0.8.0 只判了包含匹配，正是漏在这里。
+
+**这类机制是历史重复数据的根源**，两个方向都要记住：
+
+- **`sessions.workspaceFor()` 显式传标题**：`workspaceRegistry.create(path)` 不传 `title` 时宿主用目录 basename
+  当标题，于是「按目录登记」会自动造出**同名工作区**，而且每撞一次就再冒一个，不是一次性脏数据。
+  现在 `distinctTitle()` 会挑一个不与已有标题撞车的名字：撞了就**逐段加长**
+  （`proj` → `b/proj` → `D:/idea/b/proj`），极端情况（不同路径末段全同且都很深）才退回 `（2）` 数字后缀。
+- **不改已有工作区的标题**：`distinctTitle()` 只决定本次新建那一个。谁先登记谁拿短名，先后顺序变了标题会变，
+  但已有条目一个字都不动——改别人的标题等于把用户认过的名字偷偷换掉。
+- 已登记的目录仍原样返回（`resolveByPath(cwd)` 命中就直接返回）。
+
+为什么用 `/` 拼标题：标题是给人读的，`/` 任何平台都不需要转义，且天然表示「父/子」，与路径语序一致
+（`idea/proj` 读作「idea 下的 proj」）。
 
 ## 模块拆分轴
 
@@ -593,7 +882,19 @@ subagent 保留读写与执行，但不能再派发、不能再汇报。
 | 提示注入失败 | 只 warn | `sessions.js` `hint()` |
 | 没有 `webServer`（headless） | 不注册看板路由，记一条 info；工具与派发不受影响 | `board.js` `registerBoardRoutes()` |
 | 看板 GET 非本机且非同源 | `403 {"ok":false,"error":"看板只对本机或同源页面开放"}` | `board.js` `readAllowed()` |
-| 看板 POST 跨站 | `403 {"ok":false,"error":"跨站请求被拒绝"}`，不产生副作用 | `board.js` `sameOrigin()` |
+| 看板 POST 缺自定义头 | `403 {"ok":false,"error":"看板写操作需要同源页面或带 `x-dsh-mini-superagent` 头的本机调用"}` | `board.js` `writeAllowed()` |
+| `GET /board/retired` 而 `dispatch.retired` 不存在 | 返回空表 `{ok:true,count:0,dropped:0,entries:[]}`，不 500 | `board.js` `retiredSnapshot()` |
+| `memoryStats()` 抛错或不存在 | 快照里 `memory: null`、`counts.retired: 0`，看板其余部分照常 | `board.js` `memoryOf()` / `resolveMemory()` |
+| `memoryStats()` 是 async（当前实现） | `GET /board` 先 `await resolveMemory()` 再传进 `boardSnapshot(dispatch, memory)`；快照层同步降级给 `null` | `board.js` `createBoardHandler()` / `boardSnapshot()` |
+| 报告状态不在直通列表里（如 `progress`） | 只入库，`dispatch_report` 返回 `admission:'ledger'` 与 `relayed:false` | `dispatch.js` `admissionOf()` / `report()` |
+| 报告超过单条预算 | 入库即 `clip`，条目带 `entry.truncated`（原始长度），返回值透出 `truncated` | `dispatch.js` `#admitEntry()` |
+| 账本超过 `ledgerMaxTasks` / `ledgerMaxDays` | 非活跃任务按「已归档优先 → 最老 `updatedAt`」退休，留一条 13 字段薄记录 | `dispatch.js` `enforceLedgerCap()` / `#retire()` |
+| 退休留痕超过 `ledgerMaxRetired` | 丢最老的留痕，`retiredDropped += 1`（**不落盘，重启归零**） | `dispatch.js` `#trimRetired()` |
+| 会话销毁 | 清它的 `targets` 条目（`clearTargetsOnDispose` 默认开），**不删任务** | `index.js` `agent/disposed` → `dispatch.forgetTargets()` |
+| 「已投递未读」超过 `inputPendingTtlMs` | 改写成 `inputUnknownAt`（「不知道」而非「在读」），看板不再显示「待读」 | `dispatch.js` `sweepMemory()` |
+| 工作区引用命中多个（任何一级） | `resolve()` 返回 `undefined` + warn 出带 `path` 的候选，**不静默取第一个** | `workspaces.js` `resolve()` / `describeMatches()` |
+| `resolveOrCreate` 遇到歧义 | `{workspace: undefined, created: false, reason: 'ambiguous'}`，**绝不新建** | `workspaces.js` `resolveOrCreate()` / `diagnoseTitleRef()` |
+| 按目录登记工作区时标题撞车 | `distinctTitle()` 逐段加长（`proj` → `b/proj`），**不改已有工作区的标题** | `sessions.js` `workspaceFor()` / `distinctTitle()` |
 | 看板操作被状态拒绝 | `409`，中文原因（取消/重试的前置条件） | `dispatch.js` `retry()` / `cancel()` |
 | 看板 `/target` 缺会话 | `400 {"ok":false,"error":"需要 session_id"}` | `board.js` `createBoardHandler()` |
 | 看板 `/target` 解析不到工作区 | `409`，错误文本带现有工作区候选 | `dispatch.js` `setTarget()` |
@@ -625,13 +926,21 @@ subagent 保留读写与执行，但不能再派发、不能再汇报。
 ## 可测试性
 
 - 纯逻辑测试 `test/tasks.test.js`（13 个用例）：`TaskTable`、`clip`、`oneLine`、`lastAssistantText`。
-- 看板测试 `test/board.test.js`（26 个用例）：
-  - 8 个快照用例（拍平、`last_report`、截断、计数、排序、200 条上限、版本/时间）；
-  - 11 个既有路由用例（GET 200/404/403/同源 200、cancel、retry、跨站 403、同源 POST、任务不存在 404、坏 JSON 400、失败 409）；
-  - 7 个 0.5.0 用例（工作区列表与归档计数、`/archive`、`/target` 设置/清除/缺参/解析失败、快照 `targets`）。
+- 看板测试 `test/board.test.js`：
+  - 快照用例（拍平、`last_report`、截断、计数、排序、200 条上限、版本/时间）；
+  - 既有路由用例（GET 200/404/403/同源 200、cancel、retry、跨站 403、同源 POST、任务不存在 404、坏 JSON 400、失败 409）；
+  - 0.5.0 用例（工作区列表与归档计数、`/archive`、`/target` 设置/清除/缺参/解析失败、快照 `targets`）；
+  - 记忆治理用例：`memory` 块的形状、`counts.retired`、宿主没有 `memoryStats` 或它抛错时的 `null` 降级、
+    `retiredSnapshot()` 的倒序/`dropped`/缺 `dispatch.retired` 的空表、以及 `GET /board/retired` 的准入与形状。
   路由用假的 `req`/`res` 直接调 handler，不需要起 HTTP 服务。
-- 工作区测试 `test/workspaces.test.js`（11 个用例）：日期键、`【派发】`标题、安全目录名（非法字符/空白/长度）、
+- 记忆治理测试 `test/memory.test.js`：准入分级（终态恒直通、配置只扩展）、入库截断与 `truncated`、
+  窗口口径、TTL 把 `inputPendingAt` 改写成 `inputUnknownAt`、`forgetTargets`、
+  账本封顶的退休顺序与留痕字段、`retiredDropped` 不落盘、v4 读写的向后兼容。
+- 工作区测试 `test/workspaces.test.js`：日期键、`【派发】`标题、安全目录名（非法字符/空白/长度）、
   根目录优先级，以及解析顺序（id、绝对路径、标题精确、标题包含、找不到、无注册表）；用假注册表，只在 `ensure` 之外不碰磁盘。
+- 工作区解析回归 `test/workspace-resolve.test.js`：`resolveOrCreate()` 的 `reason` 归因
+  （精确歧义 / 包含歧义 / not-found / 空引用不给 reason / 成功时字段缺席），以及
+  `SessionGateway.workspaceFor()` 的标题去重（仓库根 vs 包根不再同名、逐段加长、不改已有标题、无注册表安全返回）。
 - 路由与投递测试 `test/router.test.js`（14 个用例）：路由模式的触发时机与幂等、worker 递归派发不被收窄、
   `restrictRouter: false` 的退路、`restrictTools` 只 deny 真存在的工具（未知名字会让 `restrict` 抛错）、
   `model` 从 `launch` 一路传到 `createWorker`、`applyModel` 的能力缺失分支、报告重试复用同一 id 与 `holds` 判重。
@@ -644,8 +953,12 @@ subagent 保留读写与执行，但不能再派发、不能再汇报。
   `test/subagent.test.js`（6 条：收窄 `dispatch_*`、普通会话不收窄、worker 自己不算、嵌套链、销毁回收、成环保护）、
   `test/prepare.test.js`（9 条：目录命名与幂等、命令在父目录执行、已存在跳过、无命令只建目录、失败带输出、
   与 `start()` 的集成、失败不建会话、未配置时不动 cwd）。
-- `npm test` 跑 `node --test`，全量 **158 个用例**（152 pass / 6 cancelled，后者是 `tasks.test.js` 里
-  依赖父用例超时语义的既有用例，与本次改动无关）。
+- `npm test` 跑 `node --test`。**用例数不写死在文档里**：它每轮都在涨（本轮新增了 `test/memory.test.js`、
+  `test/workspace-resolve.test.js`，并扩大了看板与放置用例），写死一个数字必然在下一次改动时又变成错的叙述——
+  这正是本仓库「文档漂移」的老问题。要数字就看 `npm test` 的输出。
+  （历史口径：0.8.1 前后是 111 条，P0/P1 两批之后是 158 条。当前以测试文件为准。）
+  注意其中有一批用例依赖父用例的超时语义，在 `node --test` 下会显示为 `cancelled`：
+  **cancelled 不是失败，但也别把它当成通过。**
 - 宿主相关行为（建会话、投递、事件顺序、真实 HTTP 连接、浏览器渲染、真实 mkdir/归档）没有单元测试，靠 README 的实测记录覆盖；
   看板与输入框的**界面一次都没在真浏览器里跑过**（见 README「验证记录」与 [composer.md](composer.md)）。
 - 想手工验证：`dispatch_list` 看 `version` 与 `max_workers`；`dispatch_inspect` 看 `cwd`、`recent_reports`、`last_worker_text`；

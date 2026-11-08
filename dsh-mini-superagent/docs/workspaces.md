@@ -1,7 +1,7 @@
 # 工作区
 
 0.4.0 新增。三件事：**默认工作区**（含固定主会话）、**每天一个【派发】工作区**（子会话住这里）、**按工作区派发与自动归档**。
-Host 侧实现全在 `src/workspaces.js`（约 160 行），`dispatch.js` 负责把解析结果落到任务与会话上。
+Host 侧实现全在 `src/workspaces.js`（约 400 行），`dispatch.js` 负责把解析结果落到任务与会话上。
 
 ---
 
@@ -113,18 +113,82 @@ dispatch_launch({ workspace: "某项目", ... })
 3. **标题精确匹配**：`title.toLowerCase() === value.toLowerCase()`。
 4. **标题包含匹配**：`title.toLowerCase().includes(value.toLowerCase())`。
 
-关于第 4 步，0.7.0 起有两条约束（都是为了不再「静默挑错一个」）：
+### 每一级都遵守同一条规矩：命中多个就返回 `undefined`
+
+> **旧文档把第 3 步写成「标题精确匹配」，暗示它是唯一的、没有歧义——那是错的。**
+> 精确匹配同样可能命中多个同名工作区，而且它的歧义比包含匹配**更难发现**：查询看起来「就是这个名字」，
+> 调用方很容易以为是唯一的。本版未发布起，四级一律按同一条规矩处理：
+
+```text
+命中 0 个  → undefined（交给调用方决定要不要新建）
+命中 1 个  → 返回它
+命中多个   → undefined + warn 出全部候选，绝不静默取第一个
+```
+
+实测踩到的场景（2026-11-08 12:10）：仓库根 `D:\idea\dsh-mini-superagent` 与包根
+`D:\idea\dsh-mini-superagent\dsh-mini-superagent` 各自登记了一条标题都叫 `dsh-mini-superagent` 的工作区
+（宿主按目录 basename 起标题）。用户点「dsh-mini-superagent」时被静默送进**另一个盘上的另一个目录**，
+日志里一行线索都没有。
+
+两条配套取舍：
+
+- **候选文案必须带 `path`**：`describeMatches()` 输出 `标题（路径，id=…）`。同名工作区之间 id 对人毫无区分度
+  （都是一串 uuid），而 path 一眼能看出「哦，这是包根不是仓库根」。`dispatch_workspaces` 的列表里也是 path 才有用。
+- **warn 而不是 throw**：调用方要的是「解析不到」这个统一信号；抛错会改掉 `setTarget()` 的错误信息并牵动 `dispatch.js`。
+  `setTarget()` 的 `!workspace` 分支本来就会把现有工作区全列给用户，够用。
+
+关于第 4 步的两条约束（0.7.0 起）：
 
 - 单字符查询（按码点数，代理对算 1 个）**跳过**包含匹配——`'a'` 命中「第一个含 a 的工作区」没有意义；
 - 包含匹配**收集全部命中**：0 个 → `undefined`；1 个 → 返回它（`resolve('派发')` 仍命中【派发】工作区）；
   多个 → 记一条 warn 列出全部候选，返回 `undefined`，**不抛错**。
 
-不抛错是有意的：`dispatch.setTarget` 依赖「找不到返回 undefined」这个契约，抛错会改变它的错误信息
-并牵动调用方。返回 undefined 之后，`setTarget` 的 `!workspace` 分支本来就会列出全部工作区，够用。
-
 注意「歧义」与「不存在」必须分开处理，否则会凭空建重复目录：`resolveOrCreate` 在真正新建之前
-会再判一次歧义（`fuzzyMatches`），命中多个就 warn 并放弃新建——而不是把歧义当成「不存在」
-然后 `mkdir` 一个同名新目录。
+会再判一次歧义（`diagnoseTitleRef`，判定顺序与 `resolve` **完全一致**），命中多个就 warn 并放弃新建——
+而不是把歧义当成「不存在」然后 `mkdir` 一个同名新目录。
+
+### `resolveOrCreate()` 的可选 `reason`
+
+返回值是 `{ workspace, created, reason? }`。**`reason` 只在没拿到工作区时出现**，取值两个：
+
+| `reason` | 含义 | 会发生什么 |
+| --- | --- | --- |
+| `'ambiguous'` | 注册表里有多个候选 | **绝不新建**——那些目录是真的存在的，再建一个同名目录只会把「有两个候选」变成「多出一个重复工作区」 |
+| `'not-found'` | 确实不存在 | 按 `create` 决定新建与否 |
+| 缺席 | 解析成功 / 新建成功 / **空引用** | 调用方按 `undefined` 判断「拿到了」 |
+
+**空引用不给 `reason`**：调用方没给目标，不是「找不到」。给它贴 `'not-found'` 只会让 `dispatch.js`
+为一句空话编出一段错误文案。
+
+**`reason` 是给调用方选文案用的**，不是日志级别。0.8.0 及更早两者都是 `undefined`，`dispatch.js`
+只能把所有失败都写成「找不到工作区「…」，且允许新建被关闭」——而这句话在歧义时是**假的**（并没有人关掉新建）。
+这才是「用户明明没关新建，却被告诉新建被关了」的成因。
+
+不要给调用方再加第三个布尔值来做这件事：`reason` 就是那个区分位。
+
+---
+
+## 按目录登记工作区时会自动造出标题（历史重复数据的根源）
+
+不指定 `workspace` 的派发，最后可能落到「按任务目录登记一个工作区」这条路上（`SessionGateway.workspaceFor(cwd)`）。
+它曾经是重复工作区的来源，两个机制要记住：
+
+- **`workspaceRegistry.create(path)` 不传 `title` 时，宿主用目录 basename 当标题。** 于是「仓库根」与「包根」
+  各自登记出一条**同名**工作区，而且它不是一次性脏数据——每次按目录反查登记都会再撞一次。
+  现在 `workspaceFor()` **显式传标题**（`registry.create(cwd, this.distinctTitle(cwd, items))`）。
+- **`distinctTitle()` 撞名时逐段加长，不改已有工作区的标题。**
+  先试末段（`proj`），撞了就加一段（`b/proj`），再撞就继续（`D:/idea/b/proj`）；
+  极端情况（不同路径末段全同且都很深）才退回 `（2）` 数字后缀——有后缀总比再产出一条同名工作区好。
+  用 `/` 拼接是因为标题是给人读的，`/` 任何平台都不需要转义，且天然表示「父/子」。
+
+三条硬约束（来自实际踩坑）：
+
+1. **人能从标题看出是哪个目录**：用路径末段拼接，而不是 uuid、随机数或自增号；
+2. **不与已有标题重复**：大小写不敏感比较；同一目录的既有条目不算撞车（那种情况宿主会复用同一个工作区）；
+3. **不改已有工作区的标题**：只决定本次新建那一个。谁先登记谁拿短名，先后顺序变了标题会变，
+   但已有条目一个字都不动——改别人的标题等于把用户认过的名字偷偷换掉。
+
+已登记的目录仍然**原样返回**（`resolveByPath(cwd)` 命中就直接返回），不新增条目、不换标题。
 
 解析不到且 `create_workspace !== false` 时：
 
@@ -140,8 +204,43 @@ dispatch_launch({ workspace: "某项目", ... })
 找不到工作区「…」，且允许新建被关闭。现有：<标题>（<路径>）；…
 ```
 
-同时给 `workspace` 和 `cwd` 时，**工作区的路径优先**：任务 cwd 取 `target.path`，`cwd` 被忽略。
+同时给 `workspace` 和 `cwd` 时，**工作区的路径优先**：任务 `cwd` 取 `target.path`，`input.cwd` 被忽略
+（`src/dispatch.js` 的 `cwd: target?.path ?? this.sessions.cwdFor(agent, input.cwd)`）。
 要指定别的目录，别用 `workspace`，用 `cwd`。
+
+### 参数优先级：显式参数高于「记住的设置」
+
+`dispatch_launch` 可能同时收到三类「工作目录/工作区」输入：调用方给的 `workspace`、调用方给的 `cwd`、
+以及会话里记住的派发目标（输入框选择器 / `@` 写入的 auto 或具体工作区）。判据只有一条：
+
+> **显式参数优先级高于记住的设置。记住的 auto / 目标只是「调用方没指定时的默认」，
+> 它没有资格压掉调用方当场给出的参数。**
+
+| 调用方给了什么 | 结果 |
+| --- | --- |
+| 只给 `cwd`，会话有 auto 或记住的目标 | **`cwd` 胜**：auto 与记住的目标这一轮当没设过 |
+| 只给 `cwd`，会话没有目标 | 用 `cwd` |
+| 只给 `workspace` | 用 `workspace` |
+| `workspace` 与 `cwd` 同时给 | **`workspace` 胜**（已发布语义，不改）——但 `cwd` **不被丢弃** |
+
+`workspace` 与 `cwd` 同时给时，两者的分工是「**会话住在 workspace 里，活干在 cwd 里**」：
+`task.cwd` 保留 `cwd`，会话归属给 `workspace`，再由 `start()` 的 `enterDirectory(agent, task.cwd)` 把工作目录切过去。
+这样侧边栏归到正确的工作区，读写落在调用方指定的目录。
+
+> 这条是**实际踩过的坑**（2026-11-08 12:10）：主会话目标为 auto 时
+> `dispatch_launch({ cwd: 'D:\idea\dsh-mini-superagent' })` 派出的两个子会话分别落到了
+> `…\Documents\mini-superagent\派发\2026-11-07` 与 `…\Documents\mini-superagent`，
+> 用户给的 `cwd` 从头到尾没生效、`src/` 一个字节没变，现场看起来像「根本没派发」。
+> 根因是旧代码 `target?.path ?? cwdFor(agent, cwd)`：只要存在任何 target（包括 auto），
+> 显式 `cwd` 一次都没被读到，而且**没有任何提示**。所以现在
+> **静默丢弃调用方输入被当作缺陷**——要么让参数生效，要么如实说清它去哪了。
+
+还有一个相关的连带修正：**显式 `cwd` 不做日期兜底**。`placementFor()` 现在在「没有目标」的分支里
+先看 `task.cwdExplicit`——调用方明确给了目录，就不该再把它塞进当天【派发】工作区
+（那是「没指定」时的兜底，不是「指定了就别处去」）。`workerWorkspace: 'cwd'` 依旧跳过日期兜底，两者并存。
+
+给的是**绝对路径**且没注册时的行为、以及 `create_workspace: false` 的报错文案，见下一节。
+报错文案现在按归因分三种（歧义 / 找不到且关了新建 / 找不到但试过新建），不再一律写成「且允许新建被关闭」。
 
 ---
 
@@ -223,8 +322,17 @@ dispatch_launch({ workspace: "某项目", ... })
 - **没有 `workspaceRegistry` 时**：默认工作区、【派发】工作区都建不出来，`day` 兜底退化为「会话按任务 cwd 建」；
   显式指定 `workspace` 的派发会报「找不到工作区…，且允许新建被关闭」（实际是注册表不可用，报错文案没区分这一种）。
   注意有目标时的放置只查 `list()`，注册表不可用 = 查不到目标 = 等于没有目标，同样走兜底。
-- **标题匹配是模糊的**：先精确、再包含；包含匹配可能命中不想派发的那个工作区。宁可用 id 或绝对路径。
+- **标题匹配是模糊的**：先精确、再包含；包含匹配可能命中不想派发的那个工作区。
+  而且**精确匹配也可能歧义**（同名不同目录，见上文）——两种歧义都返回 `undefined` 并 warn 出带 `path` 的候选。
+  宁可用 id 或绝对路径。
 - **同名工作区不合并**：按标题新建时只看目录名，已存在就复用；不同标题可能落到同一个 `safeDirName` 目录，此时复用已有工作区。
+- **按目录登记会自动造标题**：`dispatch_launch` 没给 `workspace` 时，子会话可能按任务目录登记出一个新工作区，
+  标题由 `distinctTitle()` 从路径末段加长而来（`proj` → `b/proj`），**不改已有工作区的标题**。
+  这类自动登记是历史重复数据的根源；见到陌生工作区先用 `dispatch_workspaces` 看它的 `path`。
+- **显式 `cwd` 优先于记住的派发目标**：只要调用方给了 `cwd`，会话里的 auto / 目标这一轮不参与
+  （判据是「显式参数高于记住的设置」）。`workspace` 与 `cwd` 同时给时 `workspace` 胜，
+  但 `cwd` 会被保留为任务的工作目录（会话住在 workspace、活干在 cwd）。
+  显式 `cwd` 也不再触发日期工作区兜底。
 - **不会自动清理目录**：归档只收起会话，不删 `<workspaceRoot>/派发/<日期>` 下的文件，也不删工作区。
 - **`leadSessionId` 改了不会迁移**：旧默认主会话仍在旧工作区，新的一次启动会再建一个。
 - **归档失败会一直重试**：没有退避；宿主不支持 `archiveSession` 时每次巡检都会失败一次（日志可见）。
@@ -236,10 +344,11 @@ dispatch_launch({ workspace: "某项目", ... })
 | 现象 | 先查 | 处理 |
 | --- | --- | --- |
 | 没有默认工作区 | 日志 `创建默认工作区失败`；`workspaceRoot` 是否可写 | 修目录权限/换 `workspaceRoot`；`provisionDefaultWorkspace` 为 true 才自动建 |
-| `dispatch_launch` 报「找不到工作区 … 且允许新建被关闭」 | `create_workspace` 是否为 false；`dispatch_workspaces` 里有没有 | 去掉 `create_workspace: false`，或用 id/绝对路径 |
+| `dispatch_launch` 报「找不到工作区 … 且允许新建被关闭」 | `create_workspace` 是否为 false；`dispatch_workspaces` 里有没有；日志里有没有「有歧义，命中 N 个」 | 若是**歧义**，那句话是假的（没人关掉新建）：日志里会列出带 `path` 的候选，改用 id 或绝对路径。否则去掉 `create_workspace: false` |
+| 两个工作区标题一样 | `dispatch_workspaces` 里它们的 `path` 与 `id` | 本版（未发布）起按目录登记会用 `distinctTitle()` 避开撞名，但**已存在的**同名条目不会被改名（改了等于偷换用户认过的名字）；需要区分就在标题上认 `path` |
 | 子会话不在预期的项目工作区 | 目标工作区是否还在注册表里（`dispatch_workspaces`）；`workspace_title` 与 `host_workspace` 分别是什么 | 目标被删了才会退回【派发】；重新指定一个存在的目标。有目标时它一定在目标里，与 `workerWorkspace` 无关 |
 | 冒出 `【派发】YYYY-MM-DD` 工作区 | 是否真的没给目标（或目标已被删除） | 这是兜底行为，不是 bug；不想要兜底就设 `workerWorkspace: cwd` |
-| 子会话工作目录不对 | 是否同时给了 `workspace` 和 `cwd` | 两者同时给时 workspace 路径优先；改用 `cwd` |
+| 子会话工作目录不对 | 是否同时给了 `workspace` 和 `cwd`；会话里是否记住了派发目标 | 显式 `cwd` 现在**优先于**记住的目标；两者同时给时 `workspace` 胜、`cwd` 仍是任务工作目录。若仍不对，用 `dispatch_inspect().cwd` 看实际值 |
 | 看板 `counts.archived` 不涨 | `archiveAfterHours` 是否为 0；任务是否已结算；`updatedAt` 是否够旧 | 调小保留期或手动 `POST /board/archive` |
 | 归档一直失败 | 看板任务卡的 `archive_error`；日志 `归档子会话 … 失败` | 宿主是否提供 `workspaceRegistry.archiveSession`；目录/会话是否还在 |
 | 默认主会话不见了 | `leadSessionId` 是否被改过；工作区是否被删 | 改回原 id，或让插件重建（随便重启即会创建） |

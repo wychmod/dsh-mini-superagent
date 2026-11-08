@@ -1,6 +1,6 @@
 # 任务看板
 
-0.3.0 新增、0.5.0 补齐归档与工作区视图的常驻面板。Host 半边 `src/board.js` 提供快照与四个写操作（取消 / 重试 / 归档 / 派发目标），
+0.3.0 新增、0.5.0 补齐归档与工作区视图、本版（未发布）补齐「已退休」视图与记忆治理口径的常驻面板。Host 半边 `src/board.js` 提供快照与四个写操作（取消 / 重试 / 归档 / 派发目标），
 浏览器半边 `client/index.js` 负责渲染。两边只通过同源 HTTP 通信，不共享内存、不走 Remote/RPC。
 
 ---
@@ -30,7 +30,7 @@
 
 ```text
 ┌ 并发 2/6   排队 1   总计 7   失败 3          更新于 13:42:07 ┐
-│ [全部 7] [进行中 3] [需要处理 3] [已归档 2]                    │
+│ [全部 7] [进行中 3] [需要处理 3] [已归档 2] [已退休 1]         │
 │ [全部工作区 ▾]                              [立即归档]        │
 ├──────────────────────────────────────────────────────────────┤
 │ ● 运行中  重构 auth 模块   批次  第 2 次  3 分 12 秒 [取消]      │
@@ -42,12 +42,18 @@
 
 - **顶部指标**：`并发 running/max`、`排队`、`总计`、`失败`（有失败时红字），右侧「更新于 HH:MM:SS」。
   指标来自快照的 `concurrency` 与 `counts`；**「总计」= `counts.total − counts.archived`**（归档只在它自己的 chip 里计数）。
-- **过滤 chip（4 个）**：
+- **效果条**：`完成`、`成功率`、`平均耗时`（中位数）、`并行节省`。它们的口径受**记忆治理窗口**约束：
+  只统计 `updated_at >= memory.window.since` 且在最近 `memory.window.tasks` 条之内的已结算任务，
+  **归档与退休任务一律不进**。窗口文案（`最近 7 天 / 最近 200 条`）显示在 hover 里；
+  快照没有 `memory` 块时降级为「窗口未知 · 全部已结算」，**不假装窗口存在**（否则同一个百分比会在两种口径间悄悄漂移）。
+- **过滤 chip（5 个）**：
   - `全部`（默认）：`!archived_at`，**不含已归档**；
   - `进行中`：未归档且 `running`/`queued`；
   - `需要处理`：未归档且 `failed`/`interrupted`/`blocked`；
-  - `已归档`：`archived_at` 非空。
-  每个 chip 的数字按**当前工作区筛选后**的任务算。
+  - `已归档`：`archived_at` 非空；
+  - `已退休`：**不从快照取数**，选中时才走 `GET /board/retired` 单独取（见下文「已退休视图」）。
+  前四个 chip 的数字按**当前工作区筛选后**的任务算；退休 chip 的数字来自 `counts.retired`（即 `memory.retired.count`），
+  宿主不给 `memory` 时显示 `—` 而不是 `0`——`0` 会被读成「确实一条都没有」。
 - **工作区下拉**：`全部工作区` + 快照 `workspaces` 列表；选中后与状态 chip 取交集（先按 `workspace_id` 过滤，再套 chip）。
 - **立即归档**：两步确认。第一次点击进入确认态（按钮变「确认归档」），4 秒内不再点自动回落；确认后
   `POST /board/archive`，结果用提示条显示「扫描 N，归档 N，失败 N」。
@@ -59,7 +65,7 @@
 - **归档行**：整行 0.55 透明度、状态点转灰、无脉动、**没有取消/重试按钮**；相对时间按 `刚刚 / N 分钟前 / N 小时前 / N 天前` 显示。
 - **批次聚合**：`group` 非空的行以该组在服务端底序里第一次出现的位置为锚点，把同组任务整体挪到一起（只改视觉顺序，不动底序）。
 - **跳转会话**：整行可点（`worker_session_id` 非空时），`Enter`/`Space` 同样触发；按钮会吞掉冒泡。
-  成功时不提示；失败显示「打不开子会话 `<id>`：<原因>」；归档行先弹一句「该子会话已归档，可能已不在会话列表里」，但仍然尝试打开。
+  成功时不提示；失败显示「打不开子会话 `<id>`：<原因>」；**已归档的行不可点**（见下节「跳转会话」）。
 - **状态点**：颜色 + 文字双通道，不只靠颜色。只有 `running` 脉动；`prefers-reduced-motion: reduce` 下动画关闭。
 - **耗时**：`queued` 显示「等待中」；`running` 在两次轮询之间每秒走表（服务端 `elapsed_ms` + 本地经过时间）；
   其余状态用服务端算好的值。不足 1 秒按 1 秒显示。
@@ -80,15 +86,21 @@
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
-| GET | `/dsh-mini-superagent/board` | 返回整块快照，响应头 `cache-control: no-store` |
+| GET | `/dsh-mini-superagent/board` | 返回整块快照（含 `memory` 块），响应头 `cache-control: no-store` |
+| GET | `/dsh-mini-superagent/board/retired` | 只读：已退休任务的留痕，`{ok, count, dropped, entries[]}` |
 | POST | `/dsh-mini-superagent/board/cancel` | body `{"task_id":"t-..."}`，取消任务 |
 | POST | `/dsh-mini-superagent/board/retry` | body `{"task_id":"t-..."}`，重试任务 |
 | POST | `/dsh-mini-superagent/board/archive` | 无 body，立即跑一次归档巡检 |
 | POST | `/dsh-mini-superagent/board/target` | body `{"session_id":"session-...","workspace":"id/路径/标题或空串"}`，设置/清除派发目标 |
-| GET | `/dsh-mini-superagent/board/selfcheck` | 诊断：宿主侧能力、工作区、默认主会话、`client.inGraph` / `client.ready`、启动图模块列表 |
+| GET | `/dsh-mini-superagent/board/selfcheck` | 诊断：宿主侧能力、工作区、默认主会话、`client.inGraph` / `client.ready`、启动图模块列表、`memory` 口径 |
 | POST | `/dsh-mini-superagent/board/client-ready` | 浏览器半边在 `apply` 末尾自报 `{ok, registered:[...]}`，宿主记进 `client.ready` |
 
 请求体上限 64 KiB，必须是合法 JSON（`/archive` 不需要 body）。
+
+**准入分档**：只读端点（`GET /board`、`GET /board/retired`、`GET /selfcheck`）走 `readAllowed`，
+写端点走 `writeAllowed`（= 读的规则 + 自定义头）。**`GET /board/retired` 不要求 `x-dsh-mini-superagent` 写头**：
+它只读、不含正文、只回答「这条任务什么时候因为什么被移出账本」，把它当写操作对待会让 `curl`、
+脚本、以及将来任何只读看板都得多带一个无意义的头。退休本身**不是**写操作——退休由宿主封顶逻辑决定，面板只能看。
 
 ### 两个诊断入口
 
@@ -111,23 +123,57 @@
 
 ```json
 {
-  "version": "0.7.0",
+  "version": "0.8.0",
   "generatedAt": "2026-11-05T10:42:07.000Z",
   "concurrency": { "running": 2, "queued": 1, "max": 6 },
-  "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0, "archived": 2 },
+  "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0, "archived": 2, "retired": 3 },
   "workspaces": [ { "id": "ws-…", "title": "mini-superagent", "path": "C:\\Users\\…\\Documents\\mini-superagent" } ],
   "targets": { "session-…": { "workspace_id": "ws-…", "title": "项目 A", "path": "D:\\proj\\a" } },
   "truncated": null,
+  "memory": {
+    "window": { "days": 7, "tasks": 200, "since": "2026-10-29T10:42:07.000Z" },
+    "ledger": { "tasks": 7, "retired": 3, "archived": 2, "retiredDropped": 0, "capPerTask": { "summary": 6000, "detail": 4000 } },
+    "admission": { "direct": 12, "ledger": 40, "directStatuses": ["done", "blocked", "failed", "cancelled"] },
+    "pending": { "inputs": 1, "unknown": 0 },
+    "retired": { "count": 3, "latestAt": "2026-11-05T09:00:00.000Z" }
+  },
   "tasks": [ { "task_id": "t-m0abc-1", "…": "…" } ]
 }
 ```
 
 - `counts` 按**全量**任务统计；`archived` 是带 `archivedAt` 的任务数（不是状态）。
+- `counts.retired` 取 `memory.retired.count`——退休任务**不在** `tasks` 里，所以只能从 `memory` 拿。
+  拿不到就是 `0`（= 这块信息宿主没提供），不是「一条都没有」。
 - `workspaces` 是工作区注册表快照（`id` / `title` / `path`），注册表不可用时为空数组；面板用它做工作区下拉。
 - `targets` 是每个主会话当前的派发目标（`session_id → {workspace_id,title,path}` 或 `{auto:true,…}`）；没有目标的会话不出现。
 - `tasks` 最多 200 条；排序：`running` → `queued` → 其余按 `updated_at` 倒序；同权重按 `updated_at` 倒序。
 - `truncated`：任务总数超过 200 时为 `{shown, total}`，否则 `null`。**这是给界面的提示**——没有它的时候「总计 500 / 列表 200」看起来像数据丢了。
-- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.7.0`）。
+- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.8.0`）。
+- `memory`：记忆治理口径，**形状逐字冻结**为 `memoryStats()` 的返回值。五块的含义：
+  - `window`：指标窗口（最近 `days` 天 / `tasks` 条，`since` 是窗口起点 ISO 串）；
+  - `ledger`：**活表**条数、退休留痕数、归档数、被丢弃的留痕数（`retiredDropped`，**不落盘、重启归零**）、单条报告预算；
+    `ledger.tasks + retired.count` 才是「曾经有过多少任务」；
+  - `admission`：准入决策计数（`direct` / `ledger`）与当前直通状态列表（`directStatuses` 含硬编码终态）；
+  - `pending`：仍在 TTL 内的「已投递未读」数与已降级成 unknown 的数量；
+  - `retired`：留痕条数与最近一次退休时刻。
+  **`memory: null` 是合法值**：旧版宿主、headless 宿主、或 `memoryStats()` 抛错时都是 `null`。
+  显式给 `null` 而不是省略字段，是为了让客户端能区分「宿主没提供」与「这是旧版宿主」——两者都按「窗口未知」降级，
+  但排障时看得出差别。
+
+### 一个必须写下来的实现细节：`memoryStats()` 是 async
+
+`Dispatch.memoryStats()` 现在是 **async** 的（读活表与留痕两份，将来还可能读更多）。于是：
+
+- **`GET /board` 必须 `await` 之后再传进去**：`boardSnapshot(dispatch, await resolveMemory(dispatch))`。
+  漏了 `await` 会把一个 Promise 塞进快照，而 `JSON.stringify(Promise)` 得到 `{}`——
+  客户端会看到一个**空的 memory 块**，然后以为「宿主给了一个空块」，比 `null` 更难排查。
+- **快照层必须保留同步降级**：`boardSnapshot(dispatch, memory)` 的第二个参数省略时，
+  它会自己试一次同步取值；拿到 thenable 就**给 `null`**（`memoryOf()` 里的
+  `if (stats && typeof stats.then === 'function') return null`），绝不把 Promise 传下去。
+  这样任何直接调 `boardSnapshot(dispatch)` 的旧代码、测试或脚本都不会被 async 化影响。
+- `resolveMemory()` 是唯一负责「await 掉 thenable」的地方，失败一律返回 `null`：
+  **指标口径坏掉不该让人看不见任务。**
+- `POST /archive` 的响应里也有 `counts`，它走同一条 `await resolveMemory(...)` 路径。
 
 任务字段（`boardTask` 拍平后的形状）：
 
@@ -152,7 +198,15 @@
 | `report_count` | number | 报告条数（上限 50） |
 | `last_report` | object \| null | `{at, status, summary}`，没有报告时 `null` |
 | `last_text_preview` | string | worker 最后一段输出的前 500 字符 |
+| `input_pending_at` | ISO 8601 \| null | 「已投递未读」的投递时刻；**只在仍在 TTL 内时才有值**（超时被改写成 `input_unknown_at`） |
+| `input_read_at` | ISO 8601 \| null | worker 真把这条消息读进上下文的时刻 |
+| `input_unknown_at` | ISO 8601 \| null | 「不知道读没读到」的判定时刻（P0-4 的 TTL 到期）。看板据此**不再显示「待读」** |
 | `error` | string | 仅失败任务出现，启动失败原因 |
+
+> `input_pending_at` 与 `input_unknown_at` 的区别要记住：前者是**待读**（一个更强的断言：消息还在收件箱里等人读），
+> 后者是**不知道**（更弱也更诚实的断言）。`card()` 里 unknown 会压过 pending——
+> 弱断言不该被强断言盖住。宿主不发 `session/event` 的部署里，`input_pending_at` 曾经会**永久**挂着
+> 「已投递未读」，比不显示更误导人。
 
 ### POST 响应
 
@@ -196,6 +250,67 @@
 - 400：缺 `session_id`（或 URL/JSON 格式错）。
 - 409：`workspace` 解析不到（id / 绝对路径 / 标题都试过）；错误文本带现有工作区候选。
 - 设置成功后写入任务表落盘的 `targets`；`dispatch_launch` 没显式给 `workspace` 时使用它。语义见 [composer.md](composer.md)。
+- `/target` 的工作区解析走 `WorkspaceGateway.resolve()`，**任何一级命中多个都会返回 409**（而不是静默取第一个）。
+  错误文本里的候选带 `path`：**同名工作区之间 id 没有区分度**（仓库根与包根都可能叫 `dsh-mini-superagent`），
+  只有路径能让人分清是哪一个。这是本版（未发布）的行为变化，旧文档写的「标题精确匹配」暗示它唯一、无歧义，那是错的。
+  细节见 [workspaces.md](workspaces.md)。
+
+### GET /board/retired（已退休视图）
+
+只读诊断视图，回答「这条任务什么时候、因为什么被移出账本」。准入与 `GET /board` **同档**（`readAllowed`），
+**不要求 `x-dsh-mini-superagent` 写头**。
+
+成功：`200`，`content-type: application/json; charset=utf-8`，`cache-control: no-store`。
+
+```json
+{
+  "ok": true,
+  "count": 3,
+  "dropped": 0,
+  "entries": [
+    {
+      "task_id": "t-m0abc-1",
+      "title": "重构 auth 模块",
+      "status": "done",
+      "retired_at": "2026-11-05T09:00:00.000Z",
+      "retired_reason": "cap-count",
+      "archived_at": null,
+      "updated_at": "2026-10-01T08:00:00.000Z",
+      "summary": "迁移完成，遗留两条未跑集成测试"
+    }
+  ]
+}
+```
+
+- `entries` **最多 200 条**，按 `retired_at` **倒序**（最近的退休最该被看到——它最可能是用户刚发现「任务不见了」的那条）。
+- `dropped`：超过 200 条时明说少给了多少，而不是悄悄截断。它来自 `count - entries.length`，
+  与 `memory.ledger.retiredDropped`（**进程内被丢弃的留痕数**）是两件不同的事，别混：
+  前者是「这个视图没显示全」，后者是「留痕列表本身已经丢了」。
+- `dispatch.retired` 不存在时（旧版宿主 / headless / 实现未落地）返回**空表**
+  `{"ok":true,"count":0,"dropped":0,"entries":[]}`，不 500——这是一个只读诊断视图，
+  宿主没这个能力就该显示「没有」，不该让面板崩。
+- 每条记录**只有摘要，没有正文**：`summary` 是退休时留下的 200 字单行摘要，
+  `reports` 正文随任务记录一起消失（这是「退休」的定义——`ledgerMaxRetired` 要守住体积，
+  搬正文到另一个 Map 只是换个地方存）。
+- `retired_reason` 是稳定机器串（`cap-count` / `cap-days`），客户端映射成中文「条数上限 / 超过保留期」；
+  未记录原因时显示「未记录原因」，**不要**把机器串直接甩给用户。
+- 退休记录**不挂子会话**（`worker_session_id` 不返回）：会话可能已归档或已不存在，点行跳转没有意义。
+  视图里只能复制 `task_id`，再用 `dispatch_inspect` 去查（`dispatch_inspect` 对退休任务仍返回留痕，带 `retired: true`）。
+
+### 已退休视图（面板里的第五个 chip）
+
+- chip 名为「已退休」，**排在「已归档」之后**。
+- 它**不从快照取数**：`FILTERS` 里这一项的 `match` 恒为 `false`（退休记录根本不在 `tasks` 数组里），
+  选中时才触发一次 `GET /board/retired`。计数来自 `counts.retired`（= `memory.retired.count`）。
+- 取数时机与 2 秒轮询**解耦**：退休记录一旦生成就不再变化（它描述的是「已经消失」这件事），
+  跟着快照每 2 秒拉一次纯属浪费，也会让视图在手滑时闪。只有 `generation` 变化（用户点重试 / 归档后再进来）才重取。
+- 三种空态要分开，别混成一句「没有」：
+  - `memory` 为 `null` → 「宿主未提供退休记录」（旧版/headless，**不是**「没有退休记录」）；
+  - 取数失败 → 「退休记录暂时取不到：<原因>」；
+  - 真的空 → 「没有被退休的任务」。
+- 行内显示：标题、状态、`退休于 <相对时间>`、原因徽标；整行 0.7 透明度、无按钮、不可点行。
+- 顶部提示条：`dropped > 0` 或 `memory.ledger.retiredDropped > 0` 时显示
+  「另有 N 条退休记录超出展示上限，未在此列出」。
 
 ---
 
@@ -248,6 +363,26 @@
 
 ---
 
+## 记忆治理口径（P0）
+
+看板是唯一能一眼看到「治理到底发生了什么」的地方。四个可观察点，全部来自快照的 `memory` 块
+（`memory: null` = 宿主没提供，一律降级不报错）：
+
+| 治理项 | 在看板上怎么看 | 对应行为 |
+| --- | --- | --- |
+| 指标窗口化 | 效果条数字的 hover 显示 `最近 N 天 / 最近 200 条`；归档与退休不进指标 | 只统计窗口内已结算任务，见上文「效果条」 |
+| 准入分级 | 任务行的「待读」徽标只反映**投递**，报告是否回流不进看板（看 `dispatch_report` 的返回值 `admission`） | `progress` 默认只入库；终态恒直通（配置只能扩展、不能降级） |
+| 单条预算 | 无 UI 提示；`dispatch_inspect` 的 `recent_reports[].truncated` 记录原始长度 | 入库即 `clip`，不是「截到恰好 N 字」 |
+| 生命周期清理 | 「待读」徽标在 TTL 到期后消失（改写 `input_unknown_at`） | 不再把「不知道」显示成「在读」 |
+| 账本封顶 | 「已退休」chip + 退休视图；`dropped` 提示条 | 超过 `ledgerMaxTasks` / `ledgerMaxDays` 的任务移出活表 |
+
+**别把「已归档」与「已退休」当同一件事**：归档的任务**还在**快照的 `tasks` 里（`archived_at` 非空，报告正文还能看），
+退休的任务**不在** `tasks` 里（只有 `retired` 留痕，没有正文）。看板上它们分属两个 chip，
+`dispatch_inspect` 对两者也给出不同结果（退休的返回 `retired: true` 且 `recent_reports` 缺席）。
+判据写在 [architecture.md](architecture.md) §27。
+
+---
+
 ## 已归档视图
 
 0.5.0 起，归档任务从「全部」里移出，只出现在 `已归档` chip：
@@ -270,15 +405,23 @@
 
 ## 跳转会话
 
-- 整行可点（`worker_session_id` 非空时），鼠标点击与 `Enter` / `Space` 都会调
+- 整行可点（`worker_session_id` 非空**且未归档**时），鼠标点击与 `Enter` / `Space` 都会调
   `ctx.get('uiWorkspace').openSession(worker_session_id)`。
 - 行内的取消/重试按钮会 `stopPropagation`，不会误触跳转。
 - 失败处理：
   - `uiWorkspace` 服务不可用 → 「打不开子会话 `<id>`：会话导航服务不可用」；
   - `openSession` 抛错 → 「打不开子会话 `<id>`：<原因>」；
   - 任务没有 `worker_session_id` → 「这个任务没有可打开的子会话」。
-- 已归档的行先提示「该子会话已归档，可能已不在会话列表里」，但仍然尝试打开。
-- 成功时清掉上一条失败提示（归档行保留那句归档提醒）。
+- **已归档的行不可点**：不挂 `onClick` / `onKeyDown`、没有 `tabIndex`、没有手形光标，
+  用 `aria-disabled="true"` + `aria-description`/`title` 说明「该子会话已归档，不可直接打开；
+  请在会话列表里取消归档后再查看」。`openWorker` 里还有第二道闸：任务带 `archived_at` 就只给提示、
+  **绝不调** `openSession`。
+- **为什么是「不可点」而不是「打开原会话」**：归档记录里的 `worker_session_id` 仍在（所以数据上是可解析的），
+  但宿主的 `uiWorkspace.openSession(id)` 只负责换主视图；ui-workspace 的 `watchNavigation()` 里有
+  `clearArchivedCurrent()`，一旦发现主视图的会话在 `archivedSessionIds` 中就直接 `clearMain()`，
+  主区域随后被补建成空白会话 —— 这正是「点已归档任务会跳到新会话」的根因。
+  DSH 自己的侧边栏对归档会话也只提示「已归档对话暂时无法查看，请取消归档后查看」而不打开，本插件对齐同一口径。
+  换成「先取消归档再打开」属于写操作，不该由一次点击的副作用触发。
 - 已知边界：`openSession` 抛 `not-listed`（子会话已不在会话目录）时，展示的是通用错误文本，未针对该错误码做专门文案。
 
 ---
@@ -339,13 +482,20 @@
   控件在工具行的实际对齐与截断、弹层翻转与边缘夹取、`@` 与官方 `@reference` 混排观感、chip 刷新后能否从草稿恢复、
   `openSession` 成功后视图是否真切换、深浅主题对比度、`not-listed` 的真实错误码。
 - **列表上限 200 条**：超出部分不显示，但 `counts.total` 仍是全量；没有分页。
+- **退休视图上限也是 200 条**：超出用 `dropped` 明说，没有分页、没有关键字过滤。
 - **没有历史归档**：来源是内存任务表（重启时从 `tasks.json` 读回），不查库、不查子会话日志。
-- **轮询固定 2 秒**：不可配置；页面隐藏时暂停。
-- **数据可能陈旧**：取数失败时保留上一次成功快照并提示，不自动清空。
+- **退休留痕可能被丢弃**：`ledgerMaxRetired`（默认 5000）超限时丢最老的，
+  `retiredDropped` 是**本次进程内**丢弃的条数，**不落盘、重启归零**——看到它变小或变 0 不代表数据回来了。
+- **轮询固定 2 秒**：不可配置；页面隐藏时暂停。退休视图不跟着轮询，只在进入视图或 `generation` 变化时取一次。
+- **数据可能陈旧**：取数失败时保留上一次成功快照并提示，不自动清空（退休视图同理，保留旧数据只切 loading 态）。
 - **看板不按会话过滤**：它展示整个实例的任务；agent 侧要按会话看用 `dispatch_list`。
+- **效果数字受窗口约束**：成功率、中位耗时、并行节省只算窗口内（默认最近 7 天 / 200 条）的已结算任务，
+  **且排除已归档与已退休**。拿它跟旧版本的数字对比会不一致——先看 hover 里的窗口口径。
+  宿主没提供 `memory` 块时降级成「全部已结算」，这时它**不等于**窗口口径，别混为一谈。
 - ~~POST 无 Origin 即放行~~：0.7.0 已修，见「鉴权与暴露面」。
 - **重试不做状态回滚**：续跑依赖 worker 自己的历史；它可能重复执行已经做过的步骤。
 - **归档字段现在会渲染，但归档行的历史仍可点**：`openSession` 对已归档会话可能失败（`not-listed`），失败只给通用错误文本。
+- **退休行不可点**：退休记录没有 `worker_session_id`，会话可能已归档或已不存在，跳转没有意义，只能复制 `task_id`。
 - **`targets` 只看主会话**：它是「下一次派发往哪派」的偏好，不是任务属性；任务卡上的 `workspace_id` 只反映任务实际派到哪。
 
 ---
@@ -364,5 +514,10 @@
 | `counts.archived` 不涨 | `archiveAfterHours` 是否为 0；任务是否已结算；`updatedAt` 是否够旧 | 调小保留期，或点「立即归档」/`POST /board/archive` |
 | `POST /board/archive` 返回 `failed > 0` | 任务卡的 `archive_error`；日志 `归档子会话 … 失败` | 宿主是否支持 `workspaceRegistry.archiveSession`；会话/目录是否还在。失败会在下次巡检重试 |
 | 「全部」chip 数比 `counts.total` 少 | 正常 | 「全部」不含已归档；「总计」与「全部」一致，归档数看「已归档」chip |
+| 「已退休」chip 显示 `—` | 快照 `memory` 是否为 `null` | 宿主版本较旧或没启用记忆治理；`GET /board/retired` 仍可单独调，能返回空表 |
+| 「已退休」是空的但确实退休过任务 | `GET /board/retired` 的 `count` 与 `entries.length` | `count > 0` 但 `entries` 空 → 取数失败；`count: 0` → 留痕已被 `ledgerMaxRetired` 丢弃（看 `memory.ledger.retiredDropped`） |
+| `memory.ledger.retiredDropped` 重启后变小 | 正常，**它是进程内计数，不落盘** | 不要把它当累计值；它是「本次进程内丢了多少条留痕」 |
+| 效果数字与上次看的不一样 | hover 里的窗口口径；是否刚归档/退休过任务 | 窗口滚动或归档/退休都会改变分母；这是有意的（旧事实不该给当下的数字投票） |
+| `/board/retired` 返回 403 | 是否非回环 Host 且未放行 | 与 `GET /board` 同档准入，按「鉴权与暴露面」处理；**不需要** `x-dsh-mini-superagent` 头 |
 | 点行打不开子会话 | 提示条里的原因；任务卡 `worker_session_id` | 会话导航服务不可用，或子会话已归档/不在会话目录（`not-listed`） |
 | 工作区下拉是空的 | 快照 `workspaces`；工作区注册表 | 先让插件建默认工作区，或检查 `workspaceRegistry`；空列表时下拉只有「全部工作区」 |

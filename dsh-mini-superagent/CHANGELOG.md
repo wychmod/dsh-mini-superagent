@@ -4,6 +4,201 @@
 
 ## 未发布
 
+### 修复：点已归档任务会跳到一个空白新会话
+
+归档行的 `worker_session_id` 还在，所以 「整行可点」的判断一直为真；点击后调
+`ctx.get('uiWorkspace').openSession(id)`。但宿主这次调用只做「换主视图」，而 ui-workspace 的
+`watchNavigation()` 里有 `clearArchivedCurrent()`：当前主视图的会话一旦在 `archivedSessionIds` 里就
+`clearMain()`，主区域随后被补建成空白会话。**用户看到的就是「点一下归档任务，跳到了新会话」**，
+而任务本身并没有真正被打开。
+
+**选择「不可点」而不是「打开原会话」**：数据上确实能解析出原会话 id，但宿主对归档会话的导航策略
+就是不让打开（DSH 自己的侧边栏对归档会话也只提示「已归档对话暂时无法查看，请取消归档后查看」）。
+绕过它需要先做一次「取消归档」写操作，不该由一次点击的副作用触发；而点了打不开再报一句错，
+等于把「坏了但没全坏」写进交互。因此归档行**彻底不给点击入口**。
+
+- `client/index.js`：`TaskCard` 的可点判据从 `Boolean(worker_session_id)` 收紧为
+  `Boolean(worker_session_id) && !archived`；归档行因此没有 `onClick` / `onKeyDown` / `tabIndex` /
+  `dsh-sa-row-clickable`（无手形光标），并加 `aria-disabled="true"` + `aria-description`（= `archivedHint`）
+  说明原因；`title` 不再拼「点击打开子会话」。`openWorker` 加**第二道闸**：任务带 `archived_at` 就只弹提示、
+  **绝不调** `openSession`（键盘/脚本/将来新增调用方绕过渲染层时兜底）。归档行 hover 不再给可点底色。
+- 文案：`archivedHint` 从「该子会话已归档，可能已不在会话列表里」改为
+  「该子会话已归档，不可直接打开；请在会话列表里取消归档后再查看」（中英各一份）。
+- `preview/board-preview.html` 随 `scripts/board-preview.mjs` 重新生成。
+- `scripts/client-smoke.mjs`：新增 25 条回归断言 —— 归档行没有 `onClick`/`onKeyDown`/`tabIndex`/
+  `dsh-sa-row-clickable`、有 `aria-disabled`、`title` 不含「点击打开子会话」；
+  **点遍三条归档行之后 `uiWorkspace.openSession` 调用数为 0**；以及「未归档行点击仍然正常打开子会话」
+  （防止修归档时误伤正常行）。已用变异测试确认断言有鉴别力：把 `&& !archived` 去掉后有 21+ 条断言变红。
+
+### 记忆治理 P0：指标窗口、准入分级、单条预算、生命周期清理、账本封顶
+
+对应 [plans/07-memory-governance.md](../plans/07-memory-governance.md) §六 P0 五项。**没有改状态机、没动 Session 格式、没改工具契约**——
+只补「哪些事实进会话、进多少、留多久、怎么退出」这条一直没人负责的链路。
+
+先说清一个此前被写错的口径：`src/store.js` 的注释与 README 都说任务表是「辅助信息，丢了不影响子会话」。
+**这个说法是错的**：状态、归属、续跑、看板指标、归档标记、`dispatch_inspect` 全读这份表，而会话里的报告一旦写入不可回收。
+它曾经是对的（0.1.0 只有派发 + 回报），但后续每一版都在往账本上加事实，那句注释没人回头改——
+计划书 §九 记的「文档再次漂移」风险就是这么发生的。现在 `docs/architecture.md` §26 明确把它定为**派发事实的权威源**，
+会话是**可重建的投影**，并解释了旧口径为什么当时成立、后来失效。
+
+**① 指标窗口化（`memoryWindowDays` / `memoryWindowTasks`，默认 7 天 / 200 条）**
+
+`effectStats()` 原来对**全部**未归档已结算任务计算，于是上个月失败的几条会一直给今天的成功率投票。
+现在客户端只统计 `updated_at >= memory.window.since` 且落在最近 N 条内的已结算任务；
+**归档按 `archived_at` 排除（这条与窗口无关），退休任务根本不在快照的 `tasks` 里**。
+窗口文案显示在卡片 hover 里——不显示口径的话，同一个 86% 在两种算法下会看起来像 bug。
+
+**② 准入分级（`directReportStatuses`，`ADMISSION.DIRECT` / `LEDGER`）**
+
+`report()` 现在先问 `admissionOf()`：终态（`done`/`blocked`/`failed`/`cancelled`）恒直通，
+配置点名的状态直通（默认 `blocked`/`failed`），**其余只入库**——`progress` 落在这一类。
+
+**这里有个与直觉相反、必须写下来的取舍：终态硬直通，配置只能扩展、不能降级。**
+把 `directReportStatuses` 清空**不会**让 `done` 静默。理由：结论与「需要人处理」是主会话唯一必须知道的两类事，
+任何配置都不该把它们降级成静默，否则主会话会永远等不到「做完了」。这条如果不写清，下一个改配置的人
+会以为「我清空列表就等于关掉回流」。
+
+批次成员自己只入库（整批由 `maybeSummarize()` 汇总一条），**但批次汇总本身恒 direct**——
+否则成员静默 + 汇总静默 = 整批彻底静默。`progress` 的旧节流（`progressRelayIntervalMs`）保留，
+但它现在只在用户把 `progress` 配进直通列表时才用得上：配置一放开，没有节流会比放开前更糟。
+
+**③ 单条消息预算（`maxReportSummaryChars` 6000 / `maxReportDetailChars` 4000 / `maxLastTextChars` 5000）**
+
+原来只有 `reportText()` 外发时 `clip`，`task.reports` 里存的是调用方给的原样长度——
+「单任务体积由调用方决定」正是计划书点出的容量膨胀根因之一。现在 `#admitEntry()` **入库即截断**，
+被截的条目记 `truncated: {summary: 原始长度, detail: 原始长度}`，只在真被截时出现这个键
+（一个恒存在的空对象会让「是否截过」永远为真）。内外同一口径，避免「库里 10 万字、
+`dispatch_inspect` 看残版、主会话看另一个残版」的三方错位。
+
+**`clip()` 不是「截到恰好 N 字」**：超长时头尾各半，中间插一句「已截断 X 字符」的提示，
+而**提示语本身也占这 N 的预算**（`bodyBudget = limit - 40`）。这条在 0.6.0 之前是 `limit - 400` + `slice(-400)`，
+`limit < 400` 时输出反而比 `limit` 还长（实测 `clip(1000 字, 200)` 返回 417 字）。文档里写清楚是因为
+「为什么我传 200 却拿到 160 字」会被反复问。
+
+**④ 生命周期清理（`forgetTargets` / `inputPendingTtlMs` / `archiveStale` 写 `frozenAt`）**
+
+- **会话销毁清 `targets`**（`forgetTargets()`，`clearTargetsOnDispose` 默认开）：只删目标不删任务。
+  不在 `dispose()` 里清——插件卸载时所有会话都还在，清空等于把用户的输入框选择全丢掉；
+  `agent/disposed` 才是「这个会话再也不会派发」的确定时刻。它排在任务结算**之前**，
+  避免「即将消失的会话的旧目标被新任务读到」那个窗口。
+- **`inputPendingAt` 的 TTL**（默认 30 分钟）：宿主在部分部署里根本不发 `session/event`，
+  `inputPendingAt` 会**永久**挂着「待读」，看板看起来像 worker 卡住了。超时后**不假装读过**
+  （那会掩盖真正的问题），而是改写成 `inputUnknownAt`——「不知道读没读到」比「永远在读」更接近事实。
+  看板据此区分「待读」与「不知道」，且 unknown 压过 pending。`sweepMemory()` **不新开定时器**，
+  挂在 `schedulePersist()` 的防抖回调与 `persist()` 之前（写盘本来就是这些变化的汇合点）。
+- **归档写 `frozenAt`**：归档是「只读冻结」的开始，冻结时刻与归档时刻分开记。
+  **不能复用 `retiredAt`**——`isRetired()` 靠 `retiredReason` 判「这是不是退休记录」，
+  把归档写成退休会让 `dispatch_inspect` 认为任务已不可查（其实它还在活表里），也让 `memoryStats()` 少算一条活任务。
+
+**⑤ 账本封顶（`ledgerMaxTasks` 1000 / `ledgerMaxDays` 90 / `ledgerMaxRetired` 5000）**
+
+判据两条（条数超、或存在非活跃且超期的任务），任一成立就退休；顺序是**已归档优先，其次最老 `updatedAt`**
+（归档是用户已经明确表示「不想再看」的动作，比「单纯很老」更该先走）。排序键用 `Date.parse()` 的数字
+而不是 ISO 串比较——旧格式不带毫秒时字典序会与时间序分岔。触发点三处，都不新开定时器：
+`settle()` 后、`archiveStale()` 后、`restore()` 后（幂等，体积只在这几处增长）。
+
+退休做两件事：移出 `table.tasks` / `table.queue`，往 `this.retired` 写一条**13 字段**薄记录，
+**不搬 `reports` 正文**——搬正文等于把容量上限换了个地方存。
+
+**`retiredDropped` 不落盘，重启归零。** 它是「本次进程内丢弃了多少条留痕」，不是累计值。
+这一点必须写下来，否则用户会对不上号：看到 `dropped: 1` 之后重启变成 0，会以为「数据回来了」。
+落盘反而更糟——把「本次丢弃数」持久化，会让人以为那些被丢的留痕是可追溯的，而它们的定义就是「已经不在了」。
+
+### 存储格式 v4：`tasks.json` 多一个 `retired` 数组
+
+`{version: 4, savedAt, tasks, targets, retired}`。旧文件没有 `retired` 键时读成 `[]`，
+**不迁移、不报错**（退休留痕丢了只影响「它为什么消失」这一条可查性，不该让升级后的插件起不来）。
+写盘时显式写空数组而不是省略：`JSON.stringify` 会丢掉 `undefined` 键，落盘后读的人就再也看不出这是新格式。
+
+留痕**按「最老在前」写盘**（Map 插入顺序 = 退休顺序），读回来时保持同样顺序，
+所以 `ledgerMaxRetired` 裁掉的就是队头，恢复时不需要重排。`restore()` 把它们放进 `this.retired`，
+**绝不当活任务恢复**——塞回 `table.tasks` 会让它们重新给指标投票，等于没退休。
+
+### 看板：新增「已退休」视图与 `memory` 块
+
+- **新路由 `GET /board/retired`**（只读，准入与 `GET /board` 同档，**不要求 `x-dsh-mini-superagent` 写头**）：
+  返回 `{ok, count, dropped, entries[]}`，最多 200 条、按 `retired_at` 倒序；`dispatch.retired` 不存在时返回空表而不是 500。
+  退休本身不是写操作，面板只能看。
+- **快照新增 `memory` 块**（形状逐字照抄 `memoryStats()` 的 `{window, ledger, admission, pending, retired}`）
+  与 `counts.retired`。`memory: null` 是合法值（旧版/headless/抛错），显式给 `null` 而不是省略字段，
+  是为了让客户端能区分「宿主没提供」与「这是旧版宿主」。
+- **视图 chip 从 4 个变 5 个**，新增「已退休」排在「已归档」之后。它**不从快照取数**（`match` 恒 false），
+  选中时才走独立路由；计数取 `counts.retired`，`memory` 为 null 时显示 `—` 而不是 `0`
+  （`0` 会被读成「确实一条都没有」）。取数还与 2 秒轮询解耦：退休记录生成后不再变化，跟着轮询纯属浪费。
+- **一个必须写下来的坑**：`memoryStats()` 现在是 **async**，所以 `GET /board` 必须
+  `boardSnapshot(dispatch, await resolveMemory(dispatch))`。漏了 `await` 会把 Promise 塞进 JSON，
+  而 `JSON.stringify(Promise)` 得到 `{}`——客户端会以为「宿主给了一个空块」，比 `null` 更难排查。
+  同时快照层**保留同步降级**：拿不到就给 `null`，绝不把 Promise 传下去，这样直接调 `boardSnapshot(dispatch)` 的旧代码不受影响。
+
+### 工作区解析：每一级命中多个都不再静默取第一个
+
+计划书没覆盖这条，但它和「口径」是同一类问题：**旧文档把「标题精确匹配」写成唯一的、没有歧义的，那是错的。**
+
+实测（2026-11-08 12:10）：仓库根 `D:\idea\dsh-mini-superagent` 与包根
+`D:\idea\dsh-mini-superagent\dsh-mini-superagent` 各自登记了一条标题都叫 `dsh-mini-superagent` 的工作区
+（宿主按目录 basename 起标题）。用户点「dsh-mini-superagent」时被静默送进**另一个盘上的另一个目录**，
+日志里一行线索都没有。
+
+- **`resolve()` 四级（id / 绝对路径 / 标题精确 / 标题包含）遵守同一条规矩**：命中多个就返回 `undefined` 并
+  warn 出全部候选，**绝不静默取第一个**。精确匹配的歧义比包含匹配更隐蔽——查询看起来「就是这个名字」。
+- **候选文案必须带 `path`**（`describeMatches()`）：同名工作区之间 id 对人毫无区分度（都是一串 uuid）。
+- **`resolveOrCreate()` 新增可选 `reason: 'ambiguous' | 'not-found'`**，只在没拿到工作区时出现；
+  **空引用不给 `reason`**（「没给目标」不等于「找不到」，给它贴 `not-found` 只会让调用方为一句空话编错误文案）。
+  它是**给调用方选文案用的**：0.8.0 及更早两者都是 `undefined`，`dispatch.js` 只能把所有失败都写成
+  「找不到工作区「…」，且允许新建被关闭」——而这句话在歧义时是**假的**（并没有人关掉新建）。
+- **歧义绝不新建**：`resolveOrCreate()` 在新建之前重跑一遍与 `resolve()` **完全一致**的判定
+  （`diagnoseTitleRef`，精确在前、单字符不做包含匹配）。0.8.0 只判了包含匹配，于是「精确歧义」被当成「不存在」，
+  直接 `mkdir` 出第三个同名目录——比原来的问题更糟。
+
+### 工作区登记不再自动造出同名工作区
+
+`SessionGateway.workspaceFor(cwd)` 原来调 `registry.create(cwd)` 不传标题，宿主拿目录 basename 当标题，
+于是「仓库根」与「包根」各造出一条同名工作区，而且**每次按目录反查登记都会再撞一次**——这不是一次性脏数据。
+
+现在显式传标题，`distinctTitle()` 挑一个不与已有标题撞车的名字：撞了就**逐段加长**
+（`proj` → `b/proj` → `D:/idea/b/proj`），极端情况才退回 `（2）` 后缀。
+三条硬约束来自实际踩坑：人能看出是哪个目录（用路径末段，不用 uuid/随机数）、不与已有标题重复（大小写不敏感）、
+**不改已有工作区的标题**（改别人的标题等于把用户认过的名字偷偷换掉）。
+
+### 文档
+
+`docs/architecture.md` 新增 §26（权威源定义、旧口径为什么失效）、§27（归档 vs 退休）、
+§28（P0 五项的行为与可观察后果）、§29（存储格式 v4 与留痕 13 字段）、§30（工作区解析语义），
+并修正 §11 / §14 / §15 / §16 与模块表里过时的口径（`version: 3`、「四个 chip」、「`sameOrigin()`」、
+「1017 行」、把用例数写死等）；`docs/board.md` 补路由表、`memory` 块、`input_unknown_at`、
+「已退休」视图与记忆治理口径表；`docs/workspaces.md` 重写解析小节与 `reason` 契约，新增「按目录登记会造标题」
+与「显式 `cwd` 被记住的目标覆盖」的缺口记录；`docs/tools.md` 同步 `dispatch_launch` 的 `workspace`/`cwd`、
+`dispatch_inspect` 的退休分支、`dispatch_report` 的准入与截断；`README.md` 同步配置表、看板接口与已知限制。
+
+**没写进本文档清单、但同批落地的**：`src/dispatch.js` 的 `cwd` 优先级修复见下一节。
+
+### 修复：显式 `cwd` 被记住的派发目标静默丢弃
+
+实测（2026-11-08 12:10）：主会话目标是 auto 时，`dispatch_launch({ cwd: 'D:\idea\dsh-mini-superagent' })` 派出的两个子会话
+分别落到了 `…\Documents\mini-superagent\派发\2026-11-07` 与 `…\Documents\mini-superagent`。
+用户给的 `cwd` 从头到尾没生效，`src/` 一个字节没变，现场看起来像「根本没派发」。
+根因是旧代码 `cwd: target?.path ?? cwdFor(agent, cwd)`：只要存在任何 target（**包括 auto**），
+显式 `cwd` 一次都没被读到，而且**没有任何提示**。
+
+现在判据只有一条：**显式参数优先级高于记住的设置**——记住的 auto / 目标只是「调用方没指定时的默认」，
+没有资格压掉调用方当场给出的参数。
+
+| 调用方给了什么 | 结果 |
+| --- | --- |
+| 只给 `cwd`（会话有 auto / 记住的目标） | `cwd` 胜，auto 与目标这一轮当没设过 |
+| `workspace` 与 `cwd` 同时给 | `workspace` 胜（会话住在它里面），`cwd` **仍被保留**为任务工作目录 |
+
+第二行是关键细节：`task.cwd` 必须保留 `cwd`，否则 `task.cwd === placement.path`，
+`start()` 里的 `enterDirectory()` 直接短路，`cwd` 又变成一句空话（正是旧版那个三元短路）。
+连带修正：`placementFor()` 在「没有目标」分支里先看 `task.cwdExplicit`，
+**显式 `cwd` 不再触发日期工作区兜底**——调用方明确给了目录，就不该再被塞进当天的【派发】。
+
+**这条修的是「静默丢弃输入」这类缺陷，所以也补了说法**：`workspace` 解析失败时不再一律写成
+「找不到工作区「…」，且允许新建被关闭」（歧义时那句话是假的），而是按归因分三种——
+`ambiguous` 列出同名候选并说明「为避免建出重复目录，本次不自动新建」、
+`not-found` + 真的关了新建保留原措辞、`not-found` + 允许新建但新建抛错则如实说「已按名字尝试新建，但没有成功」。
+候选一律带 `path`：同名工作区之间 id 对人没有区分度。
+
 ### 提示词：派发即移交，派发后结束本轮
 
 两条规则各对应一次**被完整观测到的真实事故**，都是提示词没写清而不是能力缺失。
