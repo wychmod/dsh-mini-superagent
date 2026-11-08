@@ -255,9 +255,35 @@ test('dispatch_message 投递成功后留下「待读」标记', async () => {
 })
 
 // ---------------------------------------------------------------- progress 节流
+//
+// P0-2 之后 progress 的**默认准入是 ledger**（只入库、不回流），所以默认配置下
+// 这两条节流用例永远不会触发回流，必须显式把 progress 配进 `directReportStatuses`
+// 才谈得上「节流」。用例这样写而不是直接删掉：节流逻辑仍然存在，用户配置放开
+// progress 时它就是唯一的防刷屏措施，不能没人守。
 
-test('progress 按间隔节流，被挡下的仍然入库', async () => {
+test('progress 默认只入库不回流（P0-2 准入分级）', async () => {
   await withDispatch({ progressRelayIntervalMs: 60000 }, async ({ d, host }) => {
+    const delivered = []
+    d.sessions.deliver = async (_sessionId, _requestId, text) => { delivered.push(text); return { delivered: 'inbox', woke: false } }
+    host.agents.set('lead', makeAgent('lead'))
+    const worker = makeAgent('dispatch-t-rc')
+    host.agents.set('dispatch-t-rc', worker)
+    const task = workerTask()
+    d.table.add(task)
+
+    const result = await d.report(worker, { status: 'progress', summary: '第一步' })
+
+    assert.equal(result.admission, 'ledger', '默认配置下 progress 的准入是 ledger')
+    assert.equal(delivered.length, 0, 'progress 默认不该叫醒主会话')
+    assert.equal(task.reports.length, 1, '只入库不等于丢掉：dispatch_inspect 仍看得到')
+  })
+})
+
+test('progress 配进 directReportStatuses 后按间隔节流，被挡下的仍然入库', async () => {
+  await withDispatch({
+    progressRelayIntervalMs: 60000,
+    directReportStatuses: ['blocked', 'failed', 'progress'],
+  }, async ({ d, host }) => {
     const delivered = []
     d.sessions.deliver = async (_sessionId, _requestId, text) => { delivered.push(text); return { delivered: 'inbox', woke: false } }
     host.agents.set('lead', makeAgent('lead'))
@@ -269,6 +295,7 @@ test('progress 按间隔节流，被挡下的仍然入库', async () => {
     const first = await d.report(worker, { status: 'progress', summary: '第一步' })
     const second = await d.report(worker, { status: 'progress', summary: '第二步' })
 
+    assert.equal(first.admission, 'direct')
     assert.equal(first.throttled, undefined)
     assert.equal(second.throttled, true, '一分钟内的第二条 progress 不该再回流')
     assert.equal(delivered.length, 1)
@@ -276,8 +303,11 @@ test('progress 按间隔节流，被挡下的仍然入库', async () => {
   })
 })
 
-test('progressRelayIntervalMs=0 时不节流', async () => {
-  await withDispatch({ progressRelayIntervalMs: 0 }, async ({ d, host }) => {
+test('progressRelayIntervalMs=0 且 progress 直通时不节流', async () => {
+  await withDispatch({
+    progressRelayIntervalMs: 0,
+    directReportStatuses: ['blocked', 'failed', 'progress'],
+  }, async ({ d, host }) => {
     const delivered = []
     d.sessions.deliver = async (_sessionId, _requestId, text) => { delivered.push(text); return { delivered: 'inbox', woke: false } }
     host.agents.set('lead', makeAgent('lead'))

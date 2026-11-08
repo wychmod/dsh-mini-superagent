@@ -55,6 +55,15 @@ export async function apply(ctx, config) {
     // 会话没了，它的工具收窄登记也该跟着消失，否则 routers 会随会话数一直长。
     dispatch.forgetRouter(agent?.id)
     dispatch.forgetSubagent(agent?.id)
+    // P0-4：会话销毁是「它再也不会派发」的唯一确定时刻，顺手清掉它的派发目标。
+    // 顺序放在任务结算**之前**：结算会走 settle → pump → 可能立刻启动新任务，
+    // 而那一步可能又读 targets。先清再结算，「这个会话已经不存在」这个事实
+    // 在所有后续动作里都可见；反过来则存在一个窗口，让即将消失的会话的
+    // 旧目标被新任务读到。
+    //
+    // 只删 targets，不删任务：任务属于账本（P0-5 用退休管），会话没了不代表
+    // 它派出过的任务不需要查了。
+    dispatch.forgetTargets(agent?.id)
     const task = dispatch.table.byWorker(agent.id)
     if (!task || SETTLED.has(task.status)) return
     dispatch.settle(task, 'interrupted')

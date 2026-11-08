@@ -9,9 +9,9 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  AUTO, DEFAULTS, LOG_PREFIX, MAX_REPORTS, MODE_ALWAYS, MODE_OFF, NAME, NONE, SETTLED,
-  SOURCE_KIND, STATE_DIR, TERMINAL_REPORT, VERSION, WORKER_WORKSPACE_CWD,
-  newTaskId, nextMessageId, normalizeWorkerWorkspace, now,
+  ADMISSION, AUTO, DEFAULTS, LOG_PREFIX, MAX_REPORTS, MODE_ALWAYS, MODE_OFF, NAME, NONE,
+  RETIRED_REASONS, SETTLED, SOURCE_KIND, STATE_DIR, TERMINAL_REPORT, VERSION,
+  WORKER_WORKSPACE_CWD, newTaskId, nextMessageId, normalizeWorkerWorkspace, now,
 } from './constants.js'
 import { FORCED_HINT, ROUTER_LOCKED, SOFT_HINT, workerPrompt } from './prompt.js'
 import { prepareEnv, runPrepare, taskDirectory } from './prepare.js'
@@ -92,6 +92,26 @@ export class Dispatch {
     this.subagentOf = new Map()
     /** 任务 id → 「后台活还在跑」的巡检定时器。 */
     this.backgroundTimers = new Map()
+    /**
+     * 已退休任务的薄留痕：任务 id → record（P0-5）。
+     *
+     * 与 `table.tasks` 的区别是「可查但不再参与任何计算」：不进指标、
+     * 不占并发位、不出现在 `dispatch_list` 的 total 里，但 `dispatch_inspect`
+     * 仍能回答「它什么时候、为什么不见了」。
+     */
+    this.retired = new Map()
+    /** 因 `ledgerMaxRetired` 上限被丢弃的留痕条数（单调递增，供自检）。 */
+    // 刻意**不落盘**：它是「本次进程内丢了多少」，落盘后与 retired 的条数
+    // 一起读回会让人以为那些丢弃是可追溯的——而它们的定义就是「已经不在了」。
+    // 重启归零是诚实的：新进程没有丢弃过任何东西。
+    this.retiredDropped = 0
+    /**
+     * 准入决策计数（P0-2）：`{ direct, ledger }`。
+     *
+     * 只做可观测，不参与决策。没有它就没法回答「这条报告到底回流了没有」——
+     * 而「报告会自己回来」正是本插件的核心承诺。
+     */
+    this.admissionCounts = { direct: 0, ledger: 0 }
     const stateRoot = this.config.stateDir
       || join(process.env.DSH_HOME || join(homedir(), '.dsh'), STATE_DIR)
     this.stateFile = join(stateRoot, 'tasks.json')
@@ -173,6 +193,30 @@ export class Dispatch {
     if (!this.routers.delete(agentId)) return
     this.sessions.forgetRestrict?.(agentId)
     this.log('%s 会话 %s 退出路由模式，工具已还回', LOG_PREFIX, agentId)
+  }
+
+  /**
+   * 会话被销毁时清掉它的派发目标（P0-4）。
+   *
+   * 为什么不在 `dispose()` 里清：会话销毁与插件卸载是两件事——插件的
+   * `dispose` 时所有会话都还在（宿主自己管生命周期），清空 targets 等于把
+   * 用户的输入框选择全部丢掉。只有 `agent/disposed` 才是「这个会话再也不会
+   * 派发」的确定时刻，那才是唯一该删它的点。
+   *
+   * **只删 targets，不删任务**：任务记录属于账本（P0-5 用退休管），
+   * 会话没了不代表它派出过的任务不需要查了。
+   *
+   * @returns {boolean} 是否真的删了条目（供调用方判断要不要落盘）
+   */
+  forgetTargets(sessionId) {
+    if (!sessionId) return false
+    if (!this.config.clearTargetsOnDispose) return false
+    if (!this.targets.delete(sessionId)) return false
+    // 删了顺手落盘：这个时刻之后不会再有任何东西触发 schedulePersist，
+    // 而孤儿目标一旦留在 tasks.json 里，重启后会重新变回「有效设置」。
+    this.schedulePersist()
+    this.log('%s 会话 %s 已销毁，清掉它的派发目标', LOG_PREFIX, sessionId)
+    return true
   }
 
   /**
@@ -336,22 +380,67 @@ export class Dispatch {
         + '请先取消或等待它们结束（归档与超过 24 小时的已结算任务不计入）')
     }
 
-    // 显式 workspace 优先；否则看输入框里选的「派发目标工作区」。
+    /**
+     * 显式参数与「记住的设置」谁优先——本函数最容易改错的一处，规则写死在这里：
+     *
+     * | 调用方给了什么                      | 结果                                                   |
+     * |-------------------------------------|--------------------------------------------------------|
+     * | 只给 cwd（会话有 auto / 记住的目标） | **cwd 胜**：auto 与记住的目标这一轮当没设过             |
+     * | 只给 cwd（会话没有目标）             | 用 cwd（与旧版一致）                                    |
+     * | 只给 workspace                       | 用 workspace（与旧版一致）                              |
+     * | workspace 与 cwd 同时给              | **workspace 胜**（已发布语义，不改）；cwd 仍不当垃圾扔掉 |
+     *
+     * 判断依据只有一条：**显式参数优先级高于记住的设置**。记住的 auto / 目标只是
+     * 「调用方没指定时的默认」，它没有资格压掉调用方当场给出的参数。
+     *
+     * 为什么要把这张表写成注释：2026-11-08 12:10 实测过一次「显式 cwd 被静默丢弃」——
+     * 主会话目标是 auto，`dispatch_launch({ cwd: 'D:\idea\dsh-mini-superagent' })` 派出的
+     * 两个子会话分别落到了 `…\Documents\mini-superagent\派发\2026-11-07` 与
+     * `…\Documents\mini-superagent`，用户给的 cwd 从头到尾没生效，`src/` 一个字节没变，
+     * 现场看起来像「根本没派发」。根因就是旧代码 `target?.path ?? cwdFor(agent, cwd)`：
+     * 只要存在任何 target（包括 auto），显式 cwd 一次都没被读到，而且**没有任何提示**。
+     *
+     * 教训：静默丢弃调用方输入比报错贵得多。报错只让人重试一次；静默丢弃让人在
+     * 完全错误的方向上排半天，最后还得怀疑工具坏了。所以现在要么让参数生效，
+     * 要么把「它去哪了」如实写进返回值。
+     */
+    /** 调用方显式给的工作目录；空白串按「没给」处理（与旧版一致）。 */
+    const cwdInput = typeof input.cwd === 'string' && input.cwd.trim() ? input.cwd.trim() : undefined
+    // 只传 cwd 时，会话记住的 auto / 目标一律不参与（见上表第一行）。
+    const sticky = cwdInput && !input.workspace ? undefined : this.targetFor(agent.id)
     // 目标是 auto 时不锁定具体工作区：等任务标题/简报就位后再挑（见下面的 autoTarget）。
-    const sticky = this.targetFor(agent.id)
     const autoTarget = !input.workspace && sticky?.auto === true
     const ref = input.workspace ?? (autoTarget ? undefined : sticky?.workspace_id)
     let target
     if (ref) {
       // 只有显式指定时才允许按需新建；来自选择器的目标失效则忽略，避免凭空建目录。
-      const result = await this.workspaces.resolveOrCreate(ref, {
-        create: !!input.workspace && input.createWorkspace !== false,
-      })
+      const create = !!input.workspace && input.createWorkspace !== false
+      let result
+      try {
+        result = await this.workspaces.resolveOrCreate(ref, { create })
+      } catch (error) {
+        /**
+         * 新建这条路**抛错**了（mkdir 失败、注册表 create 拒绝、盘满、权限不足……）。
+         *
+         * 这个分支以前根本不存在：`resolveOrCreate` 里 `ensure()` 抛的错会直接冒泡，
+         * 调用方只看到一句「磁盘满了」——完全不知道这是「工作区没解析到、于是去新建、
+         * 新建又失败了」这条链。而它恰恰是 `reason` 三条文案里最难凑的那种：
+         * 既不是「找不到」（可以新建），也不是「新建被关闭」，是「试着建了但没建成」。
+         *
+         * 只有**显式** workspace 才改写成可读文案：来自选择器的目标失效仍按旧规矩
+         * 忽略并退回调用者目录（那种情况下用户没提要求，报错只会打断他）。
+         */
+        if (!input.workspace) throw error
+        throw new Error(`${this.#workspaceError(input.workspace, result?.reason ?? 'not-found', create)}`
+          + `（新建时出错：${String(error?.message ?? error)}）`)
+      }
       target = result.workspace
       if (!target) {
         if (input.workspace) {
-          const candidates = this.workspaces.list().map(item => `${item.title}（${item.path}）`).join('；') || '（暂无工作区）'
-          throw new Error(`找不到工作区「${input.workspace}」，且允许新建被关闭。现有：${candidates}`)
+          // 失败原因必须分开说（P1 修复 1）：旧代码不看 `reason`，一律写成
+          // 「且允许新建被关闭」。歧义时那句话是**假的**——调用方根本没传
+          // create_workspace，默认就是 true，没有任何人关掉新建。
+          throw new Error(this.#workspaceError(input.workspace, result.reason, create))
         }
         this.warn(`${LOG_PREFIX} 会话 %s 的派发目标工作区已不存在，按调用者目录派发`, agent.id)
       } else if (result.created) {
@@ -372,6 +461,20 @@ export class Dispatch {
       }
     }
 
+    /**
+     * 工作目录优先级：显式 cwd → 目标工作区路径 → 会话继承的目录。
+     *
+     * `workspace` 胜 `cwd` 是已发布的语义（别改），但**不能因此把 cwd 扔掉**。
+     * 两者同时给时的落法见上面那张表：会话住在 workspace 里（侧边栏归到那个工作区），
+     * 活干在 cwd 里 —— `start()` 里的 `enterDirectory(agent, task.cwd)` 负责切换。
+     * 所以这里 `task.cwd` 必须保留 cwd，否则 `task.cwd === placement.path`，
+     * enterDirectory 直接短路，cwd 又变成一句空话（这正是旧版的三元短路：
+     * 只要 target 存在，`input.cwd` 连被读一次的机会都没有）。
+     *
+     * 顺序反过来写（cwd 在前）不会影响「只给 workspace」的路径：那时 cwdInput 是空的。
+     */
+    const resolvedCwd = cwdInput ?? target?.path ?? this.sessions.cwdFor(agent, undefined)
+
     const task = {
       id,
       title,
@@ -386,11 +489,11 @@ export class Dispatch {
       lastReportAt: undefined,
       lastText: '',
       reports: [],
-      // 工作目录 = 目标工作区路径；没有目标就沿用调用者目录。
-      cwd: target?.path ?? this.sessions.cwdFor(agent, input.cwd),
+      cwd: resolvedCwd,
       workspaceId: target?.id,
       workspaceTitle: target?.title,
       ...(autoTarget ? { workspaceAuto: true } : {}),
+      ...(cwdInput ? { cwdExplicit: cwdInput } : {}),
       ...(input.group ? { group: input.group } : {}),
       model: input.model,
       agentPreset: input.agentPreset,
@@ -407,6 +510,59 @@ export class Dispatch {
   }
 
   /**
+   * 显式 `workspace` 解析不到时，给调用方一句**与事实相符**的错误。
+   *
+   * 三种失败原因必须分开说（这是 P1 修复 1，2026-11-08 12:10 的事故就是它们的代价）：
+   *
+   * 1. `ambiguous`：注册表里有多个同名/同前缀的工作区，**无法确定是哪一个**。
+   *    这种情况我们**故意不新建**——那些目录是真实存在的，再建一个同名目录
+   *    只会制造第三个候选，把「两个分不清」升级成「三个分不清」。
+   *    旧代码在这里报的是「且允许新建被关闭」，而调用方**根本没传** create_workspace
+   *    （默认 true），没有任何人关掉新建。一句话把「有歧义，所以故意不建」误报成
+   *    「你关了开关」，排障方向直接被带偏到配置上去。
+   * 2. `not-found` + 调用方真的关了新建：这时「且允许新建被关闭」是**真话**，
+   *    保留原措辞——用户确实能靠它想起自己传过 create_workspace: false。
+   * 3. `not-found` + 允许新建但仍失败：如实说「找不到，而且尝试新建也失败了」，
+   *    不要和前一句捆在一起（两句不相关的原因捆成一句，读的人会以为它们互为因果）。
+   *
+   * 还有一个容易漏的分支：`resolveOrCreate` 对**空引用**（`''` / 纯空格）不给 `reason`——
+   * 空引用是「没给目标」而不是「找不到」，给它编错误文案本身就是错的。所以
+   * `reason` 缺失且不是上面几种情况时，只如实说「没解析到」。
+   *
+   * @param {string} ref 调用方传进来的 workspace
+   * @param {'ambiguous'|'not-found'|undefined} reason resolveOrCreate 的归因
+   * @param {boolean} create 本次是否允许新建
+   * @returns {string}
+   */
+  #workspaceError(ref, reason, create) {
+    // 候选必须带 path：同名工作区之间 id 对人毫无区分度，path 一眼能看出是哪个目录。
+    const all = this.workspaces.list()
+    const describe = items => items.map(item => `${item.title}（${item.path || '无路径'}）`).join('；')
+    const candidates = describe(all) || '（暂无工作区）'
+
+    if (reason === 'ambiguous') {
+      // 同名的全部列出来，让调用方能一眼挑中；有精确同名就优先列精确的
+      //（`resolveOrCreate` 只回 reason，不回命中集合，所以这里按标题重算一遍）。
+      const lower = String(ref ?? '').trim().toLowerCase()
+      const exact = all.filter(item => String(item.title).toLowerCase() === lower)
+      const matches = exact.length > 1 ? exact : all.filter(item => String(item.title).toLowerCase().includes(lower))
+      const listed = describe(matches.length ? matches : all)
+      return `工作区「${ref}」对应多个工作区，无法确定是哪一个：${listed}。`
+        + '为避免建出重复目录，本次不自动新建。请改用工作区 id 或绝对路径重新派发。'
+    }
+
+    if (reason === 'not-found') {
+      if (create) {
+        return `找不到工作区「${ref}」。已按名字尝试新建，但没有成功。现有：${candidates}`
+      }
+      return `找不到工作区「${ref}」，且允许新建被关闭。现有：${candidates}`
+    }
+
+    // 空引用或宿主没给归因：不编造原因，只说事实。
+    return `没有解析到工作区「${ref}」（既不是已知工作区，也不是可新建的名字）。现有：${candidates}`
+  }
+
+  /**
    * 子会话放在哪个工作区。
    *
    * 语义（0.8.1 起重写）：**有目标就用目标，没有目标才退回日期工作区**。
@@ -414,6 +570,7 @@ export class Dispatch {
    *   1. 任务带 `workspaceId` 且注册表里能查到 → 用它。这一步**不可关闭**，
    *      与 `workerWorkspace` 配成什么都不相干。
    *   2. 否则 → 当天的【派发】工作区（`workerWorkspace: day`，默认）。
+   *      例外：**调用方显式给了 cwd 时不用日期兜底**（见下）。
    *   3. 再否则 → 任务的 `cwd`（会话按目录反查/登记）。
    *
    * 为什么重写：0.8.0 及更早这里是 `workerWorkspace === 'target' && target`，
@@ -421,7 +578,12 @@ export class Dispatch {
    * 每次启动都凭空多出一个 `【派发】YYYY-MM-DD`。用户的意图恰恰相反：选了目标就
    * 应该在目标里，「退回日期工作区」只是找不到目标时的兜底，不是常态。
    *
-   * `workerWorkspace: 'cwd'` 时跳过第 2 步：不建【派发】工作区，直接按目录归属。
+   * 显式 cwd 为什么也跳过第 2 步：日期兜底是「调用方什么都没说，我们替他挑一个
+   * 干净目录」，而显式 cwd 是「调用方明确说了要在哪干活」。有明确指示时还把他
+   * 挪进【派发】目录，等于把 2026-11-08 12:10 那次事故重演一遍（显式 cwd 被
+   * 静默丢掉，`task.cwd` 记的是调用方的路径，子会话却住在日期工作区里）。
+   *
+   * `workerWorkspace: 'cwd'` 时同样跳过第 2 步：不建【派发】工作区，直接按目录归属。
    * 这是给「连兜底也不要工作区」的场景留的开关，默认不用。
    *
    * 注意：这里**只在真的需要兜底时**才调 `dayWorkspace()`（它会 mkdir + 注册）。
@@ -437,7 +599,8 @@ export class Dispatch {
       : undefined
     if (target) return { workspaceId: target.id, path: target.path, title: target.title }
 
-    // 2. 没有目标：按配置决定兜底到当天的【派发】工作区，还是直接用 cwd。
+    // 2. 没有目标：显式 cwd 就是调用方的明确指示，不再用日期工作区覆盖它。
+    if (task.cwdExplicit) return { path: task.cwd }
     if (this.workerWorkspaceMode() === WORKER_WORKSPACE_CWD) return { path: task.cwd }
     const day = await this.workspaces.dayWorkspace(dayKey())
     if (day) return { workspaceId: day.id, path: day.path, title: day.title }
@@ -499,6 +662,9 @@ export class Dispatch {
     this.stopBackgroundWatch(task.id)
     void this.pump()
     void this.maybeSummarize(task)
+    // P0-5：结算后立刻判一次封顶。放在这里而不是放定时器里，是因为
+    // 「体积在增长」这件事恰好发生在结算点；幂等，多调几次没有代价。
+    this.enforceLedgerCap()
     return true
   }
 
@@ -531,6 +697,9 @@ export class Dispatch {
     })
 
     try {
+      // 批次汇总是「一次派发 N 个任务」的结算信号，属于必须直通的一类（P0-2）：
+      // 批次成员自己只入库，如果汇总也不回流，整批就会彻底静默。
+      this.admissionCounts[ADMISSION.DIRECT] += 1
       await this.relay(
         { parentSessionId: task.parentSessionId, id: group, workerSessionId: '' },
         `[dispatch] 批次 ${group} 全部结束（${members.length} 个任务：${summary}）\n${lines.join('\n')}\n`
@@ -674,7 +843,20 @@ export class Dispatch {
     catch (error) { this.warn(`${LOG_PREFIX} 清理已中止的 worker 失败: %s`, String(error)) }
   }
 
-  /** 记录一次 worker 报告，并按需回流主会话。 */
+  /**
+   * 记一条报告并按准入分级决定要不要回流主会话。
+   *
+   * P0-3 **入库就截断**：0.8.x 只在 `reportText()` 外发时 `clip`，`task.reports`
+   * 里存的是调用方给的原样长度，于是「单任务体积由调用方决定」——一个爱写长
+   * 报告的 worker 能把账本撑到任意大，而 `dispatch_inspect` 读回来的也是那份
+   * 巨大的正文。现在同一个上限同时作用于入库与外发（外发限长就是入库限长，
+   * 库里的东西和主会话看到的是同一份），被截的条目留 `entry.truncated` 记录
+   * 原始长度，便于回答「这是不是被截过」。
+   *
+   * P0-2 准入分级：`admissionOf()` 决定这条报告是 `direct`（回流）还是
+   * `ledger`（只入库）。默认只有结论类与需要人处理的状态直通，`progress`
+   * 只入账本——「进度」是过程信息，不该进会话长期历史。
+   */
   async report(agent, input) {
     const task = this.table.byWorker(agent.id)
     if (!task) throw new Error('dispatch_report 只能由被派发的 worker 调用；当前会话不属于任何派发任务')
@@ -684,7 +866,7 @@ export class Dispatch {
     const summary = String(input.summary ?? '').trim()
     if (!summary) throw new Error('dispatch_report 需要 summary')
 
-    const entry = { at: now(), status, summary, detail: input.detail ? String(input.detail) : undefined }
+    const entry = this.#admitEntry(status, input)
     task.reports.push(entry)
     if (task.reports.length > MAX_REPORTS) task.reports.splice(0, task.reports.length - MAX_REPORTS)
     task.lastReportAt = entry.at
@@ -699,6 +881,9 @@ export class Dispatch {
     if (TERMINAL_REPORT.has(status)) this.settle(task, status)
     this.schedulePersist()
 
+    const admission = this.admissionOf(task, entry)
+    this.admissionCounts[admission] += 1
+
     // progress 只在主会话正忙时顺带并入，不为了它把人叫醒。
     // 批次内的终态报告只入库，等整批结束由 maybeSummarize 统一回流一条——
     // 但如果这一批已经汇总过了、或这条任务被重开过，就再也等不到汇总了，
@@ -706,10 +891,20 @@ export class Dispatch {
     const selfRelay = !task.group || task.groupClosed || task.groupReopened
     // progress 节流：长任务每完成一步就报一次，会把主会话刷成一条流水线。
     // 被挡下的仍然入库（dispatch_inspect 看得到），只是不再单独回流。
+    //
+    // P0-2 之后 progress 的默认准入是 `ledger`，这条节流逻辑只在用户把
+    // progress 配进 `directReportStatuses` 时才用得上——保留它是因为配置
+    // 一旦放开，没有节流会比放开前更糟（每一小步都回流）。
     const interval = Math.max(0, Number(this.config.progressRelayIntervalMs) || 0)
     const lastProgressAt = task.progressRelayAt ? Date.parse(task.progressRelayAt) : 0
-    const throttled = status === 'progress' && interval > 0 && Date.now() - lastProgressAt < interval
-    if ((selfRelay || status === 'progress') && !throttled) {
+    const throttled = status === 'progress' && admission === ADMISSION.DIRECT
+      && interval > 0 && Date.now() - lastProgressAt < interval
+    // `admission === direct` 是新增的必要条件：只入账本的状态连投递都不该尝试，
+    // 否则「不回流」只是靠后面的分支顺序维持，改一行就破。
+    const shouldRelay = admission === ADMISSION.DIRECT
+      && (selfRelay || status === 'progress')
+      && !throttled
+    if (shouldRelay) {
       if (status === 'progress') task.progressRelayAt = entry.at
       await this.relay(task, this.reportText(task, entry), status !== 'progress')
     }
@@ -717,16 +912,93 @@ export class Dispatch {
       recorded: true,
       task_id: task.id,
       status: task.status,
+      admission,
+      ...(entry.truncated ? { truncated: entry.truncated } : {}),
       grouped: !selfRelay,
       ...(throttled ? { throttled: true } : {}),
+      ...(shouldRelay ? {} : { relayed: false }),
     }
   }
 
-  /** 报告文本：给主会话模型看的紧凑结构化消息。 */
+  /**
+   * 造一条入库的报告条目（P0-3 截断 + 留痕）。
+   *
+   * 为什么截断放在「入库前」而不是「外发前」：账本才是权威副本（G1）。
+   * 外发是投影，投影可以更短；但库里的长度必须**有硬界**，否则容量膨胀
+   * 只能等 P2 的存储分片来救。两者取同一个数是为了避免「库里 10 万字、
+   * dispatch_inspect 看到的是残版、主会话看到的是另一个残版」这种三方错位。
+   */
+  #admitEntry(status, input) {
+    const limitSummary = Math.max(0, Number(this.config.maxReportSummaryChars) || 0)
+    const limitDetail = Math.max(0, Number(this.config.maxReportDetailChars) || 0)
+    const rawSummary = String(input.summary ?? '').trim()
+    const rawDetail = input.detail ? String(input.detail) : undefined
+    const summary = clip(rawSummary, limitSummary)
+    const detail = rawDetail === undefined ? undefined : clip(rawDetail, limitDetail)
+    /** @type {{summary?: number, detail?: number}} */
+    const truncated = {}
+    if (summary.length < rawSummary.length) truncated.summary = rawSummary.length
+    if (detail !== undefined && detail.length < rawDetail.length) truncated.detail = rawDetail.length
+    return {
+      at: now(),
+      status,
+      summary,
+      detail,
+      // 只在真被截时出现：一个恒存在的空对象会让「是否截过」变成永远 true。
+      ...(Object.keys(truncated).length ? { truncated } : {}),
+    }
+  }
+
+  /**
+   * 一条报告的准入判定（P0-2）：`'direct'` 回流 / `'ledger'` 只入库。
+   *
+   * 判据（顺序有意义，先判的不能被配置翻掉）：
+   * - `TERMINAL_REPORT` 里的状态（`done`/`blocked`/`failed`/`cancelled`）→ **恒 direct**。
+   *   结论与「需要人处理」是主会话唯一必须知道的两类事，任何配置都不该把它们
+   *   降级成静默——用户把 `directReportStatuses` 清空也不该让 done 失声；
+   * - 配置 `directReportStatuses` 里点名的状态 → direct（默认 `blocked`/`failed`，
+   *   用户可以把 `progress` 加进来换回旧行为）；
+   * - 其余（含 `progress` 与未知状态）→ ledger（未知 = 不敢保证是结论，宁可只入库）。
+   *
+   * @param {object} task 所属任务（当前判据不看它，但准入以后可能要按批次/工作区走）
+   * @param {{status: string}} entry 报告条目
+   * @returns {'direct'|'ledger'}
+   */
+  admissionOf(task, entry) {
+    const status = String(entry?.status ?? '')
+    if (TERMINAL_REPORT.has(status)) return ADMISSION.DIRECT
+    if (this.directStatuses().includes(status)) return ADMISSION.DIRECT
+    return ADMISSION.LEDGER
+  }
+
+  /**
+   * 当前配置下**额外**直通的状态列表（含硬编码的终态，去重后按稳定顺序）。
+   *
+   * 单一来源：`admissionOf()` 与 `memoryStats().admission.directStatuses`
+   * 都读它。两处各写一份的代价是「自检说 progress 直通，实际没直通」——
+   * 而自检的全部价值就是能对账。
+   */
+  directStatuses() {
+    const configured = Array.isArray(this.config.directReportStatuses)
+      ? this.config.directReportStatuses.map(String)
+      : []
+    return [...new Set([...TERMINAL_REPORT, ...configured])]
+  }
+
+  /**
+   * 报告文本：给主会话模型看的紧凑结构化消息。
+   *
+   * 这里的截断上限与外发**同一个配置**，但入库时已经截过一次（见 `#admitEntry`），
+   * 所以正常情况下这里是幂等的（长度没变，`clip` 原样返回）。保留这层是给
+   * 两件事兜底：一是历史库里的老条目（升级前入库的超长报告），二是调用方
+   * 绕过 `report()` 直接构造条目（`maybeSummarize` 之类）。
+   */
   reportText(task, entry) {
     const head = `[dispatch] 任务 ${task.id} · ${task.title} · 报告 ${entry.status}`
-    const tail = entry.detail ? `\n详情：\n${clip(entry.detail, 4000)}` : ''
-    return `${head}\n摘要：\n${clip(entry.summary, 6000)}${tail}\n（子会话 ${task.workerSessionId}）`
+    const summaryLimit = Math.max(0, Number(this.config.maxReportSummaryChars) || 6000)
+    const detailLimit = Math.max(0, Number(this.config.maxReportDetailChars) || 4000)
+    const tail = entry.detail ? `\n详情：\n${clip(entry.detail, detailLimit)}` : ''
+    return `${head}\n摘要：\n${clip(entry.summary, summaryLimit)}${tail}\n（子会话 ${task.workerSessionId}）`
   }
 
   /**
@@ -843,7 +1115,11 @@ export class Dispatch {
 
     const agent = this.ctx.agents.get(sessionId)
     const text = agent ? lastAssistantText(agent) : ''
-    task.lastText = text
+    // P0-3：`lastText` 同样入库即截断。它是「worker 最后说了什么」的备份，
+    // 而 worker 的一段总结可以很长；不截的话 `tasks.json` 的体积会由
+    // worker 的啰嗦程度决定，跟报告一样没有硬界。外发时还会再 clip 一次
+    //（finishIdleTurn 里的 5000），两者不冲突：入库是硬界，外发是投影预算。
+    task.lastText = clip(text, this.#maxLastTextChars())
     task.updatedAt = now()
 
     // 回合结束 ≠ 活干完：后台还有 shell job / subagent 在跑时先不结算。
@@ -851,7 +1127,13 @@ export class Dispatch {
     // 就是为了这件事。这里用「延迟结算 + 巡检」近似它。
     if (await this.handOffToBackground(task)) return
 
-    await this.finishIdleTurn(task, text)
+    await this.finishIdleTurn(task, task.lastText ?? '')
+  }
+
+  /** `lastText` 的入库上限（可配，0 表示不截）。 */
+  #maxLastTextChars() {
+    const limit = Number(this.config.maxLastTextChars)
+    return Number.isFinite(limit) && limit > 0 ? limit : 5000
   }
 
   /**
@@ -893,7 +1175,10 @@ export class Dispatch {
     // 未汇总的批次成员不单独回流：整批结束时有一条汇总，逐条发等于没汇总。
     if (task.group && !task.groupClosed && !reopened) return
 
-    const body = text ? clip(text, 5000) : '（worker 本轮没有输出文本）'
+    // 这里的 5000 与 `maxLastTextChars` 默认值一致：`text` 参数可能来自
+    // `task.lastText`（已按 maxLastTextChars 截过），也可能来自 watchBackground
+    // 的旧值。统一按配置再夹一次，避免改了配置后这条路径还按老数字走。
+    const body = text ? clip(text, this.#maxLastTextChars()) : '（worker 本轮没有输出文本）'
     const note = extra.note ? `\n${extra.note}` : ''
     await this.relay(task,
       `[dispatch] 任务 ${task.id} · ${task.title} · 一轮执行结束（worker 未显式报告）\n最后一条消息：\n${body}\n${note}`
@@ -1292,8 +1577,51 @@ export class Dispatch {
     if (!task) return
     task.inputReadAt = now()
     task.inputPendingAt = undefined
+    // 读到了就不再是「不知道」：清掉超时留下的 unknown 标记。
+    task.inputUnknownAt = undefined
     task.updatedAt = task.inputReadAt
     this.schedulePersist()
+  }
+
+  // ---------------------------------------------------------------- 生命周期
+
+  /**
+   * 清掉过期状态（P0-4，幂等）。
+   *
+   * 目前只有一件事：**「已投递未读」的 TTL**。
+   *
+   * 为什么必须是 TTL 而不是等事件：宿主在部分部署（headless、精简宿主）里
+   * 根本不发 `session/event`，于是 `onSessionEvent` 永远不会被调用，
+   * `inputPendingAt` 就永久挂着。看板把它显示成「已投递未读」——
+   * 一个永远不结束的状态，比不显示更误导人。
+   *
+   * 超时后**不假装读过**（那会掩盖真正的问题），而是改写成一个更弱的断言：
+   * `inputUnknownAt = now()`，含义是「我们不知道 worker 读没读到」。
+   * `card()` / `detail()` 只在有 pending 时报 pending，所以 unknown 之后
+   * 那张卡片不再显示「待读」，但仍能从 `input_unknown_at` 看到曾经发生过什么。
+   *
+   * 触发点：`schedulePersist` 的防抖回调与 `persist()` 之前。**不新开定时器**——
+   * 为一个纯内存清扫起一条常驻链路不值得，而写盘本来就是这些状态变化的汇合点。
+   *
+   * @returns {number} 本次被改成 unknown 的任务数（供自检/日志）
+   */
+  sweepMemory() {
+    const ttl = Number(this.config.inputPendingTtlMs)
+    if (!Number.isFinite(ttl) || ttl <= 0) return 0
+    const cutoff = Date.now() - ttl
+    let swept = 0
+    for (const task of this.table.tasks.values()) {
+      if (!task.inputPendingAt || task.inputReadAt) continue
+      const at = Date.parse(task.inputPendingAt)
+      if (!Number.isFinite(at) || at > cutoff) continue
+      task.inputPendingAt = undefined
+      task.inputUnknownAt = now()
+      swept += 1
+    }
+    if (swept) {
+      this.log('%s 有 %d 条「已投递未读」超过 %d ms 未确认，标记为 unknown', LOG_PREFIX, swept, ttl)
+    }
+    return swept
   }
 
   // ---------------------------------------------------------------- 视图
@@ -1307,6 +1635,10 @@ export class Dispatch {
    * 一行就能看出「这条报告没送到」。
    */
   card(task) {
+    // 退休记录没有 reports / lastText（P0-5 有意不搬正文），而 `card()` 同时
+    // 要给活任务与退休记录用（`detail()` 也走它）。所以这里先归一，
+    // 不去要求调用方保证字段齐——否则「查一个退休任务」会直接抛 TypeError。
+    const reports = Array.isArray(task.reports) ? task.reports : []
     return {
       task_id: task.id,
       title: task.title,
@@ -1318,15 +1650,25 @@ export class Dispatch {
       created_at: task.createdAt,
       updated_at: task.updatedAt,
       ...(task.lastReportAt ? { last_report_at: task.lastReportAt } : {}),
-      ...(task.reports.length ? { reports: task.reports.length } : {}),
-      summary: task.reports.length ? oneLine(task.reports.at(-1).summary, 200) : oneLine(task.lastText, 200),
+      ...(reports.length ? { reports: reports.length } : {}),
+      // 退休记录没有 reports，只有 reportCount（P0-5 有意不搬正文）。
+      ...(!reports.length && task.reportCount ? { report_count: task.reportCount } : {}),
+      summary: reports.length ? oneLine(reports.at(-1).summary, 200) : oneLine(task.lastText, 200),
       ...(task.error ? { error: oneLine(task.error, 300) } : {}),
       ...(task.delivery && task.delivery.outcome !== 'delivered'
         ? { report_delivery: task.delivery }
         : {}),
       // 「追问问出去没有」：已投递未读是异常态（worker 那一步没拿到消息），值得显示。
-      ...(task.inputPendingAt && !task.inputReadAt ? { input_pending_at: task.inputPendingAt } : {}),
+      // P0-4 之后只有**仍在 TTL 内**的 pending 才报 pending；超时被 `sweepMemory()`
+      // 改写成 inputUnknownAt，语义从「在读」降级成「不知道」，不再显示成卡住。
+      // `!task.inputUnknownAt` 是双保险：万一有路径同时留下两个标记（旧数据、
+      // 或 future 的清理顺序变了），unknown 必须压过 pending——「不知道」
+      // 是比「在读」更弱也更诚实的断言，弱断言不该被强断言盖住。
+      ...(task.inputPendingAt && !task.inputReadAt && !task.inputUnknownAt
+        ? { input_pending_at: task.inputPendingAt }
+        : {}),
       ...(task.inputReadAt ? { input_read_at: task.inputReadAt } : {}),
+      ...(task.inputUnknownAt && !task.inputReadAt ? { input_unknown_at: task.inputUnknownAt } : {}),
       ...(task.retryAt ? { retry_at: task.retryAt } : {}),
       ...(task.taskDir ? { task_dir: task.taskDir } : {}),
       ...(task.prepareAt ? { prepare_at: task.prepareAt } : {}),
@@ -1338,13 +1680,77 @@ export class Dispatch {
 
   /** 详情：卡片 + 最近报告 + worker 最后输出。 */
   detail(task) {
+    // 退休记录也可以走这里（`resolveTask()` 返回的对象若 `isRetired()` 为真）：
+    // 它没有 brief / reports / lastText，`clip(undefined)` 返回空串、
+    // `Array.isArray` 全 false，输出自然退化成只剩留痕字段。
+    // 这样 `dispatch_inspect` 的调用方不必为「退休」写第二条组装路径。
+    const reports = Array.isArray(task.reports) ? task.reports : []
     return {
       ...this.card(task),
       brief: clip(task.brief, 2000),
       cwd: task.cwd,
       ...(task.briefTruncated ? { brief_truncated_to: task.brief.length } : {}),
-      ...(task.reports.length ? { recent_reports: task.reports.slice(-5) } : {}),
+      ...(reports.length ? { recent_reports: reports.slice(-5) } : {}),
       ...(task.lastText ? { last_worker_text: clip(task.lastText, 3000) } : {}),
+      // P0-4：归档是「只读冻结」，冻结时刻要能在详情里看到。
+      // 注意归档与退休是两件事：归档 = 会话收了（任务还在表里，可取消归档）；
+      // 退休 = 任务记录移出活表（只在 retired 留痕）。所以归档用 frozenAt，
+      // **不能**复用 retiredAt——那会让「已归档」被误读成「已退休」。
+      ...(task.frozenAt ? { frozen_at: task.frozenAt } : {}),
+      // P0-5：退休记录的两个关键字段。它们只在 retiredCard() 里出现，
+      // 这里重复一次是为了让「退休记录也能过 detail()」这件事显式可见。
+      ...(task.retiredAt ? { retired_at: task.retiredAt } : {}),
+      ...(task.retiredReason ? { retired_reason: task.retiredReason } : {}),
+    }
+  }
+
+  /**
+   * 按 id 查任务：先查活表，再查退休留痕（P0-5）。
+   *
+   * 返回**对象本身**（活任务 或 退休记录），查不到返回 undefined——这是与
+   * board/client 共享的字面契约。判定「这是不是退休记录」看
+   * `retiredReason` 有没有值：退休记录一定带它，活任务一定不带
+   * （活任务的归档标记是 `archivedAt` / `frozenAt`，与退休是两个概念）。
+   *
+   * 为什么需要它：退休之后 `table.get()` 返回 undefined，而
+   * 「没有任务 xxx」在本插件里是**用户点错了/任务不存在**的意思。退休的
+   * 任务不是不存在，它是「存在过、被收起、原因可查」。两者混成一个错误
+   * 就等于静默丢历史。
+   *
+   * @returns {object | undefined} 活任务、退休记录，或 undefined
+   */
+  resolveTask(id) {
+    const key = String(id ?? '')
+    return this.table.get(key) ?? this.retired.get(key)
+  }
+
+  /** 这条记录是不是退休留痕（而非活任务）。 */
+  isRetired(record) {
+    return !!record && typeof record.retiredReason === 'string' && record.retiredReason !== ''
+  }
+
+  /**
+   * 把退休记录投影成一张**任务形状**的卡片，让 `dispatch_inspect` 的输出
+   * 对调用方保持同一个形状（`{task: {...}}`），不必让模型学一套新字段。
+   *
+   * 注意这里返回的是**内部形状**（camelCase，`retiredAt` / `retiredReason`），
+   * 因为它是给 `detail()` 吃的——`detail()` 再统一转成 snake_case。
+   * 早先的版本在这里直接写 `retired_at`，结果是 `detail()` 读
+   * `task.retiredAt` 拿到 undefined，`dispatch_inspect` 输出的退休时刻为空：
+   * 两个「同名字段」的两种拼法之间没有任何编译期约束，只能靠一条用例钉住。
+   *
+   * @param {object} record `this.retired` 里的记录
+   */
+  retiredCard(record) {
+    return {
+      ...record,
+      // `card()`/`detail()` 读的都是这几个 camelCase 字段；退休记录没有
+      // reports / lastText / brief，留空让它们自然退化成「无正文」。
+      reports: [],
+      lastText: '',
+      // 最后一条摘要对退休记录是**唯一**可读的正文残留，放进 lastText 让
+      // `card().summary` 能落到它上面（card 在没有 reports 时读 lastText）。
+      ...(record.summary ? { lastText: record.summary } : {}),
     }
   }
 
@@ -1355,6 +1761,12 @@ export class Dispatch {
     if (this.persistTimer || this.disposed) return
     this.persistTimer = setTimeout(() => {
       this.persistTimer = undefined
+      // P0-4：TTL 清扫挂在防抖回调里，**不新开定时器**。
+      // 理由：这些状态变化（投递、读回执、结算）本来就汇流到写盘，
+      // 在这里顺手清一次既覆盖了「确实有变化」的时刻，又不会为一条纯内存
+      // 清扫拉起常驻链路。代价是最长要等 800ms 才知道过期——对这个
+      // 30 分钟量级的 TTL 完全不敏感。
+      this.sweepMemory()
       void this.persist()
     }, 800)
     this.persistTimer.unref?.()
@@ -1369,7 +1781,12 @@ export class Dispatch {
    */
   persist() {
     this.#persistChain = (this.#persistChain ?? Promise.resolve())
-      .then(() => this.#writeOnce())
+      .then(() => {
+        // 直接调用 persist() 的路径（dispose、测试、看板归档）不经过防抖回调，
+        // 所以这里再清一次，保证「任何一次落盘前状态都是清过的」。
+        this.sweepMemory()
+        return this.#writeOnce()
+      })
       .catch(() => { /* 已在 #writeOnce 内记日志 */ })
     return this.#persistChain
   }
@@ -1392,7 +1809,10 @@ export class Dispatch {
         return { ...task, brief: task.brief.slice(0, limit), briefTruncated: task.brief.length }
       })
       const targets = Object.fromEntries(this.targets)
-      await writeState(this.stateFile, { tasks, targets }, now())
+      // 退休留痕按「最老在前」写盘：读回来时保持同样的顺序，`ledgerMaxRetired`
+      // 裁掉的就是队头，不需要在恢复时重排。
+      const retired = [...this.retired.values()]
+      await writeState(this.stateFile, { tasks, targets, retired }, now())
       this.persistError = undefined
     } catch (error) {
       this.persistError = String(error)
@@ -1446,6 +1866,19 @@ export class Dispatch {
         this.table.tasks.set(task.id, task)
       }
       if (requeued) this.log(`${LOG_PREFIX} 重启后重新入队 %d 个未启动的任务`, requeued)
+      // P0-5：退休留痕读回 `this.retired`，**绝不当活任务恢复**。
+      // 它们是「已经决定不再参与计算」的记录：塞回 table.tasks 会让它们
+      // 重新给指标投票，等于没退休；而恢复时再跑一次 enforceLedgerCap 也没必要——
+      // 能落盘就说明当时已经过一遍上限判据，重复判只会白改一遍状态。
+      let retiredCount = 0
+      for (const record of state.retired) {
+        if (!record?.id) continue
+        this.retired.set(record.id, record)
+        retiredCount += 1
+      }
+      // 读回的留痕也可能超过上限（旧文件 + 上限调小）：只裁不留痕，不要再写回盘，
+      // 下一次 persist 自然收敛。
+      this.#trimRetired()
       for (const [sessionId, target] of Object.entries(state.targets)) {
         // 保留所有形态的目标：auto 与具体工作区都算。只要对象非空就是有效设置。
         if (target && typeof target === 'object' && (target.auto || target.workspace_id)) {
@@ -1456,10 +1889,197 @@ export class Dispatch {
         this.warn(`${LOG_PREFIX} 主状态文件损坏，已从备份 %s.bak 恢复`, this.stateFile)
         this.restoreError = 'recovered-from-bak'
       }
-      this.log(`${LOG_PREFIX} 读回 %d 个历史任务、%d 个派发目标（%s）`, this.table.tasks.size, this.targets.size, this.stateFile)
+      this.log(`${LOG_PREFIX} 读回 %d 个历史任务、%d 个退休留痕、%d 个派发目标（%s）`,
+        this.table.tasks.size, retiredCount, this.targets.size, this.stateFile)
     } catch (error) {
       this.warn(`${LOG_PREFIX} 恢复历史状态失败: %s`, String(error))
       this.restoreError = String(error)
+    }
+    // P0-5：读回之后判一次上限（幂等，通常什么都不做）。这里判的是**活表**
+    // 是否超限（配置被调小、换了更严的配置），而不是把刚读回的留痕再退休一遍
+    // ——留痕从来没进过 `table.tasks`，天然不可能被二次退休。
+    // 不在这里判的代价：上限要等到下一次结算才生效，期间 tasks.json 已经超了。
+    this.enforceLedgerCap()
+  }
+
+  /**
+   * 账本封顶（P0-5，幂等）。
+   *
+   * 判据两条，任一成立就退休（`RETIRED_REASONS` 对应两条）：
+   * - **条数**：`table.tasks.size > ledgerMaxTasks`
+   * - **天数**：存在「非活跃（已结算、非 running/queued）且 `updatedAt` 早于
+   *   `ledgerMaxDays` 天」的任务
+   *
+   * 退休顺序：**已归档优先，其次最老 `updatedAt`**。为什么归档优先——归档
+   * 是用户已经明确表示「不想再看」的动作，它比「单纯很老」更该先走。
+   *
+   * 退休做两件事：从 `table.tasks` / `table.queue` 移出，往 `this.retired`
+   * 写一条薄记录。**不搬 reports**——搬了等于把正文换了个地方存，容量上限
+   * 就成了笑话；只留 `summary`（最后一条报告的单行摘要）与计数。
+   *
+   * 触发点：`settle()` 后、`archiveStale()` 后、`restore()` 后各一次。
+   * 都不新开定时器：体积增长只发生在这些点，幂等调用没有代价。
+   *
+   * @returns {{ retired: number, reasons: Record<string, number> }}
+   */
+  enforceLedgerCap() {
+    // 与 `archiveAfterHours: 0 表示不归档` 保持同一套约定：<= 0 或非数字 = 不限制。
+    // 这样用户想关掉治理时不用去理解「0 到底是一个很严的上限还是关闭」。
+    const rawMaxTasks = Number(this.config.ledgerMaxTasks)
+    const maxTasks = Number.isFinite(rawMaxTasks) && rawMaxTasks > 0 ? rawMaxTasks : undefined
+    const maxDays = Number(this.config.ledgerMaxDays)
+    const cutoff = Number.isFinite(maxDays) && maxDays > 0 ? Date.now() - maxDays * 86_400_000 : undefined
+    /** 退休原因计数（供日志/自检，不落盘）。 */
+    const reasons = {}
+
+    /** 非活跃 = 已结算且不在跑。running/queued 永远不退休：它们还会写。 */
+    const isInactive = task => SETTLED.has(task.status) && task.status !== 'running' && task.status !== 'queued'
+    const updatedAtOf = task => Date.parse(task.updatedAt ?? '') || 0
+
+    /**
+     * 候选按「最该先走」排序：已归档优先 → 更老的 updatedAt 优先。
+     * 排序键用 `updatedAt` 的数字而不是字符串比较：ISO 串能比大小，但
+     * 一旦有任务写了不带毫秒的旧格式，字典序与时间序就会分岔。
+     */
+    const candidates = () => [...this.table.tasks.values()]
+      .filter(isInactive)
+      .sort((a, b) => (!!b.archivedAt - !!a.archivedAt) || (updatedAtOf(a) - updatedAtOf(b)))
+
+    let retired = 0
+    // 1) 天数：先按超期条件逐个退休。这一条与条数无关——即使总量很少，
+    //    放了 90 天没人碰的记录也不该继续给指标投票。
+    if (cutoff !== undefined) {
+      for (const task of candidates()) {
+        if (updatedAtOf(task) >= cutoff) continue
+        this.#retire(task, RETIRED_REASONS.CAP_DAYS)
+        reasons[RETIRED_REASONS.CAP_DAYS] = (reasons[RETIRED_REASONS.CAP_DAYS] ?? 0) + 1
+        retired += 1
+      }
+    }
+    // 2) 条数：还超就继续按同样的顺序退休，直到回到上限。
+    //    重新取一次候选：上一轮已经改过 table.tasks。
+    //    `maxTasks === undefined` 表示「不设条数上限」（配置 <= 0），此时跳过。
+    if (maxTasks !== undefined && this.table.tasks.size > maxTasks) {
+      for (const task of candidates()) {
+        if (this.table.tasks.size <= maxTasks) break
+        this.#retire(task, RETIRED_REASONS.CAP_COUNT)
+        reasons[RETIRED_REASONS.CAP_COUNT] = (reasons[RETIRED_REASONS.CAP_COUNT] ?? 0) + 1
+        retired += 1
+      }
+    }
+    if (retired) {
+      this.log('%s 账本封顶：退休 %d 个任务（%s），留痕 %d 条',
+        LOG_PREFIX, retired, JSON.stringify(reasons), this.retired.size)
+      this.schedulePersist()
+    }
+    return { retired, reasons }
+  }
+
+  /**
+   * 把一个任务移出活表并写一条退休留痕。
+   *
+   * 只删 `table.tasks` / `table.queue`，**不动** worker 会话（归档是别的事），
+   * 也不动 `reports`（它们随任务记录一起消失——这是「退休」的定义，
+   * 详见计划书 G4：退休记录带「何时、为什么」，不承诺正文）。
+   */
+  #retire(task, reason) {
+    const at = now()
+    const last = Array.isArray(task.reports) && task.reports.length ? task.reports.at(-1) : undefined
+    const record = {
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      parentSessionId: task.parentSessionId,
+      workerSessionId: task.workerSessionId,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      // 可选字段显式写 null 而不是留 undefined：留 undefined 会被
+      // `JSON.stringify` 整个丢掉，落盘后「这条记录有没有归档过」就只能靠
+      // 字段**不存在**来判断，读回方再也分不清「没有」与「存的时候就没值」。
+      archivedAt: task.archivedAt ?? null,
+      retiredAt: at,
+      retiredReason: reason,
+      workspaceTitle: task.workspaceTitle ?? null,
+      reportCount: Array.isArray(task.reports) ? task.reports.length : 0,
+      summary: oneLine(last?.summary ?? task.lastText ?? '', 200),
+    }
+    this.table.tasks.delete(task.id)
+    this.table.dequeue(task.id)
+    this.retired.set(task.id, record)
+    this.#trimRetired()
+    return record
+  }
+
+  /**
+   * 留痕列表封顶：超过 `ledgerMaxRetired` 丢最老的（Map 保持插入顺序，
+   * 而插入顺序就是退休顺序）。
+   */
+  #trimRetired() {
+    const max = Math.max(1, Number(this.config.ledgerMaxRetired) || 5000)
+    while (this.retired.size > max) {
+      const oldest = this.retired.keys().next()
+      if (oldest.done) break
+      this.retired.delete(oldest.value)
+      this.retiredDropped += 1
+    }
+  }
+
+  /**
+   * 记忆治理的当前口径（P0-1，host 只提供口径，不算派生指标的漂亮数字）。
+   *
+   * 形状是与看板/文档共享的契约，**字段名不得改**。它回答的是
+   * 「现在这套治理到底发生了什么」：
+   * - `window`：指标窗口（最近 N 天 / M 条），`since` 是窗口起点；
+   * - `ledger`：活表规模、退休数、归档数、被丢的留痕数、单条预算；
+   * - `admission`：准入决策计数（direct / ledger）与当前直通状态列表；
+   * - `pending`：仍在 TTL 内的「已投递未读」数，与已降级成 unknown 的数量；
+   * - `retired`：留痕条数与最近一次退休时刻。
+   *
+   * 注意这里的 `ledger.tasks` 是**活表**条数（退休/归档都还在活表里，归档只
+   * 打标记不下移），`retired` 是另外一份。两者相加才是「曾经有过多少任务」
+   * ——这就是计划书 §七 第 7 条「守恒」的口径。
+   */
+  async memoryStats() {
+    const days = Number(this.config.memoryWindowDays)
+    const windowDays = Number.isFinite(days) && days > 0 ? days : 7
+    const tasksCfg = Number(this.config.memoryWindowTasks)
+    const windowTasks = Number.isFinite(tasksCfg) && tasksCfg > 0 ? tasksCfg : 200
+    const since = new Date(Date.now() - windowDays * 86_400_000).toISOString()
+
+    let archived = 0
+    let pendingInputs = 0
+    let unknownInputs = 0
+    for (const task of this.table.tasks.values()) {
+      if (task.archivedAt) archived += 1
+      if (task.inputPendingAt && !task.inputReadAt) pendingInputs += 1
+      else if (task.inputUnknownAt && !task.inputReadAt) unknownInputs += 1
+    }
+    let latestRetiredAt
+    for (const record of this.retired.values()) {
+      if (!latestRetiredAt || String(record.retiredAt ?? '') > latestRetiredAt) {
+        latestRetiredAt = String(record.retiredAt ?? '')
+      }
+    }
+    return {
+      window: { days: windowDays, tasks: windowTasks, since },
+      ledger: {
+        tasks: this.table.tasks.size,
+        retired: this.retired.size,
+        archived,
+        retiredDropped: this.retiredDropped,
+        capPerTask: {
+          summary: Math.max(0, Number(this.config.maxReportSummaryChars) || 0),
+          detail: Math.max(0, Number(this.config.maxReportDetailChars) || 0),
+        },
+      },
+      admission: {
+        direct: this.admissionCounts.direct,
+        ledger: this.admissionCounts.ledger,
+        // 与 `admissionOf()` 读同一份来源：自检说直通什么，判定就必须直通什么。
+        directStatuses: this.directStatuses(),
+      },
+      pending: { inputs: pendingInputs, unknown: unknownInputs },
+      retired: { count: this.retired.size, latestAt: latestRetiredAt ?? null },
     }
   }
 
@@ -1573,8 +2193,16 @@ export class Dispatch {
         progressRelayIntervalMs: Math.max(0, Number(this.config.progressRelayIntervalMs) || 0),
         /** 报告最终没送到的任务数（>0 说明主会话不可达或收件箱坏了）。 */
         undelivered: [...this.table.tasks.values()].filter(task => task.delivery?.outcome === 'failed').length,
-        /** 追问已投递但 worker 还没读的任务数（持续 >0 通常是那一步挂了）。 */
-        unreadInputs: [...this.table.tasks.values()].filter(task => task.inputPendingAt && !task.inputReadAt).length,
+        /**
+         * 追问已投递但 worker 还没读的任务数（持续 >0 通常是那一步挂了）。
+         *
+         * P0-4 之后必须排除 `inputUnknownAt`：TTL 到期时 `sweepMemory()` 会清
+         * `inputPendingAt`，所以这里天然不会重复计数；但如果清理没跑（例如
+         * 部署里既没有写盘也没有别的触发点），unknown 存在说明「已经判定为
+         * 不知道」，再算成「未读」就是报假警。
+         */
+        unreadInputs: [...this.table.tasks.values()]
+          .filter(task => task.inputPendingAt && !task.inputReadAt && !task.inputUnknownAt).length,
       },
       retry: {
         transient: !!this.config.retryTransient,
@@ -1587,6 +2215,9 @@ export class Dispatch {
         archived: [...this.table.tasks.values()].filter(task => task.archivedAt).length,
         maxWorkers: this.table.maxWorkers,
       },
+      // P0-1：记忆治理口径。自检是唯一能一次性看到「账本 + 退休 + 待读 + 窗口」
+      // 的地方，§七 第 6 条要求这五个数与账本实际值一致，就在这里对账。
+      memory: await this.memoryStats(),
     }
   }
 
@@ -1657,7 +2288,13 @@ export class Dispatch {
       scanned += 1
       const result = await this.workspaces.archiveSession(task.workerSessionId)
       if (result.ok) {
-        task.archivedAt = now()
+        const at = now()
+        task.archivedAt = at
+        // P0-4 归档冻结：归档是「只读」的开始，冻结时刻必须和归档时刻分开记。
+        // 为什么不用 retiredAt：退休是 P0-5 的「移出活表」，两件事的触发点、
+        // 后果、可见性都不同。把归档写成退休会让 `dispatch_inspect` 认为
+        // 任务已经不可查（其实还在活表里），也让 `memoryStats` 少算一条活任务。
+        task.frozenAt = at
         task.archiveError = undefined
         archived += 1
         this.log(`${LOG_PREFIX} 已归档子会话 %s（任务 %s）`, task.workerSessionId, task.id)
@@ -1668,6 +2305,8 @@ export class Dispatch {
       }
     }
     if (scanned) this.schedulePersist()
+    // P0-5：归档是退休排序里「更该先走」的一类，刚归档完正是重判一次的时机。
+    this.enforceLedgerCap()
     return { scanned, archived, failed }
   }
 

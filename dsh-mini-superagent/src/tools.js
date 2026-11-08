@@ -64,6 +64,19 @@ export function toolDefinitions(dispatch) {
     if (task.parentSessionId !== agent.id) throw new Error(`任务 ${id} 不属于本会话`)
     return task
   }
+  /**
+   * 取本人派发的任务，**退休的也能查到**（P0-5）。
+   *
+   * 退休不等于不存在：它是「记录下来、移出活表、原因可查」。把两者混成
+   * 一句「没有任务」等于静默丢历史，而这正是治理要避免的事。
+   * 归属校验在两种形态下都要做：退休记录同样带 `parentSessionId`。
+   */
+  const ownResolved = (agent, id) => {
+    const found = dispatch.resolveTask(id)
+    if (!found) throw new Error(`没有任务 ${id}`)
+    if (found.parentSessionId !== agent.id) throw new Error(`任务 ${id} 不属于本会话`)
+    return found
+  }
 
   return [
     {
@@ -78,9 +91,9 @@ export function toolDefinitions(dispatch) {
         properties: {
           title: { type: 'string', description: '任务短标题（不超过 120 字），用于列表与子会话标题。' },
           brief: { type: 'string', description: '完整任务简报：目标、约束、验收标准、相关文件路径、已知事实。子会话看不到本会话的历史，必须自包含。' },
-          cwd: { type: 'string', description: '可选。子会话工作目录的绝对路径；省略则用 workspace 的路径，再省略则继承本会话的工作目录。' },
-          workspace: { type: 'string', description: '可选。派发到哪个工作区：工作区 id、绝对路径、或工作区标题都可以。子会话会在这个目录里干活；省略则沿用本会话的工作目录。先用 dispatch_workspaces 看有哪些。' },
-          create_workspace: { type: 'boolean', description: '可选，默认 true。workspace 解析不到时是否自动新建：给的是绝对路径就在该路径建，给的是名字就在工作区根下建。' },
+          cwd: { type: 'string', description: '可选。子会话工作目录的绝对路径。**优先级高于输入框里记住的派发目标**：只给 cwd（比如会话目标是「自动」）时，这一轮就按 cwd 干活，不再自动挑工作区、也不落【派发】日期目录——显式参数永远压过记住的设置。与 workspace 同时给时 workspace 胜（会话归到那个工作区），但 cwd 仍是子会话真实的工作目录（会切过去）。省略则用 workspace 的路径，再省略则继承本会话的工作目录。' },
+          workspace: { type: 'string', description: '可选。派发到哪个工作区：工作区 id、绝对路径、或工作区标题都可以。子会话会在这个目录里干活；省略则沿用本会话的工作目录（或输入框里记住的目标）。**同名工作区有多个时不会猜**：会报错并列出候选的路径，改用 id 或绝对路径重试。先用 dispatch_workspaces 看有哪些。' },
+          create_workspace: { type: 'boolean', description: '可选，默认 true。workspace 解析不到时是否自动新建：给的是绝对路径就在该路径建，给的是名字就在工作区根下建。注意：名字有歧义（多个工作区同名）时**不论这个开关是什么都不会新建**，那样只会造出重复目录。' },
           model: { type: 'string', description: '可选。子会话使用的模型：`model` 或 `provider/model`；省略则用部署默认。宿主不支持切换模型时这次派发会失败并说明原因（不会静默改用默认模型）。' },
           agent_preset: { type: 'string', description: '可选。子会话使用的 agent preset id；省略则用部署默认 preset。' },
           permission_preset: { type: 'string', description: '可选。子会话的权限预设（如 danger-full-access）；省略则继承插件配置或 DSH 默认。' },
@@ -121,7 +134,9 @@ export function toolDefinitions(dispatch) {
               properties: {
                 title: { type: 'string' },
                 brief: { type: 'string' },
-                cwd: { type: 'string' },
+                // 语义与 dispatch_launch 同一套（显式参数压过记住的设置），这里只留简版，
+                // 详细规则见上面 dispatch_launch 的参数描述。
+                cwd: { type: 'string', description: '可选。子会话工作目录的绝对路径，优先级高于记住的派发目标。' },
                 workspace: { type: 'string' },
                 create_workspace: { type: 'boolean' },
                 model: { type: 'string' },
@@ -213,7 +228,8 @@ export function toolDefinitions(dispatch) {
     },
     {
       name: 'dispatch_inspect',
-      description: '查看一个任务的详情：状态、简报、最近几次报告、worker 最后一段输出。要判断“它到底做到哪了”时用它。',
+      description: '查看一个任务的详情：状态、简报、最近几次报告、worker 最后一段输出。要判断“它到底做到哪了”时用它。'
+        + '已退休（记录移出活表）的任务仍可用它查到——返回 `retired: true` 与退休时刻/原因，但没有正文。',
       parameters: {
         type: 'object',
         properties: { task_id: TaskRefSchema },
@@ -222,7 +238,18 @@ export function toolDefinitions(dispatch) {
       },
       async execute(args, exec) {
         const agent = requireCaller(exec)
-        return { task: dispatch.detail(ownTask(agent, args.task_id)) }
+        const found = ownResolved(agent, args.task_id)
+        if (dispatch.isRetired(found)) {
+          // 形状刻意与活任务同构（`{task: {...}}`）：调用方不必为「退休」
+          // 学一套新字段，只看 `retired` 这个布尔。正文不可用要写在 note 里，
+          // 否则「recent_reports 缺失」会被误读成「它没报告过」。
+          return {
+            task: dispatch.detail(dispatch.retiredCard(found)),
+            retired: true,
+            note: '该任务已退休：只保留留痕（何时、为什么、最后一条摘要），报告正文不可用。',
+          }
+        }
+        return { task: dispatch.detail(found) }
       },
     },
     {

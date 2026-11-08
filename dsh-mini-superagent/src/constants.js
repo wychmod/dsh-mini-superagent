@@ -79,6 +79,34 @@ export function normalizeWorkerWorkspace(value) {
   return raw === WORKER_WORKSPACE_CWD ? WORKER_WORKSPACE_CWD : WORKER_WORKSPACE_DAY
 }
 
+/**
+ * 账本「退休」原因。
+ *
+ * 退休是**可查的丢弃**：任务记录从活表移出，只在 `Dispatch.retired` 里留一条
+ * 带 `retiredAt` / `retiredReason` 的薄记录。原因必须是稳定的机器串（不能是
+ * 中文句子），看板与 `dispatch_inspect` 都按它分类计数；要给人看的中文说明
+ * 放在投影层，不要写进账本。
+ */
+export const RETIRED_REASONS = {
+  /** 全局条数超过 `ledgerMaxTasks`。 */
+  CAP_COUNT: 'cap-count',
+  /** 非活跃且 `updatedAt` 早于 `ledgerMaxDays` 天。 */
+  CAP_DAYS: 'cap-days',
+}
+
+/**
+ * 报告写入后的**准入结论**（P0-2）。
+ *
+ * - `direct`：必须回流主会话（结论、需要人处理的事）
+ * - `ledger`：只入账本，不回流（过程信息）
+ *
+ * 名字与字段和 board/client 共享，改这里等于改契约。
+ */
+export const ADMISSION = {
+  DIRECT: 'direct',
+  LEDGER: 'ledger',
+}
+
 /** 默认配置；cordis.patch.yml 里的 config 会覆盖这里的字段。 */
 export const DEFAULTS = {
   /** 同时真正在跑（running）的子会话上限；超出的任务进入 queued，有空位自动开始。 */
@@ -190,6 +218,58 @@ export const DEFAULTS = {
   prepareCommand: '',
   /** prepare 命令超时（毫秒），默认 10 分钟。 */
   prepareTimeoutMs: 600000,
+  /**
+   * 派生指标窗口：最近 N 天（P0-1）。
+   *
+   * 为什么需要窗口：`effectStats()` 原来对**全部**未归档已结算任务计算，
+   * 上个月失败的几条会一直给今天的成功率投票，数字越用越不代表现状。
+   * 窗口只影响**指标口径**，不影响任务是否存在（退休/归档由 P0-5 管）。
+   */
+  memoryWindowDays: 7,
+  /** 派生指标窗口：最近 M 条已结算（与 `memoryWindowDays` 取交集，先到先算）。 */
+  memoryWindowTasks: 200,
+  /**
+   * 单条报告 `summary` 的入库上限（P0-3）。
+   *
+   * 与 `reportText()` 外发时的截断长度**取同一个数**，否则会出现
+   * 「库里很长、发出去很短」的错位：`dispatch_inspect` 看到的和主会话
+   * 看到的不是一份东西。反之若只截外发，账本仍由调用方决定体积。
+   */
+  maxReportSummaryChars: 6000,
+  /** 单条报告 `detail` 的入库上限（P0-3）；同上，与外发截断取同一口径。 */
+  maxReportDetailChars: 4000,
+  /** `task.lastText`（worker 最后一段输出）的入库上限（P0-3）。 */
+  maxLastTextChars: 5000,
+  /**
+   * 「已投递未读」的存活上限（毫秒，P0-4，默认 30 分钟）。
+   *
+   * 宿主在某些部署里不发 `session/event`，于是 `inputPendingAt` 会**永久**挂着
+   * 「待读」，看板上看起来像 worker 卡住了。超时后不假装读过，而是改写成
+   * `inputUnknownAt`——「不知道读没读到」比「永远在读」更接近事实。
+   */
+  inputPendingTtlMs: 1800000,
+  /**
+   * 会话销毁时是否清掉它的派发目标（P0-4，默认开）。
+   *
+   * 不清的代价：`targets` 只增不减，且 `agent/disposed` 是唯一能确定
+   * 「这个会话再也不会派发」的时刻。留着孤儿条目还会让 `dispatch_list`
+   * 之外的路径（重启恢复）反复读回不存在的会话。
+   */
+  clearTargetsOnDispose: true,
+  /** 账本全局条数上限（P0-5）；超出按「已归档优先 → 最老 updatedAt」退休。 */
+  ledgerMaxTasks: 1000,
+  /** 账本保留天数（P0-5）：非活跃且更早的任务退休。 */
+  ledgerMaxDays: 90,
+  /** 退休留痕列表上限（P0-5）；超出丢弃最老的并累加 `retiredDropped`。 */
+  ledgerMaxRetired: 5000,
+  /**
+   * 默认**必须直通**主会话的报告状态（P0-2）。
+   *
+   * `done` 不在这里的默认值里，但 `admissionOf()` 对 `done` 恒判 `direct`：
+   * 配置项只用来扩展（例如把 `progress` 也放开），不能用来把结论类状态降级——
+   * 那样主会话会永远等不到「做完了」。
+   */
+  directReportStatuses: ['blocked', 'failed'],
 }
 
 /**

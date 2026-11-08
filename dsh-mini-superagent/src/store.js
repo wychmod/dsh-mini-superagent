@@ -1,9 +1,12 @@
 /**
  * 状态落盘：一个 JSON 文件，没有数据库、没有迁移框架。
  *
- * 内容是 `{ version, savedAt, tasks, targets }`：
+ * 内容是 `{ version, savedAt, tasks, targets, retired }`：
  * - `tasks`   任务表（报告、状态、归档标记）
  * - `targets` 每个主会话的派发目标工作区（输入框选择器写入）
+ * - `retired` 已退休任务的薄留痕（P0-5）：`retiredAt` / `retiredReason` 等，
+ *             **不带 reports**。它必须落盘，否则重启后「任务去哪了」无从回答，
+ *             而「可查的丢弃」正是退休能成立的前提。
  *
  * 读失败（除文件不存在）不阻止插件启动，只记日志——任务表是辅助信息，
  * 丢了不影响子会话本身（会话内容由 DSH 自己持久化）。
@@ -29,11 +32,17 @@
 import { copyFile, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-/** 文件结构版本；读取时不强校验，只用于人工排查。 */
-const FILE_VERSION = 3
+/**
+ * 文件结构版本；读取时不强校验，只用于人工排查。
+ *
+ * 4（本版）：新增 `retired` 数组。旧文件（3 及更早）没有这个键，
+ * `normalize()` 按空数组读——**不迁移、不报错**，因为退休留痕丢了只影响
+ * 「它为什么消失」这一条可查性，不该让升级后的插件起不来。
+ */
+const FILE_VERSION = 4
 
 /** 空状态。 */
-export const EMPTY_STATE = { tasks: [], targets: {} }
+export const EMPTY_STATE = { tasks: [], targets: {}, retired: [] }
 
 /** 备份文件后缀。 */
 const BAK = '.bak'
@@ -45,6 +54,11 @@ function normalize(raw) {
   return {
     tasks: Array.isArray(raw?.tasks) ? raw.tasks : [],
     targets: raw?.targets && typeof raw.targets === 'object' && !Array.isArray(raw.targets) ? raw.targets : {},
+    // 旧文件没有 retired：空数组即可。只保留对象条目——数组里混进字符串
+    // 会让 `Map` 构造与 `oneLine(record.summary)` 在下面各处炸掉。
+    retired: Array.isArray(raw?.retired)
+      ? raw.retired.filter(item => item && typeof item === 'object')
+      : [],
   }
 }
 
@@ -87,13 +101,21 @@ export async function readState(file) {
  * 写状态（原子替换）。
  *
  * @param {string} file 目标文件
- * @param {{tasks: object[], targets: object}} state
+ * @param {{tasks: object[], targets: object, retired?: object[]}} state
  * @param {string} savedAt ISO 时间戳
  */
-export async function writeState(file, { tasks, targets }, savedAt) {
+export async function writeState(file, { tasks, targets, retired }, savedAt) {
   await mkdir(dirname(file), { recursive: true })
   const tmp = `${file}${TMP}`
-  const payload = JSON.stringify({ version: FILE_VERSION, savedAt, tasks, targets }, null, 2)
+  // retired 缺省写空数组而不是 undefined：显式键让「读的人知道这是新格式」，
+  // 而且 JSON.stringify 会直接丢掉 undefined 键，落盘文件里就再也看不到它。
+  const payload = JSON.stringify({
+    version: FILE_VERSION,
+    savedAt,
+    tasks,
+    targets,
+    retired: Array.isArray(retired) ? retired : [],
+  }, null, 2)
 
   try {
     // 1) 先写临时文件并 fsync，确保内容真的落盘
