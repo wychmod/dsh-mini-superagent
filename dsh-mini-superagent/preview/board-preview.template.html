@@ -83,11 +83,20 @@ var ctx = {
 
 /* ── 假数据：覆盖在跑 / 排队 / 失败 / 阻塞 / 后台收尾 / 待读 / 完成 / 归档 ── */
 function iso(msAgo) { return new Date(Date.now() - msAgo).toISOString() }
+var DAY = 86400000
 var board = {
   version: '0.8.2',
   generatedAt: new Date().toISOString(),
   concurrency: { running: 3, queued: 1, max: 6 },
-  counts: { total: 11, running: 3, queued: 1, done: 4, blocked: 1, failed: 1, cancelled: 0, ended: 0, interrupted: 1, archived: 2 },
+  counts: { total: 12, running: 3, queued: 1, done: 4, blocked: 1, failed: 1, cancelled: 0, ended: 0, interrupted: 1, archived: 2, retired: 3 },
+  /* 记忆治理：窗口口径 + 退休数；P0-1 的指标只统计最近 7 天。 */
+  memory: {
+    window: { days: 7, tasks: 200, since: iso(7 * DAY) },
+    ledger: { tasks: 12, retired: 3, archived: 2, retiredDropped: 0, capPerTask: { summary: 6000, detail: 4000 } },
+    admission: { direct: 4, ledger: 8, directStatuses: ['blocked', 'failed'] },
+    pending: { inputs: 1, unknown: 0 },
+    retired: { count: 3, latestAt: iso(3 * 3600000) }
+  },
   workspaces: [
     { id: 'ws-1', title: 'dsh-mini-superagent', path: 'D:/idea/dsh-mini-superagent' },
     { id: 'ws-2', title: '结算服务', path: 'D:/work/billing' }
@@ -105,12 +114,23 @@ var board = {
     { task_id: 't-3d4e-2', title: '抽出共用的日期工具', status: 'done', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', group: 'g-70aa', worker_session_id: 'dispatch-t-3d4e-2', elapsed_ms: 142000, started_at: iso(2000000), created_at: iso(2020000), updated_at: iso(1800000), report_count: 1, last_report: { at: iso(1800000), status: 'done', summary: '三个模块的重复实现已合并' } },
     { task_id: 't-3d4e-3', title: '补 i18n 缺失键', status: 'done', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', group: 'g-70aa', worker_session_id: 'dispatch-t-3d4e-3', elapsed_ms: 98000, started_at: iso(2000000), created_at: iso(2020000), updated_at: iso(1850000), report_count: 1 },
     { task_id: 't-4f5a-1', title: '清理旧的 feature flag', status: 'done', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', worker_session_id: 'dispatch-t-4f5a-1', elapsed_ms: 61000, started_at: iso(3000000), created_at: iso(3020000), updated_at: iso(2800000), archived_at: iso(7200000), report_count: 1 },
-    { task_id: 't-4f5a-2', title: '迁移日志到结构化输出', status: 'failed', attempt: 1, workspace_id: 'ws-2', workspace_title: '结算服务', worker_session_id: 'dispatch-t-4f5a-2', elapsed_ms: 44000, updated_at: iso(90000000), archived_at: iso(86400000), report_count: 0, archive_error: '会话已不存在' }
+    { task_id: 't-4f5a-2', title: '迁移日志到结构化输出', status: 'failed', attempt: 1, workspace_id: 'ws-2', workspace_title: '结算服务', worker_session_id: 'dispatch-t-4f5a-2', elapsed_ms: 44000, updated_at: iso(90000000), archived_at: iso(86400000), report_count: 0, archive_error: '会话已不存在' },
+    /* 窗口外的老任务：它必须从效果数字里消失，但仍在列表里可见 —— 这就是 P0-1 的效果。 */
+    { task_id: 't-5g6h-1', title: '上个月的一次失败排查', status: 'failed', attempt: 1, workspace_id: 'ws-1', workspace_title: 'dsh-mini-superagent', worker_session_id: 'dispatch-t-5g6h-1', elapsed_ms: 1900000, started_at: iso(40 * DAY), created_at: iso(40 * DAY + 60000), updated_at: iso(40 * DAY), report_count: 1, error: '上游 502，重试用尽' }
   ]
 }
 
 window.fetch = function (url, options) {
   var target = String(url)
+  // 退休视图走独立只读路由，先于快照判断。
+  if (target.indexOf('/board/retired') >= 0) {
+    return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({
+      ok: true, count: 3, dropped: 0, entries: [
+        { task_id: 't-9z8y-3', title: '整理旧版迁移脚本', status: 'done', retired_at: iso(3 * 3600000), retired_reason: 'cap-count', archived_at: iso(30 * 3600000), updated_at: iso(31 * 3600000), summary: '迁移脚本已并入工具仓' },
+        { task_id: 't-9z8y-2', title: '补一份 0.6 的兼容说明', status: 'done', retired_at: iso(2 * DAY), retired_reason: 'cap-count', archived_at: null, updated_at: iso(2 * DAY), summary: '已合并进 docs' },
+        { task_id: 't-9z8y-1', title: '排查一次偶发超时', status: 'failed', retired_at: iso(70 * DAY), retired_reason: 'cap-days', archived_at: iso(80 * DAY), updated_at: iso(80 * DAY), summary: '无法复现，已按保留期退休' }
+      ] }) } })
+  }
   if (target.indexOf('/board') >= 0 && (!options || !options.method || options.method === 'GET')) {
     return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve(JSON.parse(JSON.stringify(board))) } })
   }

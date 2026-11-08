@@ -1,11 +1,12 @@
 /**
- * 任务看板的 Host 半边：一个只读快照 + 两个写操作，走普通 HTTP 路由。
+ * 任务看板的 Host 半边：两个只读快照 + 若干写操作，走普通 HTTP 路由。
  *
  * 为什么不用 Remote/RPC：看板是同源页面里的普通 fetch，走 HTTP 最直接，
  * 也不需要为一个只读面板去定义一套跨进程契约。
  *
  * 路由（prefix 注册，挂在 /dsh-mini-superagent/board 下）：
  *   GET  /dsh-mini-superagent/board           -> BoardSnapshot
+ *   GET  /dsh-mini-superagent/board/retired   -> 已退休任务（只读，见 plans/07 P0-5）
  *   POST /dsh-mini-superagent/board/cancel    {"task_id"} -> {ok, task}
  *   POST /dsh-mini-superagent/board/retry     {"task_id"} -> {ok, task}
  */
@@ -16,6 +17,15 @@ const BASE = '/dsh-mini-superagent/board'
 
 /** 单次响应最多带多少条任务。 */
 const MAX_TASKS = 200
+
+/**
+ * 单次响应最多带多少条退休记录。
+ *
+ * 与 MAX_TASKS 取同一个数量级：退休**不参与指标**，面板只用它回答「它什么时候、
+ * 为什么消失的」，所以它是一份「够用就行」的答案，不是可翻页的审计导出。
+ * 超过上限时用 dropped 明说少给了多少，而不是悄悄截断。
+ */
+const MAX_RETIRED = 200
 
 /** 快照里 worker 最后输出的预览长度。 */
 const PREVIEW_CHARS = 500
@@ -48,8 +58,31 @@ function elapsedOf(task, started) {
 
 /** 一条任务在看板上的形状。字段刻意拍平，客户端不需要理解内部结构。 */
 export function boardTask(task) {
-  const last = Array.isArray(task.reports) && task.reports.length ? task.reports.at(-1) : undefined
+  const reports = Array.isArray(task.reports) ? task.reports : []
+  const last = reports.length ? reports.at(-1) : undefined
   const started = task.startedAt ? Date.parse(task.startedAt) : NaN
+  /**
+   * 「有一条报告被截过」。
+   *
+   * 只给布尔，**不把正文搬上快照**：快照是每轮轮询都要重传的东西，把 6000 字
+   * 的报告塞进来等于用带宽换一个小标记；要看正文的人走 `dispatch_inspect`。
+   * 两个来源都要看：`truncated` 是报告条目入库时留的截断长度（P0-3），
+   * `briefTruncated` 是落盘时对超长简报的截断标记——后者坏了会让
+   * 「retry 重投的是残版简报」再次无声发生。
+   */
+  const hasTruncated = reports.some(entry => entry?.truncated) || !!task.briefTruncated
+  /**
+   * 「待读」的超时改写（P0-4）：`sweepMemory()` 把过期的 `inputPendingAt` 换成
+   * `inputUnknownAt`，语义从「已投递未读」降级成「不知道读没读到」。
+   *
+   * 两个字段互斥：**unknown 必须以 pending 缺席的方式出现**，否则看板会同时显示
+   * 「还在等它读」（pending 行）和「不知道」（unknown 行）——而前者是个永远不会
+   * 结束的状态，比不显示更误导人。判定照抄 `card()`：read 之后两者都不显。
+   */
+  const inputPendingAt = task.inputPendingAt && !task.inputReadAt && !task.inputUnknownAt
+    ? task.inputPendingAt
+    : undefined
+  const inputUnknownAt = task.inputUnknownAt && !task.inputReadAt ? task.inputUnknownAt : undefined
   return {
     task_id: task.id,
     title: task.title,
@@ -71,12 +104,15 @@ export function boardTask(task) {
     started_at: task.startedAt,
     turn_started_at: task.turnStartedAt,
     elapsed_ms: elapsedOf(task, started),
-    report_count: Array.isArray(task.reports) ? task.reports.length : 0,
+    report_count: reports.length,
     last_report: last ? { at: last.at, status: last.status, summary: last.summary } : null,
     last_text_preview: typeof task.lastText === 'string' ? task.lastText.slice(0, PREVIEW_CHARS) : '',
     // 追问的投递阶段：pending = 进了收件箱但 worker 还没读；read = 已经读进上下文。
-    input_pending_at: task.inputPendingAt ?? null,
+    // pending 与 unknown 互斥（见上面的注释），所以两者都用可选字段的写法。
+    ...(inputPendingAt ? { input_pending_at: inputPendingAt } : {}),
     input_read_at: task.inputReadAt ?? null,
+    // P0-4：待读超时后被降级成「不知道」。只在真的发生过时出现。
+    ...(inputUnknownAt ? { input_unknown_at: inputUnknownAt } : {}),
     retry_at: task.retryAt ?? null,
     // 每任务的独立目录与准备时间（配了 taskDirRoot 才有）。
     task_dir: task.taskDir ?? null,
@@ -84,19 +120,78 @@ export function boardTask(task) {
     // 后台活：回合结束了但 job/subagent 还在跑，任务仍占着并发位。
     background: task.background ?? null,
     background_killed: task.backgroundKilled ?? null,
+    /**
+     * 归档 = 只读冻结（P0-4），冻结时刻必须投影出去。
+     *
+     * 少了它，看板无法区分「已归档冻结」与普通已结算行——冻结本来就是为了
+     * 「这条不会再变了」，不显示等于让用户以为它还能被改。与 `retired_at`
+     * 是两件事：归档的任务仍在表里（可取消归档），退休的已经移出账本。
+     */
+    ...(task.frozenAt ? { frozen_at: task.frozenAt } : {}),
+    // 报告被截断过：只给布尔做小标记（**不搬全文**，见上面的注释）。
+    ...(hasTruncated ? { has_truncated: true } : {}),
     ...(task.error ? { error: String(task.error) } : {}),
     ...(task.archiveError ? { archive_error: String(task.archiveError) } : {}),
   }
 }
 
-/** 整块看板的数据。 */
-export function boardSnapshot(dispatch) {
+/**
+ * 记忆治理的统计块（见 plans/07 §六 P0-1 / P0-5）。
+ *
+ * 必须**防御**三层：
+ * - `memoryStats()` 可能不存在（旧版宿主 / headless）；
+ * - 可能抛错；
+ * - 可能是 **async** 的（host 实际就是异步：它要读活表与留痕两份）。
+ *
+ * 同步快照拿不到 thenable 的值，这时宁可给 null（客户端按「窗口未知 / 宿主未提供」
+ * 降级），也**不能**把 Promise 塞进 JSON —— JSON.stringify(Promise) 会得到 `{}`，
+ * 客户端会把它读成「宿主给了一个空块」，比 null 更难排查。
+ * 需要真实值的调用方（HTTP 路由）走 resolveMemory() 先把值 await 出来再传进来。
+ */
+function memoryOf(dispatch, provided) {
+  if (provided !== undefined) return provided && typeof provided === 'object' ? provided : null
+  try {
+    if (typeof dispatch.memoryStats !== 'function') return null
+    const stats = dispatch.memoryStats()
+    if (stats && typeof stats.then === 'function') return null       // 同步快照里的 async 宿主
+    return stats && typeof stats === 'object' ? stats : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 取一份**已解析**的记忆统计：同步函数直接用，thenable 在这里 await 掉。
+ * 失败一律返回 null，让看板继续可用 —— 指标口径坏掉不该让人看不见任务。
+ * @returns {Promise<object|null>}
+ */
+async function resolveMemory(dispatch) {
+  try {
+    if (typeof dispatch.memoryStats !== 'function') return null
+    const value = dispatch.memoryStats()
+    const stats = value && typeof value.then === 'function' ? await value : value
+    return stats && typeof stats === 'object' ? stats : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 整块看板的数据。
+ * @param {object} dispatch
+ * @param {object|null} [memory] 已解析的 memoryStats；省略时尝试同步取（可能得 null）
+ */
+export function boardSnapshot(dispatch, memory) {
   const all = [...dispatch.table.tasks.values()]
-  const counts = { total: all.length, running: 0, queued: 0, done: 0, blocked: 0, failed: 0, cancelled: 0, ended: 0, interrupted: 0, archived: 0 }
+  const counts = { total: all.length, running: 0, queued: 0, done: 0, blocked: 0, failed: 0, cancelled: 0, ended: 0, interrupted: 0, archived: 0, retired: 0 }
   for (const task of all) {
     if (task.status in counts) counts[task.status] += 1
     if (task.archivedAt) counts.archived += 1
   }
+  // 退休数是「历史上已被移出账本」的条数，它**不在** tasks 里，
+  // 所以只能从 memoryStats 拿；拿不到就是 0（= 这块信息宿主没提供）。
+  const stats = memoryOf(dispatch, memory)
+  counts.retired = Number.isFinite(stats?.retired?.count) ? stats.retired.count : 0
   const tasks = all
     .sort((a, b) => (WEIGHT[a.status] ?? 2) - (WEIGHT[b.status] ?? 2)
       || String(b.updatedAt).localeCompare(String(a.updatedAt)))
@@ -116,6 +211,58 @@ export function boardSnapshot(dispatch) {
     // 每个主会话当前选的「派发目标工作区」；没选的不出现。
     targets: Object.fromEntries(dispatch.targets ?? []),
     tasks: tasks.map(boardTask),
+    /**
+     * 记忆治理统计：窗口口径、账本容量、退休数。
+     * 显式放 null 而不是省略字段：客户端要能区分「宿主没提供」与「这是旧版宿主」，
+     * 两者都按「窗口未知」降级，但排障时看得出差别。
+     */
+    memory: stats,
+  }
+}
+
+/**
+ * 已退休任务的一条记录。
+ *
+ * 字段刻意与 boardTask 用同一套命名（snake_case + `_at` 后缀），
+ * 客户端不必为第二种形状再写一遍取值逻辑。
+ */
+function retiredEntry(record) {
+  const id = String(record?.id ?? '')
+  return {
+    task_id: id,
+    title: typeof record?.title === 'string' ? record.title : '',
+    status: typeof record?.status === 'string' ? record.status : '',
+    retired_at: record?.retiredAt ?? null,
+    retired_reason: record?.retiredReason ?? null,
+    archived_at: record?.archivedAt ?? null,
+    updated_at: record?.updatedAt ?? null,
+    // 退休记录的正文只留摘要：账本封顶的目的是「写放大有上界」，
+    // 如果退休时把 6000 字正文整段搬到另一个 Map 里，只是换了个地方存。
+    summary: typeof record?.summary === 'string' ? record.summary : '',
+  }
+}
+
+/**
+ * 退休视图的数据。
+ *
+ * 三条约定（都是「不要让用户以为数据丢了」）：
+ * - 倒序：最近的退休最该被看到，它最可能是用户刚发现"任务不见了"的那条；
+ * - `dropped`：超过 MAX_RETIRED 时明说少给了多少，而不是悄悄截断；
+ * - `dispatch.retired` 不存在（旧版宿主 / headless）时返回空表而非报错 ——
+ *   这是一个只读诊断视图，宿主没这个能力就该显示「没有」，不该 500。
+ */
+export function retiredSnapshot(dispatch) {
+  const ledger = dispatch.retired
+  const entries = ledger instanceof Map ? [...ledger.values()] : []
+  const sorted = entries
+    .slice()
+    .sort((a, b) => String(b?.retiredAt ?? '').localeCompare(String(a?.retiredAt ?? '')))
+  const shown = sorted.slice(0, MAX_RETIRED)
+  return {
+    ok: true,
+    count: sorted.length,
+    dropped: Math.max(0, sorted.length - shown.length),
+    entries: shown.map(retiredEntry),
   }
 }
 
@@ -288,7 +435,9 @@ export function createBoardHandler(ctx, dispatch) {
     try {
       if (req.method === 'GET' && pathname === BASE) {
         if (!readAllowed(req)) return send(res, 403, { ok: false, error: '看板只对本机或同源页面开放' })
-        return send(res, 200, boardSnapshot(dispatch))
+        // memoryStats 是 async 的（要读活表与留痕两份），必须先把值 await 出来，
+        // 否则 JSON 里会出现一个被序列化成 `{}` 的 Promise。
+        return send(res, 200, boardSnapshot(dispatch, await resolveMemory(dispatch)))
       }
 
       if (req.method === 'POST' && pathname === `${BASE}/client-ready`) {
@@ -310,10 +459,25 @@ export function createBoardHandler(ctx, dispatch) {
         return send(res, 200, await dispatch.selfCheck())
       }
 
+      /**
+       * 已退休任务：只读诊断视图（plans/07 P0-5「退休可查」）。
+       *
+       * 与 GET /board 同档准入（`readAllowed`），不要求写头：它只读、不含正文、
+       * 只回答「这条任务什么时候因为什么被移出账本」。退休本身**不是**写操作，
+       * 不能被面板触发 —— 退休由 host 的封顶逻辑决定，面板只能看。
+       *
+       * 退休记录刻意**不**回落进 tasks 列表：那会让退休行为看起来像没发生，
+       * 也会让「账本有上界」这个验收项（plans/07 §七 4）无法从快照上验证。
+       */
+      if (req.method === 'GET' && pathname === `${BASE}/retired`) {
+        if (!readAllowed(req)) return send(res, 403, { ok: false, error: '看板只对本机或同源页面开放' })
+        return send(res, 200, retiredSnapshot(dispatch))
+      }
+
       if (req.method === 'POST' && pathname === `${BASE}/archive`) {
         if (!writeAllowed(req)) return send(res, 403, { ok: false, error: '看板写操作需要同源页面或带 `x-dsh-mini-superagent` 头的本机调用' })
         const result = await dispatch.archiveStale()
-        return send(res, 200, { ok: true, ...result, counts: boardSnapshot(dispatch).counts })
+        return send(res, 200, { ok: true, ...result, counts: boardSnapshot(dispatch, await resolveMemory(dispatch)).counts })
       }
 
       if (req.method === 'POST' && pathname === `${BASE}/target`) {

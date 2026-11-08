@@ -100,7 +100,7 @@ window.__ModuleLoader__.load({
       dismiss: '关闭提示',
       'filter.archived': '已归档',
       archivedTag: '已归档',
-      archivedHint: '该子会话已归档，可能已不在会话列表里',
+      archivedHint: '该子会话已归档，不可直接打开；请在会话列表里取消归档后再查看',
       archiveErrorPrefix: '归档失败：',
       archiveNow: '立即归档',
       archiveConfirm: '确认归档',
@@ -118,6 +118,23 @@ window.__ModuleLoader__.load({
       backgroundHint: '回合已结束，但 shell job / subagent 还在跑；任务仍占着并发位，到上限会被终止',
       unreadTag: '待读',
       unreadHint: '追问已投递，但 worker 还没把它读进上下文',
+      /*
+       * 「待读」超时后宿主会把它降级成 `input_unknown_at`（见 src/board.js 的
+       * `boardTask()`），界面上必须**换一个词**：继续写「待读」等于断言
+       * 「它马上会读」，而那个状态永远不会结束，比不显示更误导人。
+       */
+      unknownReadTag: '未读未知',
+      unknownReadHint: '追问投递后一直没被确认读到；现在不知道 worker 读没读它',
+      /*
+       * 归档 = 只读冻结。冻结与归档在今天的宿主里总是一起写（archiveStale()），
+       * 归档行已经带「已归档」徽标，所以这个徽标只在「冻结但没归档」的行出现。
+       */
+      frozenTag: '已冻结',
+      frozenHint: '只读冻结：这条不会再更新，续跑会失败',
+      /* 报告或简报被账本截断过：只标明「被截过」，正文仍去看 dispatch_inspect。 */
+      truncatedTag: '摘要已截断',
+      truncatedHint: '原文更长，账本只保留前 {n} 字；完整正文请用 dispatch_inspect 查看',
+      truncatedHintNoLimit: '原文更长，账本只保留了开头一段；完整正文请用 dispatch_inspect 查看',
       'sec.attention': '需要你处理',
       'sec.attentionEmpty': '没有需要你处理的任务',
       'sec.active': '在跑与排队',
@@ -135,6 +152,33 @@ window.__ModuleLoader__.load({
       'stat.saved': '并行节省',
       'stat.savedHint': '粗算：各任务耗时之和 − 实际占用的墙钟时间（快照只含最近 200 条）',
       'stat.none': '—',
+      /*
+       * 窗口口径（plans/07 P0-1）。指标只统计窗口内的任务，但「口径」必须写在界面上：
+       * 一个不说自己统计范围的百分比，会被当成「全部历史」读，而这正是 0.8.x 的缺陷。
+       */
+      'stat.windowLabel': '口径',
+      'stat.windowDays': '最近 {days} 天',
+      'stat.windowCount': '最近 {n} 条',
+      'stat.windowUnknown': '窗口未知',
+      'stat.windowAll': '全部已结算',
+      'stat.windowHint': '指标只统计窗口内的已完成任务；归档与退休的任务不参与。窗口由宿主下发，取不到时退回全部已结算。',
+      'filter.retired': '已退休',
+      'sec.retired': '已退休',
+      'retired.empty': '没有被退休的任务',
+      'retired.unavailable': '宿主未提供退休记录',
+      'retired.unavailableHint': '快照里没有 memory 块（宿主版本较旧或未启用记忆治理）；其余视图不受影响',
+      'retired.ago': '退休于 {when}',
+      'retired.reason': '原因',
+      'retired.reason.cap-count': '条数上限',
+      'retired.reason.cap-days': '超过保留期',
+      'retired.reason.none': '未记录原因',
+      'retired.dropped': '另有 {n} 条退休记录超出展示上限，未在此列出',
+      'retired.copyHint': '复制这条任务的 task_id',
+      'retired.action': '复制 id',
+      'retired.copied': '已复制 {id}',
+      'retired.copyFailed': '复制失败：{reason}（可手抄 {id}）',
+      'retired.loadFailed': '退休记录暂时取不到：{reason}',
+      'retired.notClickable': '退休记录不挂子会话，只能复制 id',
       reason: '原因',
       noReason: '没有给出原因，可以打开子会话看它停在哪',
       showAll: '显示全部',
@@ -208,7 +252,7 @@ window.__ModuleLoader__.load({
       dismiss: 'Dismiss',
       'filter.archived': 'Archived',
       archivedTag: 'Archived',
-      archivedHint: 'That worker session was archived and may no longer be listed',
+      archivedHint: 'That worker session is archived and cannot be opened; unarchive it in the session list first',
       archiveErrorPrefix: 'Archive failed: ',
       archiveNow: 'Archive now',
       archiveConfirm: 'Confirm archive',
@@ -226,6 +270,13 @@ window.__ModuleLoader__.load({
       backgroundHint: 'The turn ended, but shell jobs or subagents still run; the task still holds a slot and is stopped at the limit',
       unreadTag: 'unread',
       unreadHint: 'The message was delivered but the worker has not taken it into context yet',
+      unknownReadTag: 'read? unknown',
+      unknownReadHint: 'The follow-up was delivered but never confirmed read; we no longer know whether the worker saw it',
+      frozenTag: 'frozen',
+      frozenHint: 'Frozen read-only: it will not change again, and a retry will fail',
+      truncatedTag: 'truncated',
+      truncatedHint: 'The original is longer; the ledger keeps only the first {n} characters. Use dispatch_inspect for the full text',
+      truncatedHintNoLimit: 'The original is longer; the ledger keeps only the opening part. Use dispatch_inspect for the full text',
       'sec.attention': 'Needs you',
       'sec.attentionEmpty': 'Nothing needs you right now',
       'sec.active': 'Running and queued',
@@ -243,6 +294,29 @@ window.__ModuleLoader__.load({
       'stat.saved': 'Saved by parallel',
       'stat.savedHint': 'Rough: sum of task durations minus the wall-clock span they actually took',
       'stat.none': '—',
+      'stat.windowLabel': 'window',
+      'stat.windowDays': 'last {days} days',
+      'stat.windowCount': 'latest {n}',
+      'stat.windowUnknown': 'window unknown',
+      'stat.windowAll': 'all settled',
+      'stat.windowHint': 'Metrics only count settled tasks inside the window; archived and retired tasks never vote. The host supplies the window; when it is unavailable the stats fall back to all settled tasks.',
+      'filter.retired': 'Retired',
+      'sec.retired': 'Retired',
+      'retired.empty': 'No tasks have been retired',
+      'retired.unavailable': 'This host does not report retired tasks',
+      'retired.unavailableHint': 'The snapshot has no memory block (older host, or memory governance is off); other views are unaffected',
+      'retired.ago': 'Retired {when}',
+      'retired.reason': 'Reason',
+      'retired.reason.cap-count': 'ledger cap',
+      'retired.reason.cap-days': 'retention window',
+      'retired.reason.none': 'no reason recorded',
+      'retired.dropped': '{n} more retired records are beyond the display cap and are not listed here',
+      'retired.copyHint': 'Copy this task id',
+      'retired.action': 'Copy id',
+      'retired.copied': 'Copied {id}',
+      'retired.copyFailed': 'Copy failed: {reason} (task id is {id})',
+      'retired.loadFailed': 'Retired records are temporarily unavailable: {reason}',
+      'retired.notClickable': 'Retired records have no worker session; only the id can be copied',
       reason: 'Reason',
       noReason: 'No reason given; open the worker session to see where it stopped',
       showAll: 'Show all',
@@ -334,8 +408,13 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 四个过滤 chip 的定义。
+     * 五个过滤 chip 的定义。
      * 「全部」不含已归档：归档是历史，只在自己的 chip 里出现，否则列表会被历史淹没。
+     *
+     * 「已退休」排在「已归档」之后，且 `match` 恒为 false —— 退休记录不在 `tasks` 里
+     * （它们在宿主账本的另一个 Map 里），靠这个可选链只决定 chip 是否出现，
+     * 计数与列表都走 `/board/retired` 单独取数。把退休塞回 tasks 等于让「账本有上界」
+     * 这件事在快照上不可验证（plans/07 §七 4）。
      */
     const FILTERS = [
       { id: 'all', labelKey: 'filter.all', match: function (task) { return !task.archived_at } },
@@ -358,6 +437,14 @@ window.__ModuleLoader__.load({
         id: 'archived',
         labelKey: 'filter.archived',
         match: function (task) { return Boolean(task.archived_at) },
+      },
+      {
+        id: 'retired',
+        labelKey: 'filter.retired',
+        // 退休任务从不来自快照；这个 filter 只用于切换视图，不参与计数。
+        match: function () { return false },
+        // 标记给渲染层：这个 chip 的计数来自 memory 块，而不是过滤后的任务列表。
+        remote: 'retired',
       },
     ]
 
@@ -508,21 +595,101 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 指标窗口（plans/07 P0-1「指标窗口化」）。
+     *
+     * 缺省是 `null` = 拿不到宿主下发的窗口，此时退回「全部已结算」并把口径写成
+     * 「窗口未知」——**不假装窗口存在**，否则同一个 86% 会在两种口径之间悄悄漂移。
+     */
+    function pickWindow(memory) {
+      const window = memory && typeof memory === 'object' ? memory.window : null
+      if (!window || typeof window !== 'object') return null
+      const days = num(window.days, 0)
+      const tasks = num(window.tasks, 0)
+      const since = typeof window.since === 'string' && Number.isFinite(Date.parse(window.since)) ? window.since : ''
+      // since 可以由 days 推导；宿主只给 days 时本地算一遍，省得少一条时间界就整个降级。
+      const sinceAt = since ? Date.parse(since) : (days > 0 ? Date.now() - days * 86400000 : NaN)
+      if (!Number.isFinite(sinceAt) && !(tasks > 0)) return null
+      return { days: days, tasks: tasks, sinceAt: sinceAt }
+    }
+
+    /**
+     * 报告摘要的账本上限（字数），来自 `memory.ledger.capPerTask.summary`。
+     *
+     * 只用来把截断提示写成「前 N 字」。拿不到就返回 0，调用方退化成不带数字的
+     * 说法——宿主没告诉我们上限时，编一个「6000 字」比不说更糟。
+     */
+    function summaryCapOf(memory) {
+      const cap = memory && typeof memory === 'object' && memory.ledger && typeof memory.ledger === 'object'
+        ? memory.ledger.capPerTask
+        : null
+      if (!cap || typeof cap !== 'object') return 0
+      return Math.max(0, num(cap.summary, 0))
+    }
+
+    /**
+     * 窗口口径的人话，例如「最近 7 天 / 最近 200 条」。
+     *
+     * 为什么要写出来：0.8.x 的成功率悄悄吃全历史，上个月失败的任务还在给今天的数字投票，
+     * 而界面上只有一个裸百分比 —— 没人能看出它统计的是哪个范围（plans/07 §二 4）。
+     * 现在口径随数字一起显示，窗口取不到时明说「窗口未知」。
+     */
+    function windowLabel(window) {
+      if (!window) return tr('stat.windowUnknown') + ' · ' + tr('stat.windowAll')
+      const parts = []
+      if (window.days > 0) parts.push(fill(tr('stat.windowDays'), { days: window.days }))
+      if (window.tasks > 0) parts.push(fill(tr('stat.windowCount'), { n: window.tasks }))
+      return parts.length ? parts.join(' / ') : tr('stat.windowUnknown')
+    }
+
+    /**
      * 「派发带来了什么」的一组近似值。
      *
-     * 并行节省的定义：所有已结算任务的耗时之和，减去它们实际占用的墙钟跨度
+     * 并行节省的定义：窗口内已结算任务的耗时之和，减去它们实际占用的墙钟跨度
      * （最早开始 → 最近更新）。串行做这些活要花前者，实际只花了后者，差额就是省下来的。
-     * 明确是粗算：快照只含最近 200 条，跨天的任务也会算进来。宁可标注「粗算」，也不编一个好看的数字。
+     * 明确是粗算：快照只含最近 200 条。宁可标注「粗算」，也不编一个好看的数字。
+     *
+     * 窗口化（第三个参数，可选，不影响 scripts/board-preview.mjs 的旧调用）：
+     * - 只统计 `updated_at >= window.sinceAt` 的任务，且最多取最近 `window.tasks` 条已结算任务
+     *   （按 updated_at 倒序取前 N，也就是「最近 N 条」）；
+     * - **归档任务彻底移出**：`archived_at` 非空的不进 rates / median / saved / settled。
+     *   归档 = 只读历史，让它继续给当下指标投票，等于把「过期内容残留」从数据层搬到数字层；
+     * - 墙钟跨度也在窗口内算（只用被选中的那批任务）。
+     * 传 `null`/省略 = 窗口未知 → 全部已结算，行为与 0.8.x 一致。
      */
-    function effectStats(tasks, now) {
+    function effectStats(tasks, now, window) {
       const list = Array.isArray(tasks) ? tasks.filter(function (task) { return task && typeof task === 'object' }) : []
-      const settled = list.filter(function (task) { return SETTLED_STATUS.has(task.status) })
+      // 归档任务不参与任何派生指标。这一条与窗口无关，即使窗口未知也要生效。
+      const live = list.filter(function (task) { return !task.archived_at })
+      const settledAll = live.filter(function (task) { return SETTLED_STATUS.has(task.status) })
+
+      let settled = settledAll
+      if (window) {
+        if (Number.isFinite(window.sinceAt)) {
+          settled = settled.filter(function (task) {
+            const at = Date.parse(task.updated_at || task.settled_at || '')
+            // 没有可解析结算时间的任务无法证明它在窗口内，按「不在窗口内」处理：
+            // 宁可少数一条，也不让一条来历不明的记录给当下的数字投票。
+            return Number.isFinite(at) && at >= window.sinceAt
+          })
+        }
+        if (window.tasks > 0 && settled.length > window.tasks) {
+          settled = settled
+            .slice()
+            .sort(function (a, b) {
+              return (Date.parse(b.updated_at || '') || 0) - (Date.parse(a.updated_at || '') || 0)
+            })
+            .slice(0, window.tasks)
+        }
+      }
+
+      // 「完成数」统计的是窗口内的 done；已结算分母与它同源，否则比值没有意义。
       const done = settled.filter(function (task) { return task.status === 'done' }).length
       const durations = settled.map(function (task) { return num(task.elapsed_ms, 0) }).filter(function (value) { return value > 0 })
       const sum = durations.reduce(function (a, b) { return a + b }, 0)
-      const starts = list.map(function (task) { return Date.parse(task.started_at || task.created_at || '') })
+      // 墙钟跨度只看窗口内这批任务：拿窗口外的任务去撑大跨度，会把「节省」算成负值或 0。
+      const starts = settled.map(function (task) { return Date.parse(task.started_at || task.created_at || '') })
         .filter(function (value) { return Number.isFinite(value) })
-      const ends = list.map(function (task) { return Date.parse(task.updated_at || '') })
+      const ends = settled.map(function (task) { return Date.parse(task.updated_at || '') })
         .filter(function (value) { return Number.isFinite(value) })
       const span = starts.length && ends.length ? Math.max(0, Math.max.apply(null, ends) - Math.min.apply(null, starts)) : 0
       const saved = span > 0 && sum > span ? sum - span : 0
@@ -533,6 +700,9 @@ window.__ModuleLoader__.load({
         rate: settled.length ? Math.round((done / settled.length) * 100) : null,
         average: median(durations),
         saved: saved,
+        // 把口径带出去，渲染层直接用，不必再猜一次 window 是什么。
+        window: window || null,
+        windowLabel: windowLabel(window),
       }
     }
 
@@ -567,8 +737,146 @@ window.__ModuleLoader__.load({
       return { done: done, total: members.length }
     }
 
-    /* ───────────────────────── 网络 ───────────────────────── */
+    /* ───────────────────────── 已退休记录（只读视图） ───────────────────────── */
 
+    /**
+     * 退休原因的人话。
+     *
+     * 宿主给的是机器键（`cap-count` / `cap-days`），界面必须翻成人话：
+     * 「它为什么消失的」是这个视图存在的唯一理由，显示一个 `cap-days` 等于没回答。
+     * 认不出的键原样显示，宁可露出机器名，也不编一个「未知」把线索抹掉。
+     */
+    function retiredReasonText(reason) {
+      const key = typeof reason === 'string' ? reason : ''
+      if (!key) return tr('retired.reason.none')
+      const known = { 'cap-count': 'retired.reason.cap-count', 'cap-days': 'retired.reason.cap-days' }
+      return known[key] ? tr(known[key]) : key
+    }
+
+    /**
+     * 复制文本。三条路子依次降级：异步剪贴板 → 老式 execCommand → 直接失败。
+     * 失败不静默：退休记录没有子会话可打开，id 是唯一的线索，复制不到就得让人能看见 id 手抄。
+     *
+     * 剪贴板 Promise 必须**限时**：在没有用户手势授权、非安全上下文、或权限被拒的
+     * 宿主里，`clipboard.writeText()` 的 Promise 可能永久 pending（实测 file:// 下
+     * 就会挂住），此时 await 等于把「点了没反应」这个缺陷请回来。超时即走兜底。
+     */
+    const COPY_TIMEOUT_MS = 800
+
+    /** 给可能永远不结算的 Promise 加一道时间闸；超时返回 false 而不是一直等。 */
+    function withTimeout(promise, ms) {
+      return new Promise(function (resolve) {
+        let settled = false
+        const timer = setTimeout(function () {
+          if (settled) return
+          settled = true
+          resolve(false)
+        }, ms)
+        Promise.resolve(promise).then(function (value) {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(value === true ? true : Boolean(value))
+        }, function () {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(false)
+        })
+      })
+    }
+
+    async function copyText(text) {
+      const value = String(text == null ? '' : text)
+      if (!value) return false
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          // 注意不要直接 await 原 Promise：它在某些宿主里永远不结算。
+          if (await withTimeout(navigator.clipboard.writeText(value).then(function () { return true }), COPY_TIMEOUT_MS)) {
+            return true
+          }
+        }
+      } catch (error) { /* 权限/非安全上下文：继续走兜底 */ }
+      try {
+        if (typeof document === 'undefined' || !document.body || typeof document.createElement !== 'function') return false
+        const holder = document.createElement('textarea')
+        holder.value = value
+        holder.setAttribute('readonly', '')
+        holder.style.position = 'fixed'
+        holder.style.top = '-1000px'
+        holder.style.opacity = '0'
+        document.body.appendChild(holder)
+        if (typeof holder.select === 'function') holder.select()
+        const ok = typeof document.execCommand === 'function' ? document.execCommand('copy') === true : false
+        if (document.body.removeChild) document.body.removeChild(holder)
+        return ok
+      } catch (error) {
+        return false
+      }
+    }
+
+    /**
+     * 一条退休记录：紧凑单行。
+     *
+     * 刻意不是 TaskCard：退休记录不可点开、没有操作按钮、也没有耗时/报告那些
+     * 只对活跃任务有意义的字段。复用 TaskCard 会让人以为它还能被操作。
+     */
+    function RetiredRow(props) {
+      const record = props.record || {}
+      const meta = STATUS_META[record.status] || STATUS_FALLBACK
+      const title = typeof record.title === 'string' && record.title ? record.title : tr('noTitle')
+      const id = typeof record.task_id === 'string' ? record.task_id : ''
+      const tip = [id, tr('retired.notClickable')].filter(Boolean).join('\n')
+      return h(
+        'div',
+        {
+          className: 'dsh-sa-row dsh-sa-row-dense dsh-sa-row-retired',
+          role: 'listitem',
+          'data-status': record.status || 'retired',
+          'data-retired': 'true',
+          title: tip,
+        },
+        h(
+          'div',
+          { className: 'dsh-sa-line' },
+          h('span', {
+            key: 'dot',
+            className: 'dsh-sa-dot',
+            style: { color: 'var(--dsw-alias-label-tertiary, #8b8b8b)' },
+            'aria-hidden': 'true',
+          }),
+          h('span', { key: 'status', className: 'dsh-sa-state', style: { color: meta.color } }, tr('status.' + record.status)),
+          h('span', { key: 'title', className: 'dsh-sa-title', title: tip }, title),
+          h('span', { key: 'grow', className: 'dsh-sa-grow' }),
+          h(
+            'span',
+            { key: 'retired-at', className: 'dsh-sa-meta' },
+            fill(tr('retired.ago'), { when: formatRelative(record.retired_at, props.now) }),
+          ),
+          h(
+            'span',
+            { key: 'reason', className: 'dsh-sa-tag dsh-sa-tag-retired', title: typeof record.retired_reason === 'string' ? record.retired_reason : '' },
+            retiredReasonText(record.retired_reason),
+          ),
+          h(
+            'button',
+            {
+              key: 'copy',
+              type: 'button',
+              className: 'dsh-sa-btn',
+              title: tr('retired.copyHint') + (id ? '：' + id : ''),
+              onClick: function (event) {
+                if (event && event.stopPropagation) event.stopPropagation()
+                props.onCopy(record)
+              },
+            },
+            tr('retired.action'),
+          ),
+        ),
+      )
+    }
+
+    /* ───────────────────────── 网络 ───────────────────────── */
     /** 读整块看板；非 2xx 或形状不对都当失败，交给面板显示「暂时取不到」。 */
     async function readBoard(signal) {
       const response = await fetch(API, {
@@ -590,6 +898,36 @@ window.__ModuleLoader__.load({
         throw new Error(tr('badResponse'))
       }
       if (!data || !Array.isArray(data.tasks)) throw new Error(tr('badResponse'))
+      return data
+    }
+
+    /**
+     * 读已退休任务（只读）。与 readBoard 同一条降级路子：
+     * 非 2xx / 形状不对都抛错，由面板显示「暂时取不到」，不让整块面板崩。
+     *
+     * 形状不对也当失败：如果这里静默返回空数组，「取不到」会显示成「没有被退休的任务」，
+     * 那是在用空态掩盖故障 —— 而这个视图存在的意义恰恰是回答「任务去哪了」。
+     */
+    async function readRetired(signal) {
+      const response = await fetch(API + '/retired', {
+        method: 'GET',
+        headers: { accept: 'application/json', ...AUTH_HEADERS },
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal,
+      })
+      if (!response.ok) {
+        const error = new Error(tr('httpError') + ' HTTP ' + response.status)
+        error.status = response.status
+        throw error
+      }
+      let data
+      try {
+        data = await response.json()
+      } catch (error) {
+        throw new Error(tr('badResponse'))
+      }
+      if (!data || !Array.isArray(data.entries)) throw new Error(tr('badResponse'))
       return data
     }
 
@@ -977,11 +1315,13 @@ window.__ModuleLoader__.load({
   outline-offset: 1px;
 }
 .dsh-sa-row-clickable { cursor: pointer; }
+/* 归档行不可点：不给「能点」的悬停底色，也不吃键盘焦点（无 tabIndex）。 */
+.dsh-sa-row-archived { opacity: .55; cursor: default; }
+.dsh-sa-row-archived:hover { background: transparent; }
 .dsh-sa-row:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
   outline-offset: -2px;
 }
-.dsh-sa-row-archived { opacity: .55; }
 .dsh-sa-workspace {
   flex: none;
   max-width: 40%;
@@ -1003,6 +1343,34 @@ window.__ModuleLoader__.load({
 .dsh-sa-tag-unread {
   background: var(--dsw-alias-state-info-surface, rgba(37,99,235,.12));
   color: var(--dsw-alias-state-info-primary, #2563eb);
+}
+/*
+ * 「未读未知」：既不是「待读」（那是在等它读），也不是「已读」。
+ * 用中性灰而不是信息蓝，因为这不是「正在发生的事」，而是「这件事失去观测」。
+ */
+.dsh-sa-tag-unknown {
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
+  color: var(--dsw-alias-label-secondary, inherit);
+  border: 1px dashed var(--dsw-alias-border-l1, rgba(127,127,127,.35));
+}
+/*
+ * 「已冻结」：只读、续跑会失败。用警示色但不像错误那样刺眼——
+ * 冻结是**正常生命周期**的一环（归档巡检的效果），不是故障。
+ */
+.dsh-sa-tag-frozen {
+  background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
+  color: var(--dsw-alias-state-warn-primary, #b45309);
+}
+/* 截断标记：贴着报告数/摘要，比正文弱一档，但点得出「这里被切过」。 */
+.dsh-sa-truncated {
+  flex: none;
+  padding: 0 4px;
+  border-radius: var(--dsw-radius-sm, 4px);
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  white-space: nowrap;
+  cursor: help;
 }
 /* ── 面板改版：效果数字、并发条、分节、批次、原因行 ── */
 .dsh-sa-stats {
@@ -1100,6 +1468,23 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
 }
 .dsh-sa-btn-confirm { color: var(--dsw-alias-state-warn-primary, #b45309); }
+/* 窗口口径：贴着效果数字右侧，弱化为说明文字，不抢数字的注意力。 */
+.dsh-sa-stat-window {
+  align-self: flex-end;
+  padding-bottom: 2px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* 窗口未知：用警示色标出来，因为此时的数字口径与 0.8.x 一样不可比。 */
+.dsh-sa-stat-window-unknown { color: var(--dsw-alias-state-warn-primary, #b45309); }
+/* 退休视图：已完成的历史，比已归档更弱一档（归档还能点开，退休连子会话都没有）。 */
+.dsh-sa-row-retired { opacity: .7; }
+.dsh-sa-tag-retired {
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
 .dsh-sa-strip-info {
   color: var(--dsw-alias-label-secondary, inherit);
   background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08));
@@ -1886,7 +2271,39 @@ window.__ModuleLoader__.load({
       const group = typeof task.group === 'string' ? task.group : ''
       const background = task.background && typeof task.background === 'object' ? task.background : null
       const unread = Boolean(task.input_pending_at) && !task.input_read_at
-      const clickable = Boolean(task.worker_session_id)
+      /*
+       * 「未读未知」：宿主侧 `sweepMemory()` 把超时的「待读」改写成
+       * `inputUnknownAt`，`boardTask()` 再投影成 `input_unknown_at`。两者的语义
+       * **不同**：pending = 确定还没读（还能等）；unknown = 已经不知道读没读。
+       * 这里照抄宿主契约再判一次 `!input_read_at`：万一旧数据两个标记同时存在，
+       * 读过之后一律不显示。
+       */
+      const unknownRead = Boolean(task.input_unknown_at) && !task.input_read_at
+      const frozenAt = Boolean(task.frozen_at)
+      /*
+       * 「已冻结」：归档时 `archiveStale()` 同时写 `archivedAt` 与 `frozenAt`，
+       * 所以**归档行一定有 frozen_at**。归档行已经有「已归档」徽标 + 整行淡出，
+       * 再叠一个「已冻结」只是同一件事说两遍；因此可见徽标只在「冻结但没归档」
+       * 的行出现（将来冻结独立于归档时，它依然是对的）。
+       * 语义不丢：归档行的 hover 里仍然会写「只读冻结，续跑会失败」。
+       */
+      const frozen = frozenAt && !archived
+      /*
+       * 「摘要已截断」：宿主只给布尔（`has_truncated`），正文不出快照。
+       * 上限数值来自 memory 块（`ledger.capPerTask.summary`），拿不到就退化成
+       * 不带数字的说法——**不要**编一个「前 6000 字」出来。
+       */
+      const truncated = Boolean(task.has_truncated)
+      const summaryCap = num(props.summaryCap, 0)
+      /*
+       * 归档行**不可点**。根因不在这一行，而在宿主的导航策略：`uiWorkspace.openSession`
+       * 会把主视图换成那个会话，而 ui-workspace 的 `watchNavigation` 里有一条
+       * `clearArchivedCurrent()` —— 当前主视图落在 `archivedSessionIds` 里就直接
+       * `clearMain()`，主区域随即被清空/补建成一个空白会话，看起来就是「点一下开了
+       * 一个新会话」。DSH 自己的侧边栏对归档会话也只给「暂时无法查看，请取消归档后
+       * 查看」而不打开，这里对齐同一口径：无点击、无键盘焦点、无手形光标。
+       */
+      const clickable = Boolean(task.worker_session_id) && !archived
       const reportAgo = task.last_report && task.last_report.at ? formatRelative(task.last_report.at, props.now) : ''
 
       // 「为什么停在这」直接摊在行里，不要求人点进子会话再自己找。
@@ -1901,12 +2318,20 @@ window.__ModuleLoader__.load({
         ? Math.min(100, Math.round((num(task.elapsed_ms, 0) / baseline) * 100))
         : 0
 
+      /*
+       * 归档行的 tip 由 `archivedHint` 统一说明，这里只给**可点**的行追加点击提示：
+       * `clickable` 已经排除归档，两者不会再同时出现（以前会），也就不会出现
+       * 「悬停说可点、点下去开空白会话」这种自相矛盾的提示。
+       */
       const tip = [
         task.task_id,
         task.cwd ? 'cwd: ' + task.cwd : '',
         task.task_dir ? 'dir: ' + task.task_dir : '',
         task.worker_session_id ? 'worker: ' + task.worker_session_id : '',
       ].filter(Boolean).join('\n') + (clickable ? '\n' + tr('clickHint') : '') + (archived ? '\n' + tr('archivedHint') : '')
+        // 归档行不显示「已冻结」徽标（与「已归档」重复），但语义不能一起丢：
+        // hover 里明确写「只读冻结、续跑会失败」，那是 frozen 想要的断言。
+        + (frozenAt ? '\n' + tr('frozenHint') : '')
 
       /** 整行可点（按钮除外）：打开这个任务的子会话。 */
       function activate(event) {
@@ -1917,6 +2342,13 @@ window.__ModuleLoader__.load({
         }
         props.handlers.open(task)
       }
+
+      /*
+       * 无障碍状态：不可点的行不占 Tab 位，但仍然要让人（和读屏）知道「为什么点不了」。
+       * `aria-disabled` + 行内文案是静态可读的；归档行已经有「已归档」徽标与相对时间，
+       * 这里只补一句不可打开的原因，避免出现「有 worker_session_id 却点不动」的疑惑。
+       */
+      const archivedAria = archived ? tr('archivedHint') : undefined
 
       const action = kind
         ? h(
@@ -1943,6 +2375,28 @@ window.__ModuleLoader__.load({
           )
         : null
 
+      /*
+       * 截断标记：宿主只投影布尔 `has_truncated`（一位小标记，不搬正文）。
+       * 有上限数值就写「前 N 字」，没有就退化成不带数字的说法。
+       * 它跟报告数 / 摘要放在同一行，因为「被切掉的是哪段」正是那一行的内容。
+       */
+      const truncHint = summaryCap > 0
+        ? fill(tr('truncatedHint'), { n: summaryCap })
+        : tr('truncatedHintNoLimit')
+      const truncMark = truncated
+        ? h(
+            'span',
+            {
+              key: 'truncated',
+              className: 'dsh-sa-truncated',
+              title: truncHint,
+              'aria-label': truncHint,
+              'data-truncated': 'true',
+            },
+            tr('truncatedTag'),
+          )
+        : null
+
       const tags = [
         attempt > 1
           ? h('span', { key: 'attempt', className: 'dsh-sa-tag' }, tr('attemptPrefix') + attempt + tr('attemptSuffix'))
@@ -1952,6 +2406,20 @@ window.__ModuleLoader__.load({
           : null,
         unread
           ? h('span', { key: 'unread', className: 'dsh-sa-tag dsh-sa-tag-unread', title: tr('unreadHint') }, tr('unreadTag'))
+          : null,
+        /*
+         * 「未读未知」与「待读」**互斥**：宿主侧已做互斥（unknown 出现时 pending
+         * 一定缺席），这里再加一道，避免将来的数据把两个矛盾的状态同时画出来。
+         */
+        unknownRead && !unread
+          ? h(
+              'span',
+              { key: 'unknown', className: 'dsh-sa-tag dsh-sa-tag-unknown', title: tr('unknownReadHint') },
+              tr('unknownReadTag'),
+            )
+          : null,
+        frozen
+          ? h('span', { key: 'frozen', className: 'dsh-sa-tag dsh-sa-tag-frozen', title: tr('frozenHint') }, tr('frozenTag'))
           : null,
         archived
           ? h('span', { key: 'archived', className: 'dsh-sa-tag dsh-sa-tag-archived' }, tr('archivedTag'))
@@ -1971,8 +2439,11 @@ window.__ModuleLoader__.load({
           'data-status': task.status,
           'data-variant': props.variant || 'active',
           'data-archived': archived ? 'true' : undefined,
+          'data-clickable': clickable ? 'true' : undefined,
           title: tip,
           tabIndex: clickable ? 0 : undefined,
+          'aria-disabled': clickable ? undefined : (archived ? true : undefined),
+          'aria-description': archivedAria,
           onClick: clickable ? activate : undefined,
           onKeyDown: clickable ? activate : undefined,
         },
@@ -2019,9 +2490,12 @@ window.__ModuleLoader__.load({
             )
           : null,
         dense
-          ? (reportCount > 0
-              ? h('span', { key: 'dense-count', className: 'dsh-sa-dense-meta' }, tr('reports') + ' ' + reportCount)
-              : null)
+          ? [
+              reportCount > 0
+                ? h('span', { key: 'dense-count', className: 'dsh-sa-dense-meta' }, tr('reports') + ' ' + reportCount)
+                : null,
+              truncMark,
+            ]
           : h(
               'div',
               { key: 'sub', className: 'dsh-sa-sub' },
@@ -2040,6 +2514,7 @@ window.__ModuleLoader__.load({
                 reportLine,
               ),
               reportAgo ? h('span', { key: 'report-at', className: 'dsh-sa-meta' }, reportAgo) : null,
+              truncMark,
             ),
         typeof task.error === 'string' && task.error && props.variant !== 'attention'
           ? h('div', { key: 'error', className: 'dsh-sa-errorline', title: task.error }, task.error)
@@ -2082,6 +2557,11 @@ window.__ModuleLoader__.load({
       /** 立即归档的两步确认：0 空闲，1 等待确认。 */
       const [archiveStage, setArchiveStage] = useState(0)
       const [archiving, setArchiving] = useState(false)
+      /**
+       * 退休视图的数据：{ state: 'idle'|'loading'|'ok'|'fail', data, error }。
+       * 与快照分开持有：它只在选中「已退休」时才取，取失败也只影响这一个视图。
+       */
+      const [retired, setRetired] = useState({ state: 'idle', data: null, error: '' })
 
       /** 面板内所有写操作的 AbortController，卸载时统一中止。 */
       const inFlight = useRef(null)
@@ -2183,6 +2663,36 @@ window.__ModuleLoader__.load({
         return snapshot.tasks.some(function (task) { return task && task.status === 'running' })
       }, [snapshot])
 
+      /**
+       * 选中「已退休」时才去取退休记录。
+       *
+       * 与 2 秒轮询解耦：退休记录一旦生成就不再变化（它描述的是"已经消失"这件事），
+       * 跟着快照每 2 秒拉一次纯属浪费，也会让视图在手滑时闪。
+       * 依赖 generation：用户点重试 / 归档后再进来能拿到新数据。
+       */
+      useEffect(function () {
+        if (filter !== 'retired') return undefined
+        let disposed = false
+        const controller = new AbortController()
+        setRetired(function (current) {
+          // 已经有数据时保留旧数据，只把状态切成 loading，避免列表闪成空白。
+          return { state: 'loading', data: current.data, error: '' }
+        })
+        readRetired(controller.signal)
+          .then(function (payload) {
+            if (disposed || controller.signal.aborted) return
+            setRetired({ state: 'ok', data: payload, error: '' })
+          })
+          .catch(function (error) {
+            if (disposed || controller.signal.aborted || (error && error.name === 'AbortError')) return
+            setRetired({ state: 'fail', data: null, error: describeError(error) })
+          })
+        return function () {
+          disposed = true
+          controller.abort()
+        }
+      }, [filter, generation])
+
       useEffect(function () {
         if (!hasRunning) return undefined
         setNow(Date.now())
@@ -2236,11 +2746,24 @@ window.__ModuleLoader__.load({
 
       /**
        * 点行打开子会话。openSession 可能抛 not-listed（子会话已不在会话目录里），
-       * 这里一律接住并提示，不白屏、不静默。已归档的先提醒一句，但仍然尝试打开。
+       * 这里一律接住并提示，不白屏、不静默。
+       *
+       * 归档任务**一律不调 openSession**：宿主 `uiWorkspace.openSession()` 只换主视图，
+       * 而 ui-workspace 的 `watchNavigation()` 里 `clearArchivedCurrent()` 一旦发现
+       * 主视图的会话在 `archivedSessionIds` 中就 `clearMain()`，主区域随后被补建成
+       * 空白会话 —— 用户看到的就是「点归档任务 → 打开了一个新会话」。DSH 侧边栏对
+       * 归档会话同样只提示「暂时无法查看，请取消归档后查看」而不打开，这里保持一致。
+       *
+       * 这道闸是**第二道**：第一道在 TaskCard（归档行不可点、不占 Tab 位）。
+       * 两点都做，是因为键盘、脚本或将来新增的调用方都可能绕过渲染层的判断。
        */
       const openWorker = useCallback(async function (task) {
         const target = task && typeof task.worker_session_id === 'string' ? task.worker_session_id : ''
-        if (task && task.archived_at) setNotice({ tone: 'warn', text: tr('archivedHint') })
+        // 先判归档：归档会话既不该换主视图，也不该被当成「没有子会话」去报错。
+        if (task && task.archived_at) {
+          setNotice({ tone: 'warn', text: tr('archivedHint') })
+          return
+        }
         if (!target) {
           setNotice({ tone: 'error', text: tr('noWorkerSession') })
           return
@@ -2259,8 +2782,8 @@ window.__ModuleLoader__.load({
         }
         try {
           await ui.openSession(target)
-          // 打开成功就把上一条失败提示清掉；归档行保留那句「可能已不在会话列表」的提醒。
-          if (!(task && task.archived_at)) setNotice(null)
+          // 打开成功就把上一条失败提示清掉；能走到这里的行一定不是归档行。
+          setNotice(null)
         } catch (error) {
           setNotice({ tone: 'error', text: fill(tr('openFailed'), { id: target, reason: describeError(error) }) })
         }
@@ -2302,6 +2825,31 @@ window.__ModuleLoader__.load({
         return { act: act, open: openWorker }
       }, [act, openWorker])
 
+      /**
+       * 复制退休记录的 task_id。
+       *
+       * 为什么不给退休行做「点开子会话」：子会话已经归档/可能已不在会话目录里，
+       * 点开会得到一句必然失败的提示。这里的真实用途是「拿 id 去 dispatch_inspect
+       * 或仓库里追问」，所以只提供 id，复制结果用现有的 notice 条回话。
+       */
+      const copyRetiredId = useCallback(function (record) {
+        const id = record && typeof record.task_id === 'string' ? record.task_id : ''
+        if (!id) {
+          setNotice({ tone: 'error', text: tr('retired.copyFailed').replace('{reason}', tr('unknownError')).replace('{id}', '?') })
+          return
+        }
+        void copyText(id).then(function (ok) {
+          if (ok) {
+            setNotice({ tone: 'info', text: fill(tr('retired.copied'), { id: id }) })
+            return
+          }
+          setNotice({
+            tone: 'warn',
+            text: fill(tr('retired.copyFailed'), { reason: tr('retired.notClickable'), id: id }),
+          })
+        })
+      }, [])
+
       const data = snapshot && Array.isArray(snapshot.tasks) ? snapshot : null
       const allTasks = data ? data.tasks.filter(function (task) { return task && typeof task === 'object' }) : []
       const counts = data && data.counts ? data.counts : {}
@@ -2324,8 +2872,16 @@ window.__ModuleLoader__.load({
         : allTasks
       const currentFilter = FILTERS.filter(function (item) { return item.id === filter })[0] || FILTERS[0]
 
+      // 记忆治理：窗口口径与退休数都来自快照的 memory 块（plans/07 P0-1 / P0-5）。
+      // memory 为 null = 宿主没提供（旧版 / headless / 实现未落地），一律降级不报错。
+      const memory = data && data.memory && typeof data.memory === 'object' ? data.memory : null
+      const window = pickWindow(memory)
+      const retiredDropped = memory && memory.ledger && Number.isFinite(memory.ledger.retiredDropped)
+        ? Math.max(0, memory.ledger.retiredDropped)
+        : 0
+
       const live = scopedTasks.filter(function (task) { return !task.archived_at })
-      const stats = effectStats(live, now)
+      const stats = effectStats(live, now, window)
       const backgroundNow = live.filter(function (task) { return Boolean(task.background) }).length
 
       // 三段：需要人处理 / 在跑与排队 / 最近完成。归档只在它自己的视图里出现。
@@ -2353,6 +2909,9 @@ window.__ModuleLoader__.load({
           baseline: stats.average,
           now: now,
           fetchedAt: fetchedAt,
+          // 截断提示里的「前 N 字」来自 memory.ledger.capPerTask.summary；
+          // 宿主没给就是 0，行内退化成不带数字的说法。
+          summaryCap: summaryCapOf(memory),
           busy: busy,
           handlers: handlers,
         })
@@ -2404,13 +2963,28 @@ window.__ModuleLoader__.load({
             value: stats.saved > 0 ? formatDuration(stats.saved) : tr('stat.none'),
             hint: tr('stat.savedHint'),
           }),
+          // 口径必须跟着数字一起出现：一个不说范围的百分比会被当成「全部历史」读，
+          // 而那正是 0.8.x 让上个月的失败任务给今天投票的原因（plans/07 §二 4）。
+          h(
+            'span',
+            {
+              key: 'window',
+              className: 'dsh-sa-stat-window' + (window ? '' : ' dsh-sa-stat-window-unknown'),
+              title: tr('stat.windowHint'),
+            },
+            tr('stat.windowLabel') + ' ' + stats.windowLabel,
+          ),
         ),
         h(ConcurrencyBar, { running: runningNow, max: maxWorkers, queued: queuedNow, background: backgroundNow }),
         h(
           'div',
           { className: 'dsh-sa-chips', role: 'group', 'aria-label': tr('title') },
           FILTERS.map(function (item) {
-            const count = scopedTasks.filter(item.match).length
+            // 退休 chip 的计数来自 memory 块（它不在这份任务列表里）；
+            // 宿主不给 memory 时显示「—」而不是 0 —— 0 会被读成「确实一条都没有」。
+            const count = item.remote === 'retired'
+              ? (memory ? String(num(counts.retired, 0)) : '—')
+              : String(scopedTasks.filter(item.match).length)
             return h(
               'button',
               {
@@ -2421,7 +2995,7 @@ window.__ModuleLoader__.load({
                 onClick: function () { setFilter(item.id) },
               },
               tr(item.labelKey),
-              h('span', { className: 'dsh-sa-chip-count' }, String(count)),
+              h('span', { className: 'dsh-sa-chip-count' }, count),
             )
           }),
         ),
@@ -2503,6 +3077,24 @@ window.__ModuleLoader__.load({
           ),
         )
       }
+      /*
+       * 退休记录自己也到了展示上限时，明说少给了多少。
+       * 与 truncated 的理由相同：面板上「退休 1000 / 列表 200」看起来像数据丢了，
+       * 而这里偏偏是「已经承认丢过一次数据」的视图，更不能安静截断。
+       */
+      const retiredOverflow = filter === 'retired'
+        ? num(retired.data && retired.data.dropped, 0) || retiredDropped
+        : 0
+      if (retiredOverflow > 0) {
+        strips.push(
+          h(
+            'div',
+            { key: 'retired-dropped', className: 'dsh-sa-strip dsh-sa-strip-warn', role: 'status', 'aria-live': 'polite' },
+            h('span', { className: 'dsh-sa-strip-text', title: fill(tr('retired.dropped'), { n: retiredOverflow }) },
+              fill(tr('retired.dropped'), { n: retiredOverflow })),
+          ),
+        )
+      }
 
       let body
       if (!data && !failure) {
@@ -2513,6 +3105,44 @@ window.__ModuleLoader__.load({
           hint: failure,
           action: h('button', { type: 'button', className: 'dsh-sa-btn', onClick: refresh }, tr('retry')),
         })
+      } else if (filter === 'retired') {
+        /*
+         * 退休视图先于「还没有任务」的空态判断：账本封顶之后，一个跑很久的实例
+         * 完全可能活跃任务为 0、退休记录却有一堆。把它落到「还没有任务」的空态上
+         * 等于告诉用户「一切正常」，而实际发生的是「东西被搬走了」。
+         *
+         * 三种降级各有各的话，绝不混成一句：
+         * - memory 为 null  → 宿主未提供（旧版/headless），不是「没有退休记录」；
+         * - 加载失败        → 暂时取不到 + 重试，沿用现有 unreachable 模式；
+         * - 真的空          → 「没有被退休的任务」。
+         */
+        const memoryMissing = !memory
+        if (memoryMissing) {
+          body = h(Blank, { title: tr('retired.unavailable'), hint: tr('retired.unavailableHint') })
+        } else if (retired.state === 'fail') {
+          body = h(Blank, {
+            title: tr('retired.loadFailed').replace('{reason}', retired.error || tr('unknownError')),
+            action: h('button', { type: 'button', className: 'dsh-sa-btn', onClick: refresh }, tr('retry')),
+          })
+        } else if (retired.state === 'loading' && !retired.data) {
+          body = h(Blank, { title: tr('loading') })
+        } else if (retired.data && Array.isArray(retired.data.entries) && retired.data.entries.length) {
+          const entries = retired.data.entries.filter(function (entry) { return entry && typeof entry === 'object' })
+          body = h(Section, {
+            title: tr('sec.retired'),
+            count: num(retired.data.count, entries.length),
+            body: h('div', { role: 'list', 'aria-label': tr('sec.retired') }, entries.map(function (entry, index) {
+              return h(RetiredRow, {
+                key: entry.task_id || 'retired-' + index,
+                record: entry,
+                now: now,
+                onCopy: copyRetiredId,
+              })
+            })),
+          })
+        } else {
+          body = h(Blank, { title: tr('retired.empty') })
+        }
       } else if (allTasks.length === 0) {
         body = h(Blank, {
           title: tr('empty'),

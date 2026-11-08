@@ -1,12 +1,12 @@
 /**
- * 看板快照的单测：只测纯函数（boardTask / boardSnapshot），不需要起 HTTP 服务。
+ * 看板快照的单测：只测纯函数（boardTask / boardSnapshot / retiredSnapshot），不需要起 HTTP 服务。
  * 形状是客户端契约的一部分，改字段会在这里先失败。
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { VERSION } from '../src/constants.js'
-import { boardSnapshot, boardTask, createBoardHandler } from '../src/board.js'
+import { boardSnapshot, boardTask, createBoardHandler, retiredSnapshot } from '../src/board.js'
 
 const BASE = '/dsh-mini-superagent/board'
 
@@ -113,6 +113,110 @@ test('boardTask 保留失败任务的 error', () => {
   assert.equal(card.error, '建会话失败')
 })
 
+/* ───────────── P0 记忆治理：把 host 新增的事实投影进快照（P2 修复 3） ───────────── */
+
+/**
+ * 归档 = **只读冻结**（P0-4）。`frozenAt` 必须投影成 `frozen_at`。
+ *
+ * 少了它，看板会把「已归档冻结」显示成普通已结算行。冻结本来就是为了
+ * 「这条不会再变了」，不显示等于让用户以为它还能被改、还该去等它的报告。
+ * 注意归档（`frozenAt`，任务仍在表里）与退休（`retiredAt`，已移出账本）是两件事。
+ */
+test('P2 boardTask 带 frozenAt 时输出 frozen_at（归档冻结，不能显示成普通行）', () => {
+  const card = boardTask(makeTask('a', {
+    status: 'done',
+    archivedAt: '2026-01-02T00:00:00.000Z',
+    frozenAt: '2026-01-02T00:00:01.000Z',
+  }))
+  assert.equal(card.frozen_at, '2026-01-02T00:00:01.000Z', '归档冻结时刻必须上快照')
+  assert.equal(card.archived_at, '2026-01-02T00:00:00.000Z', 'archived_at 仍保留（两个字段不互斥）')
+})
+
+test('P2 boardTask 没有 frozenAt 时不输出 frozen_at（不写 null，与现有可选字段同风格）', () => {
+  const card = boardTask(makeTask('a'))
+  assert.equal('frozen_at' in card, false, '缺失时不该凭空造一个 null 字段')
+})
+
+/**
+ * 「待读」超 TTL 后被 `sweepMemory()` 改写成 `inputUnknownAt`（P0-4）。
+ *
+ * 两个字段**必须互斥**：unknown 出现时 pending 不能再输出，否则看板会同时显示
+ * 「还在等它读」——那是个永远不会结束的状态，比不显示更误导人。
+ */
+test('P2 boardTask 带 inputUnknownAt 时输出 input_unknown_at，且不再输出 input_pending_at', () => {
+  const card = boardTask(makeTask('a', {
+    status: 'running',
+    inputPendingAt: '2026-01-01T00:00:05.000Z',
+    inputUnknownAt: '2026-01-01T00:10:00.000Z',
+  }))
+  assert.equal(card.input_unknown_at, '2026-01-01T00:10:00.000Z', '「不知道读没读到」要能看见')
+  assert.equal('input_pending_at' in card, false,
+    'unknown 之后不能再报 pending，否则又是「永久待读」')
+})
+
+test('P2 boardTask 只在 TTL 内输出 input_pending_at', () => {
+  const card = boardTask(makeTask('a', { status: 'running', inputPendingAt: '2026-01-01T00:00:05.000Z' }))
+  assert.equal(card.input_pending_at, '2026-01-01T00:00:05.000Z', 'TTL 内的待读仍要显示')
+  assert.equal('input_unknown_at' in card, false)
+})
+
+test('P2 boardTask 已读之后 pending 与 unknown 都不输出', () => {
+  const card = boardTask(makeTask('a', {
+    status: 'running',
+    inputPendingAt: '2026-01-01T00:00:05.000Z',
+    inputUnknownAt: '2026-01-01T00:10:00.000Z',
+    inputReadAt: '2026-01-01T00:11:00.000Z',
+  }))
+  assert.equal('input_pending_at' in card, false, '已读就不该再说「待读」')
+  assert.equal('input_unknown_at' in card, false, '已读就不该再说「不知道」')
+  assert.equal(card.input_read_at, '2026-01-01T00:11:00.000Z')
+})
+
+/**
+ * 报告被截断过：只给**布尔**小标记，不把正文搬上快照。
+ *
+ * 快照是每轮轮询都要重传的东西；把 6000 字的报告塞进来等于用带宽换一个小标记，
+ * 而要看正文的人本来就该走 `dispatch_inspect`。
+ */
+test('P2 boardTask 任一 report 带 truncated 时输出 has_truncated', () => {
+  const card = boardTask(makeTask('a', {
+    reports: [
+      { at: '2026-01-01T00:00:01.000Z', status: 'progress', summary: '短' },
+      { at: '2026-01-01T00:00:02.000Z', status: 'done', summary: '被截过', truncated: { summary: 6000 } },
+    ],
+  }))
+  assert.equal(card.has_truncated, true, '被截过的报告要能从小标记看出来')
+  // 关键：只给布尔，**不搬全文**。
+  assert.equal(typeof card.has_truncated, 'boolean', '客户端只要一个小标记，不是正文')
+  assert.ok(!JSON.stringify(card).includes('6000'), '截断的原始长度不该出现在快照里')
+})
+
+test('P2 boardTask 简报截断标记 briefTruncated 也并入 has_truncated', () => {
+  const card = boardTask(makeTask('a', { briefTruncated: 50000 }))
+  assert.equal(card.has_truncated, true,
+    '落盘时简报被截过同样算「有内容被截」，否则 retry 重投残版简报没人发现')
+})
+
+test('P2 boardTask 没有被截过的报告时不输出 has_truncated', () => {
+  const card = boardTask(makeTask('a', {
+    reports: [{ at: '2026-01-01T00:00:01.000Z', status: 'done', summary: '正常' }],
+  }))
+  assert.equal('has_truncated' in card, false, '一个恒为 false 的字段会让标记失去意义')
+})
+
+test('P2 boardSnapshot 的 cards 带着上面三个新字段（端到端过一遍快照）', () => {
+  const dispatch = fakeDispatch([
+    makeTask('frozen', { status: 'done', frozenAt: '2026-01-02T00:00:00.000Z' }),
+    makeTask('unknown', { status: 'running', inputUnknownAt: '2026-01-01T00:10:00.000Z' }),
+    makeTask('trunc', { status: 'done', reports: [{ at: '2026-01-01T00:00:01.000Z', status: 'done', summary: 's', truncated: { summary: 9 } }] }),
+  ])
+  const byId = Object.fromEntries(boardSnapshot(dispatch).tasks.map(card => [card.task_id, card]))
+  assert.equal(byId.frozen.frozen_at, '2026-01-02T00:00:00.000Z')
+  assert.equal(byId.unknown.input_unknown_at, '2026-01-01T00:10:00.000Z')
+  assert.equal('input_pending_at' in byId.unknown, false)
+  assert.equal(byId.trunc.has_truncated, true)
+})
+
 test('boardSnapshot 统计每个状态的数量', () => {
   const dispatch = fakeDispatch([
     makeTask('a', { status: 'running' }),
@@ -196,6 +300,239 @@ test('boardSnapshot 带上版本号与生成时间', () => {
   assert.ok(!Number.isNaN(Date.parse(snap.generatedAt)))
   assert.deepEqual(snap.tasks, [])
   assert.equal(snap.concurrency.max, 6)
+})
+
+/* ───────────────── 记忆治理：快照里的 memory 块（plans/07 P0-1 / P0-5） ───────────────── */
+
+/**
+ * 一份符合冻结契约的 memoryStats 返回值。
+ * 形状来自 plans/07 §六：window / ledger / admission / pending / retired 五块。
+ */
+function makeMemoryStats(overrides = {}) {
+  return {
+    window: { days: 7, tasks: 200, since: '2026-01-01T00:00:00.000Z' },
+    ledger: {
+      tasks: 12,
+      retired: 3,
+      archived: 4,
+      retiredDropped: 1,
+      capPerTask: { summary: 6000, detail: 4000 },
+    },
+    admission: { direct: 5, ledger: 7, directStatuses: ['blocked', 'failed'] },
+    pending: { inputs: 1, unknown: 0 },
+    retired: { count: 3, latestAt: '2026-01-02T00:00:00.000Z' },
+    ...overrides,
+  }
+}
+
+test('boardSnapshot 带上 memory 块且形状对', () => {
+  const dispatch = fakeDispatch([makeTask('a', { status: 'done' })])
+  dispatch.memoryStats = () => makeMemoryStats()
+  const snap = boardSnapshot(dispatch)
+
+  assert.ok(snap.memory && typeof snap.memory === 'object', 'memory 必须是对象，客户端靠它拿窗口')
+  assert.deepEqual(snap.memory.window, { days: 7, tasks: 200, since: '2026-01-01T00:00:00.000Z' })
+  assert.equal(snap.memory.ledger.retiredDropped, 1)
+  assert.equal(snap.memory.ledger.capPerTask.summary, 6000)
+  assert.equal(snap.memory.retired.count, 3)
+  assert.equal(snap.counts.retired, 3, 'counts.retired 取 memory.retired.count')
+})
+
+/**
+ * memoryStats 是 host 核心的另一半，可能还没落地、也可能抛错。
+ * 两种情况下看板都必须照常给出任务列表 —— 指标口径坏掉不该让人看不见任务。
+ */
+test('宿主没有 memoryStats 时 memory 为 null 且不抛错', () => {
+  const snap = boardSnapshot(fakeDispatch([makeTask('a', { status: 'done' })]))
+  assert.equal(snap.memory, null)
+  assert.equal(snap.counts.retired, 0)
+  assert.equal(snap.tasks.length, 1, '任务列表照常返回')
+})
+
+test('memoryStats 抛错时降级为 null，不让整块看板 500', () => {
+  const dispatch = fakeDispatch([makeTask('a', { status: 'done' })])
+  dispatch.memoryStats = () => { throw new Error('窗口计算炸了') }
+  const snap = boardSnapshot(dispatch)
+  assert.equal(snap.memory, null)
+  assert.equal(snap.counts.retired, 0)
+  assert.equal(snap.tasks.length, 1)
+})
+
+test('memoryStats 返回垃圾形状时 memory 为 null 而不是半个对象', () => {
+  const dispatch = fakeDispatch([])
+  dispatch.memoryStats = () => 'not-an-object'
+  assert.equal(boardSnapshot(dispatch).memory, null)
+})
+
+/**
+ * host 的 `memoryStats()` 实际是 **async**（它要读活表与留痕两份）。
+ *
+ * 这是最容易踩的一脚：同步快照里拿到的是 Promise，直接塞进 JSON 会被
+ * `JSON.stringify` 变成 `{}` —— 客户端读到的是一个「空 memory 块」，
+ * 比 null 更难排查，而且看起来像宿主在正常工作。所以：
+ * - 同步调用（boardSnapshot 自己取）必须识别 thenable 并退成 null；
+ * - HTTP 路由必须先把值 await 出来再放进快照。
+ */
+test('memoryStats 是 async 时，同步快照退成 null 而不是塞进一个 Promise', () => {
+  const dispatch = fakeDispatch([makeTask('a', { status: 'done' })])
+  dispatch.memoryStats = async () => makeMemoryStats()
+  const snap = boardSnapshot(dispatch)
+  assert.equal(snap.memory, null, 'Promise 不能被当成 memory 块')
+  assert.equal(snap.counts.retired, 0)
+  // 真正的证据：序列化后不该出现一个空对象把「没提供」伪装成「提供了但为空」。
+  const wire = JSON.parse(JSON.stringify(snap))
+  assert.equal(wire.memory, null)
+  assert.equal(wire.tasks.length, 1)
+})
+
+test('memoryStats 是 async 时，显式传入已解析的值仍然生效', async () => {
+  const dispatch = fakeDispatch([])
+  dispatch.memoryStats = async () => makeMemoryStats()
+  const resolved = await dispatch.memoryStats()
+  const snap = boardSnapshot(dispatch, resolved)
+  assert.equal(snap.memory.window.days, 7)
+  assert.equal(snap.counts.retired, 3)
+})
+
+test('GET /board 会 await 异步的 memoryStats（真机上它是 async）', async () => {
+  const { handler, dispatch } = fakeHost([makeTask('a', { status: 'done' })])
+  let calls = 0
+  dispatch.memoryStats = async () => {
+    calls += 1
+    return makeMemoryStats()
+  }
+  const result = await call(handler, {})
+  assert.equal(result.status, 200)
+  assert.equal(calls, 1, '一次快照只取一次口径')
+  assert.equal(result.json.memory.window.days, 7, '异步值必须被 await 出来，不能是 {}')
+  assert.equal(result.json.memory.window.since, '2026-01-01T00:00:00.000Z')
+  assert.equal(result.json.counts.retired, 3)
+})
+
+/* ───────────────── 已退休：纯函数 + 路由 ───────────────── */
+
+/** 造一条退休记录（形状来自已冻结的 host 契约）。 */
+function makeRetired(id, retiredAt, overrides = {}) {
+  return {
+    id,
+    title: `退休任务 ${id}`,
+    status: 'done',
+    parentSessionId: 's1',
+    workerSessionId: `dispatch-${id}`,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T01:00:00.000Z',
+    archivedAt: '2026-01-01T02:00:00.000Z',
+    retiredAt,
+    retiredReason: 'cap-count',
+    workspaceTitle: '项目 A',
+    reportCount: 3,
+    summary: '已合并到主分支',
+    ...overrides,
+  }
+}
+
+test('retiredSnapshot 把退休记录拍平成客户端字段', () => {
+  const dispatch = { retired: new Map([['r1', makeRetired('r1', '2026-01-03T00:00:00.000Z')]]) }
+  const snap = retiredSnapshot(dispatch)
+  assert.equal(snap.ok, true)
+  assert.equal(snap.count, 1)
+  assert.equal(snap.dropped, 0)
+  assert.deepEqual(snap.entries, [{
+    task_id: 'r1',
+    title: '退休任务 r1',
+    status: 'done',
+    retired_at: '2026-01-03T00:00:00.000Z',
+    retired_reason: 'cap-count',
+    archived_at: '2026-01-01T02:00:00.000Z',
+    updated_at: '2026-01-01T01:00:00.000Z',
+    summary: '已合并到主分支',
+  }])
+})
+
+test('retiredSnapshot 没有 dispatch.retired 时返回空表（旧版宿主/headless）', () => {
+  assert.deepEqual(retiredSnapshot({}), { ok: true, count: 0, dropped: 0, entries: [] })
+  assert.deepEqual(retiredSnapshot({ retired: null }), { ok: true, count: 0, dropped: 0, entries: [] })
+  // 形状不是 Map 时也不该炸：宁可当成「没有」。
+  assert.deepEqual(retiredSnapshot({ retired: [] }), { ok: true, count: 0, dropped: 0, entries: [] })
+})
+
+test('retiredSnapshot 按 retiredAt 倒序（最近退休的排最前）', () => {
+  const dispatch = {
+    retired: new Map([
+      ['old', makeRetired('old', '2025-12-01T00:00:00.000Z')],
+      ['new', makeRetired('new', '2026-01-05T00:00:00.000Z')],
+      ['mid', makeRetired('mid', '2026-01-03T00:00:00.000Z')],
+    ]),
+  }
+  assert.deepEqual(retiredSnapshot(dispatch).entries.map(entry => entry.task_id), ['new', 'mid', 'old'])
+})
+
+test('retiredSnapshot 超过 200 条时截断并给出 dropped', () => {
+  const records = Array.from({ length: 230 }, (_, index) => {
+    const id = `r${String(index).padStart(3, '0')}`
+    // retiredAt 随 index 递增，倒序后最新的（r229）排最前。
+    return [id, makeRetired(id, new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString())]
+  })
+  const snap = retiredSnapshot({ retired: new Map(records) })
+  assert.equal(snap.count, 230, 'count 是全量，不是截断后的条数')
+  assert.equal(snap.dropped, 30, '明说少给了多少')
+  assert.equal(snap.entries.length, 200)
+  assert.equal(snap.entries[0].task_id, 'r229', '截断保留的是最新的那批')
+})
+
+test('GET /board/retired 无 dispatch.retired 时返回空表（只读，不要求写头）', async () => {
+  const { handler } = fakeHost([makeTask('a')])
+  const result = await call(handler, { url: `${BASE}/retired`, headers: { 'x-dsh-mini-superagent': '' } })
+  assert.equal(result.status, 200)
+  assert.equal(result.headers['cache-control'], 'no-store')
+  assert.deepEqual(result.json, { ok: true, count: 0, dropped: 0, entries: [] })
+})
+
+test('GET /board/retired 有记录时返回倒序与 dropped', async () => {
+  const { handler, dispatch } = fakeHost([])
+  dispatch.retired = new Map([
+    ['old', makeRetired('old', '2025-12-01T00:00:00.000Z')],
+    ['new', makeRetired('new', '2026-01-05T00:00:00.000Z', { retiredReason: 'cap-days' })],
+  ])
+  const result = await call(handler, { url: `${BASE}/retired` })
+  assert.equal(result.status, 200)
+  assert.equal(result.json.count, 2)
+  assert.equal(result.json.dropped, 0)
+  assert.deepEqual(result.json.entries.map(entry => entry.task_id), ['new', 'old'])
+  assert.equal(result.json.entries[0].retired_reason, 'cap-days')
+})
+
+test('GET /board/retired 被跨站请求拒绝（与 GET /board 同档准入）', async () => {
+  const { handler, dispatch } = fakeHost([])
+  dispatch.retired = new Map([['r1', makeRetired('r1', '2026-01-03T00:00:00.000Z')]])
+  const result = await call(handler, {
+    url: `${BASE}/retired`,
+    headers: { host: 'evil.example:9735', origin: 'http://evil.example:9735' },
+  })
+  assert.equal(result.status, 403)
+  assert.equal(result.json.ok, false)
+})
+
+test('POST /board/retired 不成立（退休是 host 的决定，面板只能看）', async () => {
+  const { handler } = fakeHost([])
+  const result = await call(handler, { method: 'POST', url: `${BASE}/retired`, body: {} })
+  assert.equal(result.status, 404)
+})
+
+/**
+ * 退休记录不得回落进 tasks 列表。
+ *
+ * 否则「账本有上界」这件事在快照上不可验证（plans/07 §七 4），
+ * 面板上看起来也像退休根本没发生过。
+ */
+test('退休记录不回落进快照的 tasks 列表', () => {
+  const dispatch = fakeDispatch([makeTask('alive', { status: 'running' })])
+  dispatch.retired = new Map([['gone', makeRetired('gone', '2026-01-03T00:00:00.000Z')]])
+  dispatch.memoryStats = () => makeMemoryStats()
+  const snap = boardSnapshot(dispatch)
+  assert.deepEqual(snap.tasks.map(task => task.task_id), ['alive'])
+  assert.equal(snap.counts.total, 1, '退休记录不占 counts.total')
+  assert.equal(snap.counts.retired, 3, '退休数走 memory.retired.count，不进 total')
 })
 
 // ---------------------------------------------------------------- HTTP 路由
