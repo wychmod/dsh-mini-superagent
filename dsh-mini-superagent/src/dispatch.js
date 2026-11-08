@@ -84,6 +84,19 @@ export class Dispatch {
      * 一个会话第一次派发时登记；disposer 由 SessionGateway 持有，插件卸载或会话销毁时收回。
      */
     this.routers = new Set()
+    /**
+     * 会话 id → 上一次**真正装配进请求**的提示文本（见 `refreshHint`）。
+     *
+     * 为什么要记：宿主能追加提示的路由（`systemPromptUpdate: 'in-history'`，本机的
+     * deepseek 路由就是）在文本变化时**不替换**面里的旧提示节点，而是追加一个新的
+     * `system/message`；只有开新请求序列时才改写节点 0 并把后续仍非空的旧节点逐条
+     * 清空（app.asar 的 `SystemPromptProjection.project`）。旧的强制段因此仍参与
+     * `deriveMessages()`，模型会同时看到两套矛盾指令。文本函数只决定「下一次装配
+     * 发什么」，改不了「历史里剩什么」——必须自己记下装配过什么，才知道何时收敛。
+     */
+    this.hintLive = new Map()
+    /** 会话 id → 本请求序列里上一段已装配的提示；`#hintDrifted` 比较并推进它。 */
+    this.hintBaseline = new Map()
     /** 任务 id → 已用掉的瞬时故障续跑次数；成功报告或回合正常结束时清零。 */
     this.retryCounts = new Map()
     /** 待触发的续跑定时器，卸载时统一清掉。 */
@@ -153,11 +166,46 @@ export class Dispatch {
   refreshHint(agent) {
     if (!agent) return
     this.sessions.hint(agent, () => {
-      const base = this.modeOf(agent.id) === MODE_ALWAYS ? FORCED_HINT : SOFT_HINT
-      // 进了路由模式就把「write/edit 已不可用」说出来：模型看不到工具时，
-      // 一句提示能让它直接改道派发，而不是反复试错或声称自己没有能力。
-      return this.routerLocked(agent) ? `${base}\n\n${ROUTER_LOCKED}` : base
+      // 求值点就是装配点：记下**这次真正装配进请求的文本**。
+      // 不能记「本该发的文本」——装配早于 agent/pre-step，轮到判断时那个值
+      // 已被本步自己的装配刷新过，比较恒等，序列就永远不会开。
+      const text = this.#hintTextFor(agent)
+      this.hintLive.set(agent.id, text)
+      return text
     })
+    // 装配出去的是新文本，但**历史里那段旧提示不会因此消失**：宿主的 in-history 路由
+    // 对变化的提示是「追加一个新 system 节点」，只有在开新请求序列时才改写节点 0
+    // 并把后续非空的旧节点逐条清空（app.asar 的 `SystemPromptProjection.project`）。
+    // 于是切回「不派发」后，模型会同时看到旧强制段和新轻提示两套互相矛盾的指令。
+    // 挂一个 pre-step 钩子：本步装配的文本与本序列上一段不同时，开新序列让它收敛。
+    this.sessions.startSeriesWhenStale?.(agent, () => this.#hintDrifted(agent))
+  }
+
+  /**
+   * 本步装配出去的提示与本序列上一段是否不同（= 旧语义还留在历史里，需要收敛）。
+   *
+   * 基准 `hintBaseline` 在这里推进：钩子保证每步只问一次，所以「比较 + 推进」
+   * 必须原子。第一次见到某个会话时不主动开序列——插件刚加载/会话刚建，
+   * 历史里还没有可收敛的旧段，白发一次前缀缓存不值得。
+   *
+   * @param {object} agent 目标会话
+   * @returns {boolean}
+   */
+  #hintDrifted(agent) {
+    const live = this.hintLive.get(agent.id)
+    if (live === undefined) return false
+    const previous = this.hintBaseline.get(agent.id)
+    this.hintBaseline.set(agent.id, live)
+    if (previous === undefined) return false
+    return live !== previous
+  }
+
+  /** 此刻该发给 `agent` 的提示文本（纯求值，无副作用）。 */
+  #hintTextFor(agent) {
+    const base = this.modeOf(agent.id) === MODE_ALWAYS ? FORCED_HINT : SOFT_HINT
+    // 进了路由模式就把「write/edit 已不可用」说出来：模型看不到工具时，
+    // 一句提示能让它直接改道派发，而不是反复试错或声称自己没有能力。
+    return this.routerLocked(agent) ? `${base}\n\n${ROUTER_LOCKED}` : base
   }
 
   /**

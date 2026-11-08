@@ -45,6 +45,13 @@ export class SessionGateway {
      * 同上：`agent.ctx` 的生命周期比插件长，卸载时要主动收回。
      */
     this.restrictDisposers = new Map()
+    /**
+     * 提示收敛钩子（`agent/pre-step` 的 disposer），按 agent id 记。
+     * 与提示段同源：都挂在 `agent.ctx` 上，生命周期比插件长，卸载时要主动收回。
+     */
+    this.seriesWatchers = new Map()
+    /** 宿主没有 `agent.ctx.on` 时只告警一次（见 `startSeriesWhenStale`）。 */
+    this.seriesUnsupported = false
   }
 
   warn(...args) { this.ctx.logger?.warn?.(...args) }
@@ -434,12 +441,67 @@ export class SessionGateway {
     }
   }
 
+  /**
+   * 提示语义变了就开一个新的模型消息序列，让宿主把历史里的旧提示清掉。
+   *
+   * 为什么需要：宿主的 `in-history` 路由对**变化的提示是追加，不是替换**
+   * （app.asar 的 `SystemPromptProjection.project`：文本变了就 `append` 一个新的
+   * `system/message`；只有开新序列时才改写节点 0 并逐条清空后续非空的旧节点）。
+   * 于是切回「不派发」之后旧的强制段并没有消失，仍在面里、仍随 `deriveMessages()`
+   * 进请求——模型同时看到两段互相矛盾的指令。文本函数只决定「下一次装配发什么」，
+   * 改不了「历史里剩什么」。
+   *
+   * `startsRequestSeries` 是宿主自己的收敛入口，借用它即可，不需要改宿主。
+   * （走提示上下文也绕不过去：`systemPrompt.context()` 的追加快照会连带清掉旧的
+   * **上下文**节点，但系统提示节点不归它管。）
+   *
+   * 代价：开新序列会让提供方的前缀缓存从系统提示处失效一次。所以判据必须是
+   * 「语义真的变了」，由调用方给（`stale`，每步问一次），只在那一步置位。
+   *
+   * @param {object} agent 目标会话
+   * @param {() => boolean} stale 本步是否需要收敛（每步调用一次，最多一次）
+   */
+  startSeriesWhenStale(agent, stale) {
+    if (!agent?.id) return
+    if (this.seriesWatchers.has(agent.id)) return
+    // 宿主不支持时的告警只记一次：`refreshHint` 在每次切模式/启动时都会调到这里，
+    // 不去重就会把同一条 warn 刷成噪音，反而盖掉真正有用的日志。
+    if (this.seriesUnsupported) return
+    const target = agent.ctx
+    if (typeof target?.on !== 'function') {
+      // 记成「宿主整体不支持」而不是按会话记：拿不到 ctx.on 是版本问题，不是个别会话的问题。
+      this.seriesUnsupported = true
+      this.warn(`${LOG_PREFIX} 宿主没有 agent.ctx.on，提示段切模式后无法收敛（旧段会留在历史里）`)
+      return
+    }
+    try {
+      const dispose = target.on('agent/pre-step', async (payload, next) => {
+        const decision = await next()
+        // 只接管 enter：reject 是别的监听器的决定，原样传下去。
+        if (decision?.kind !== 'enter') return decision
+        try {
+          if (!stale()) return decision
+          // spread 保留调用方与其它监听器写进去的字段（消息批次等）。
+          return { ...decision, startsRequestSeries: true }
+        } catch { return decision }
+      })
+      if (typeof dispose !== 'function') return
+      this.seriesWatchers.set(agent.id, dispose)
+    } catch (error) {
+      this.warn(`${LOG_PREFIX} 无法为该会话注册提示收敛钩子: %s`, String(error))
+    }
+  }
+
   /** 插件卸载：收回所有已注册的提示段与工具收窄。 */
   dispose() {
     for (const dispose of this.hintDisposers) {
       try { dispose() } catch { /* 宿主已回收 */ }
     }
     this.hintDisposers.clear()
+    for (const dispose of this.seriesWatchers.values()) {
+      try { dispose() } catch { /* 宿主已回收 */ }
+    }
+    this.seriesWatchers.clear()
     this.hinted.clear()
     this.hintTexts.clear()
     // 工具收窄是挂在 agent.ctx 上的副作用，作用域比插件长，卸载时必须收回，

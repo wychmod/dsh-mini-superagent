@@ -424,6 +424,19 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 - 设了目标：`FORCED_HINT`（首行 `[dsh-mini-superagent 强制派发]`），除纯问答外都要派下去；
 - 已进路由模式：在上面两段之后追加 `ROUTER_LOCKED`，说明 `write` / `edit` 已被收窄、改代码请派发。
 
+### 切模式为什么要开新请求序列
+
+「文本是函数、下一轮换文案」只说对了一半。宿主的请求装配对**变化的提示是追加，不是替换**：
+路由声明 `systemPromptUpdate: 'in-history'` 时（本机的 deepseek 路由就是），文本一变就 `append`
+一个新的 `system/message`，**旧的那个仍然留在面上**、仍随 `deriveMessages()` 进请求；只有开新请求
+序列时才改写节点 0 并把后续非空的旧节点逐条清空（`app.asar` 的 `SystemPromptProjection.project`）。
+
+于是切回「不派发」后，模型会同时读到旧的强制段和新的轻提示——这正是 0.8.2 之前那个
+「我选了不派发，为什么还是派发了」的故障。所以插件在**装配文本相对上一步真的变了**时，
+通过 `agent/pre-step` 返回 `startsRequestSeries: true`，把收敛交回宿主自己的机制；
+文本没变时不动，避免白白打掉提供方的前缀缓存。实测这能解释本机会话 `session-<redacted>`
+面上叠着三份 `system/message`（turn 1 强制段、turn 2 强制段、turn 7 轻提示，三份都还在）。
+
 两段提示共用三段「机制契约」（`BACKGROUND_CONTRACT` / `HANDOFF_RULE` / `IN_FLIGHT_ALLOWED`）：
 派发非阻塞、报告会自己回来、`dispatch_wait` 才是真阻塞；**派发即移交**（返回之后该任务的读代码、
 搜索、跑脚本、开浏览器、查网络、验数据都不再由主会话进行，只读调查也算）；**有任务在飞时只剩四件事可做，
