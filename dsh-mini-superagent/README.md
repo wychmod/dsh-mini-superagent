@@ -204,6 +204,13 @@ worker 回合结束（`agent/status` → `idle`）时，如果它这一轮没给
 
 Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panellist`，`order 60`）；点开是常驻主面板（`main` 槽），
 数据来自 Host 的同源 HTTP 路由 `GET /dsh-mini-superagent/board`，每 2 秒轮询一次。
+面板顶部有一条**平级切换条**：`任务看板 / 分析看板`，默认停在任务看板；
+切到分析看板时，原有任务看板的字段、入口与所有行内操作都不变。
+
+分析看板读另一条只读路由 `GET /board/analytics`（全量账本，10 秒刷新），
+按时间范围 / 状态 / 负责人 / 工作区 / 批次筛选，展示任务总量、状态分布、完成率、超时代理、按天趋势与环比，
+并附一张可展开的指标口径表。**账本没有人员与截止时间字段**：负责人按 `parentSessionId`（派发主会话）代理、
+逾期按「创建后超过阈值的时长」代理，两处都标「待业务确认」；详见 [docs/board.md](docs/board.md)。
 
 **装完/升级后必须刷新一次 GUI 页面**，图标才会出现——客户端模块在页面刷新后加载，插件已激活不影响这一点。
 
@@ -633,7 +640,7 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 | [docs/architecture.md](docs/architecture.md) | 模块职责、数据流、设计取舍与依据 |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 排障表、日志前缀与恢复动作 |
 | [docs/workspaces.md](docs/workspaces.md) | 工作区模型、目录约定、解析规则、自动归档、限制与排障 |
-| [docs/board.md](docs/board.md) | 任务看板：入口、面板结构、HTTP 接口、归档/工作区视图、跳转、重试、鉴权 |
+| [docs/board.md](docs/board.md) | 任务看板 + 分析数据看板：入口、面板结构、两条只读聚合接口、指标口径表、归档/工作区视图、跳转、重试、鉴权 |
 | [docs/composer.md](docs/composer.md) | 输入框：派发目标选择器、`@` 工作区、chip 契约与降级、未验证清单 |
 | [docs/api-contracts.md](docs/api-contracts.md) | DSH 主机 API 契约取证（消息/Agent/事件/会话控制器/工具作用域） |
 | [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0、0.4.0、0.5.0 的差异 |

@@ -18,6 +18,29 @@
 | [`09-board-analytics.md`](09-board-analytics.md) | 看板统计口径与多视图：从状态列表升级为判断工具，规划「总览 / 效果 / 拆解 / 历史」四视图、指标字典与数据契约 | **P0 + P1 + P2 已落地**：P0「统计口径地基」= 权威 `settledAt`（`src/tasks.js` 的 `settle()` / `transition()` 写、`reopen()` 清）+ `boardStats` 聚合与 coverage + 四数字补分子分母，`src/stats.js`（8 个导出：`boardStats` / `degradedStats` / `quantile` / `median` / `normalizeWindow` / `defaultWindowDays` / `settleTimeOf` / `inWindow`）+ `test/stats.test.js` 48 条 + 更新 `GET /board/stats`（`src/board.js:519`），活宿主实测 200：`statsVersion:1, coverage.sourceTasks:63, settled:31, timeBasis:mixed, daily:2 行`；P1「效果 + 拆解」= `EffectView` / `BreakdownView`（`client/index.js`）；P2「历史 + 详情抽屉」= `HistoryView` / `TaskDrawer`，`scripts/client-smoke.mjs` 实测 `全部通过：346 项检查`。**未做**：P3 全部四项——时间加权并发利用率（需宿主有界采样或 running 数变化事件，`src/` 检索不到 `utilization`）、消息级投递流水（检索不到 `deliveryLog` / `messageLog`）、稳定错误码与失败类型分布（检索不到 `errorCode` / `error_code`）、token/成本（检索不到 `tokenUsage` / `costUsd`，且需宿主先给真实模型用量）；均为缺宿主数据源，不是缺视图 |
 | [`10-voice-style.md`](10-voice-style.md) | 主会话的语言风格：先认领任务、再说人话、能一眼看懂（报告文案形状与提示词里的说话规则） | **P0 + P1 已落地**：`headline` 字段、`reportText()` 四段式、失败/中断/批次文案在 `src/voice.js`（`test/voice-contract.test.js` 31 条）；提示词「说话方式」段 `SPEAK_RULE` 在 `src/prompt.js`，受 `test/voice-prompt.test.js` 的 ≤8 行 / ≤500 字门禁约束。**未做**：P2「`dispatch_inspect` 返回可直接转述的详情」、P3 追问率校准；`docs/voice-samples.md` 的 10 场景人工盲评仍待人跑 |
 
+## 补充：分析数据看板（未发布，不属于 09 的四视图）
+
+顶层新增 `任务看板 / 分析看板` 二选一切换，任务看板零改动。分析看板走**另一条**只读路由
+`GET /board/analytics`（`src/analytics.js`），按 `createdAt` 的队列口径统计任务总量、状态分布、
+完成率、超时代理与按天趋势；与 09 的 `/board/stats`（按结算时刻、归档不投票）**刻意不同**，
+两套分母各自在界面写明。账本没有人员字段与 `due_at`，负责人 / 逾期均标为代理指标并写「待业务确认」。
+布局图、指标口径表、状态处理与刷新方案见 [`dsh-mini-superagent/docs/board.md`](../dsh-mini-superagent/docs/board.md)。
+
+## 补充：12 条缺陷的修复（2026-11-09）
+
+一次针对「复活已结算任务」与「口径漂移」的集中修复。四条与复活有关（`settledAt` 不刷新 /
+第二轮零报告被判 done / 取消被投递撤销 / 已归档任务可复活），四条与统计口径有关
+（`timeBasis` 被窗口外污染 / 可靠性块不按工作区筛选 / 「未标注」永远筛不出 / 缺时间恒为 0），
+四条在客户端（图表判空漏 cancelled/ended / 2 秒轮询不看面板 / 口径行用新窗口配旧数字 / 死代码与常量漂移）。
+
+**口径只有一份**这条原则在这次修复里落成三处具体动作：`TaskTable.transition()` 统一承担
+「离开终态即失效」，`dispatch.continueTask()` 统一承担续派准入（工具入口与看板入口共用），
+`SAMPLE_LOW_BELOW` / `defaultWindowDays` / `ANALYTICS_UNKNOWN` 这些口径一律复用既有导出。
+
+新增用例：`test/resume-after-settle.test.js`（7 条，钉复活路径的四条事实）、
+`test/stats.test.js` +6 条、`test/analytics.test.js` +6 条、`test/memory.test.js` +2 条、
+`test/board.test.js` +1 条；`scripts/client-smoke.mjs` +6 项（图表判空、轮询停摆、口径行跟 payload）。
+
 ## 状态口径
 
 - **已落地**：能在 `src/`、`client/` 或 CHANGELOG 里指到具体实现或发布记录。

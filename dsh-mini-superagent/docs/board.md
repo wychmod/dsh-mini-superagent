@@ -1,6 +1,7 @@
 # 任务看板
 
-0.3.0 新增、0.5.0 补齐归档与工作区视图、本版（未发布）补齐「已退休」视图与记忆治理口径的常驻面板。Host 半边 `src/board.js` 提供快照与四个写操作（取消 / 重试 / 归档 / 派发目标），
+0.3.0 新增、0.5.0 补齐归档与工作区视图、本版（未发布）补齐「已退休」视图与记忆治理口径的常驻面板，
+并在同一面板内新增一个**平级的分析数据看板**（与任务看板二选一切换）。Host 半边 `src/board.js` 提供快照、两条只读聚合与四个写操作（取消 / 重试 / 归档 / 派发目标），
 浏览器半边 `client/index.js` 负责渲染。两边只通过同源 HTTP 通信，不共享内存、不走 Remote/RPC。
 
 ---
@@ -26,10 +27,12 @@
 
 ## 面板结构
 
-从上到下：
+从上到下（**任务看板**形态；顶部多一条平级切换条，其余布局、字段与操作逐字未改）：
 
 ```text
-┌ 并发 2/6   排队 1   总计 7   失败 3          更新于 13:42:07 ┐
+┌ 看板  [任务看板] [分析看板]   任务看板字段与操作保持不变              ┐
+├──────────────────────────────────────────────────────────────┤
+│ 并发 2/6   排队 1   总计 7   失败 3          更新于 13:42:07 │
 │ [全部 7] [进行中 3] [需要处理 3] [已归档 2] [已退休 1]         │
 │ [全部工作区 ▾]                              [立即归档]        │
 ├──────────────────────────────────────────────────────────────┤
@@ -40,6 +43,9 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
+- **顶层切换条**：`任务看板 / 分析看板` 二选一，默认停在任务看板。它只决定渲染哪一块，
+  任务看板的 state、header、chip、行内操作与历史抽屉一行未改。
+  分析看板的布局、口径与刷新见下文「分析数据看板」。
 - **顶部指标**：`并发 running/max`、`排队`、`总计`、`失败`（有失败时红字），右侧「更新于 HH:MM:SS」。
   指标来自快照的 `concurrency` 与 `counts`；**「总计」= `counts.total − counts.archived`**（归档只在它自己的 chip 里计数）。
 - **效果条**：`完成`、`成功率`、`平均耗时`（中位数）、`并行节省`。它们的口径受**记忆治理窗口**约束：
@@ -96,6 +102,8 @@
 | --- | --- | --- |
 | GET | `/dsh-mini-superagent/board` | 返回整块快照（含 `memory` 块），响应头 `cache-control: no-store` |
 | GET | `/dsh-mini-superagent/board/retired` | 只读：已退休任务的留痕，`{ok, count, dropped, entries[]}` |
+| GET | `/dsh-mini-superagent/board/stats` | 只读：效果 / 拆解视图的全量聚合（plans/09 口径） |
+| GET | `/dsh-mini-superagent/board/analytics` | 只读：分析数据看板的队列聚合（口径见「分析数据看板」） |
 | POST | `/dsh-mini-superagent/board/cancel` | body `{"task_id":"t-..."}`，取消任务 |
 | POST | `/dsh-mini-superagent/board/retry` | body `{"task_id":"t-..."}`，重试任务；**再带 `message` 时是续派**（见下） |
 | POST | `/dsh-mini-superagent/board/archive` | 无 body，立即跑一次归档巡检（**全量**，按保留期） |
@@ -106,7 +114,8 @@
 
 请求体上限 64 KiB，必须是合法 JSON（`/archive` 不需要 body）。
 
-**准入分档**：只读端点（`GET /board`、`GET /board/retired`、`GET /selfcheck`）走 `readAllowed`，
+**准入分档**：只读端点（`GET /board`、`GET /board/retired`、`GET /board/stats`、
+`GET /board/analytics`、`GET /selfcheck`）走 `readAllowed`，
 写端点走 `writeAllowed`（= 读的规则 + 自定义头）。**`GET /board/retired` 不要求 `x-dsh-mini-superagent` 写头**：
 它只读、不含正文、只回答「这条任务什么时候因为什么被移出账本」，把它当写操作对待会让 `curl`、
 脚本、以及将来任何只读看板都得多带一个无意义的头。退休本身**不是**写操作——退休由宿主封顶逻辑决定，面板只能看。
@@ -140,7 +149,7 @@
   "targets": { "session-…": { "workspace_id": "ws-…", "title": "项目 A", "path": "D:\\proj\\a" } },
   "truncated": null,
   "memory": {
-    "window": { "days": 7, "tasks": 200, "since": "2026-10-29T10:42:07.000Z" },
+    "window": { "days": 7, "tasks": 200, "since": "2026-10-29T10:42:07.000Z", "count": 5 },
     "ledger": { "tasks": 7, "retired": 3, "archived": 2, "retiredDropped": 0, "capPerTask": { "summary": 6000, "detail": 4000 } },
     "admission": { "direct": 12, "ledger": 40, "directStatuses": ["done", "blocked", "failed", "cancelled"] },
     "pending": { "inputs": 1, "unknown": 0 },
@@ -159,7 +168,11 @@
 - `truncated`：任务总数超过 200 时为 `{shown, total}`，否则 `null`。**这是给界面的提示**——没有它的时候「总计 500 / 列表 200」看起来像数据丢了。
 - `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.8.0`）。
 - `memory`：记忆治理口径，**形状逐字冻结**为 `memoryStats()` 的返回值。五块的含义：
-  - `window`：指标窗口（最近 `days` 天 / `tasks` 条，`since` 是窗口起点 ISO 串）；
+  - `window`：指标窗口（最近 `days` 天 / `tasks` 条，`since` 是窗口起点 ISO 串，
+    `count` 是窗口**实际命中**的条数——未套 `tasks` 上限，按 `updated_at`（没有则 `settled_at`）
+    落在 `since` 之后且**非归档**判定，与客户端「效果条」那一条口径一致）。
+    `count` 的作用是让窗口**能被账本核对**：没有它，`window` 只是一份配置回显，
+    而 `ledger.tasks` 报的是活表全量（含归档、含窗口外），两个数谁也解释不了谁；
   - `ledger`：**活表**条数、退休留痕数、归档数、被丢弃的留痕数（`retiredDropped`，**不落盘、重启归零**）、单条报告预算；
     `ledger.tasks + retired.count` 才是「曾经有过多少任务」；
   - `admission`：准入决策计数（`direct` / `ledger`）与当前直通状态列表（`directStatuses` 含硬编码终态）；
@@ -301,14 +314,22 @@
 | 判据 | 行为 |
 | --- | --- |
 | `message` 缺省或只有空白 | 按原来的重试处理（`retry()`，`attempt` +1） |
-| `message` 有内容 + 任务**已结算** | 续派：`dispatch.message(task, continueLead() + 正文, 'queue')` |
+| `message` 有内容 + 任务**已结算** | 续派：`dispatch.continueTask(task, 正文)` |
 | `message` 有内容 + 任务 `running` / `queued` | `409`，一条消息都不投。不能把要求插进正在跑的回合 |
+| `message` 有内容 + 任务**已归档** | `409`：归档是只读冻结，不能再往里续派 |
+| `message` 有内容 + 任务**已退休** | `409`：记录已移出活表，没有上下文可用 |
+| 投递**途中**任务被取消 | `409`：取消优先，任务保持已取消（不会被这次投递复活） |
 | `message()` 抛错（子会话不可用） | `409`，错误文本原样透给看板 |
 | 打到 `/cancel` 时 body 里带 `message` | 忽略它，仍按取消处理（别让它悄悄变成两条副作用） |
 
 续派消息的前缀来自 `src/dispatch.js` 的 `continueLead()`，与 agent 侧的
 `dispatch_launch({ continue_task_id })` **同一份**：同一条要求从工具与看板两条入口进来，
 worker 看到的东西必须一样。语义、三个代价与四条硬校验见 [tools.md](tools.md) 的「续派」一节。
+
+**两个入口共用一条投递路径**（`dispatch.continueTask()` → `dispatch.message()`）：
+归档 / 退休 / 会话形状这三条准入写在同一个地方，看板入口不再绕开它们。
+0.8.x 之前看板那条直接调 `dispatch.message()`，于是可以对**已归档**的任务续派、
+可以往不是本插件建的会话里塞要求——同一个动作两套准入。
 
 界面上不弹「成功」提示条：续派成功后看板里不会多出一行，唯一可见的变化是这条任务从
 「已完成」变回「运行中」——那本身就是结果。**失败**才弹，因为用户写的那句话还在输入框里，
@@ -402,6 +423,12 @@ worker 看到的东西必须一样。语义、三个代价与四条硬校验见 
 - **时间基准要能区分**：新数据用权威 `settledAt`，旧数据回退 `updatedAt` 时
   `coverage.timeBasis` 报 `updatedAt-fallback`（两种混用报 `mixed`），`fallbackCount` 给条数。
   `updatedAt` 会被报告、追问、归档刷新，拿它算精确生命周期统计会把「大概」冒充成「精确」。
+  这两个字段**同源且只说窗口内的事**：`timeBasis` 描述的是**这个窗口**里那些行的基准，
+  窗口外的历史不参与（否则会出现「口径混用了」却「一条回退都没有」的自相矛盾）。
+  恒等式：`timeBasis = mixed` ⇒ `fallbackCount ≥ 1`。
+- **可靠性块受工作区约束**：`summary.reliability` 是「当前健康」，**不看窗口**
+  （一条跑了 10 天的任务不能因为窗口是 24h 就从健康面板里消失），但**看工作区**——
+  筛了 ws-1 之后，未投递报告只数 ws-1 的那条。
 - **并行节省是粗算**：`max(0, Σ占用 - 墙钟跨度)`，`estimated` 恒为 `true`（它不是工时结算）；
   `degraded` + `reasons` 说明「为什么更粗」（样本少 / 有回退基准 / 有夹紧跨度 / 留痕有丢失）。
 - **不装全量**：`truncated` 非 `null` 时界面必须显示「结果可能低估」，不能装作全量。
@@ -410,6 +437,22 @@ worker 看到的东西必须一样。语义、三个代价与四条硬校验见 
 `{ ok: false, degraded: true, reason, summary: null, daily: [], groups: {...空容器} }`。
 **不是 500**：面板每 2 秒轮询，一个 500 会让客户端进入「报错→重试→再报错」的循环，
 而任务列表其实还是好的。总览继续按快照工作，效果区显示「统计暂不可用」。
+
+### GET /board/analytics（分析看板聚合）
+
+只读聚合，服务新加的「分析数据看板」，准入与 `GET /board` / `GET /board/stats` **完全同档**
+（`readAllowed`，不要求写头）。它同样遍历**完整账本**（`dispatch.table.tasks` 全量 + 退休留痕计数），
+不受 `/board` 的 200 条快照上限影响；但**口径与 `/board/stats` 刻意不同**：
+
+| | `/board/stats` | `/board/analytics` |
+| --- | --- | --- |
+| 视角 | 效果视图：按**结算时刻**归属窗口 | 队列视图：按**创建时刻** `createdAt` 选出「这段时间派出的任务」 |
+| 归档 / 退休 | 不进效果指标，另在 coverage 里计数 | 归档任务仍在账本，**计入总量与分母**；退休留痕单列不并入 |
+| 时间窗 | 不隐藏当前工作（running/queued 不看窗口） | 只看窗口内创建的任务；`all` 连缺创建时间的行也收进来 |
+| 服务视图 | 既有的「效果 / 拆解」 | 新增的「分析看板」 |
+
+两套口径各自在界面上写明分母，**不互相复用中间结果**。查询参数、响应形状、指标口径表与状态处理
+统一写在下文「分析数据看板」。聚合抛错时与 `/stats` 一样返回 `200` + 同构降级结构，不返回 500。
 
 ### 已退休视图（面板里的第五个 chip）
 
@@ -425,6 +468,147 @@ worker 看到的东西必须一样。语义、三个代价与四条硬校验见 
 - 行内显示：标题、状态、`退休于 <相对时间>`、原因徽标；整行 0.7 透明度、无按钮、不可点行。
 - 顶部提示条：`dropped > 0` 或 `memory.ledger.retiredDropped > 0` 时显示
   「另有 N 条退休记录超出展示上限，未在此列出」。
+
+---
+
+## 分析数据看板（任务看板平级）
+
+### 定位与装配
+
+任务看板回答「现在要我做什么」，分析看板回答「这段时间派出去的活，总量、状态、完成、超时、趋势各是什么」。
+两者**共用一个侧边栏入口**，由面板顶部的一条切换条选择，默认停在任务看板：
+
+| 形态 | 渲染 | 任务看板可用性 |
+| --- | --- | --- |
+| `任务看板` | 原有 header / chips / 工具条 / 三段列表，前面只多一条切换条 | 完全不变（字段、入口、取消 / 重试 / 归档 / 续派 / 跳会话 / 历史抽屉） |
+| `分析看板` | 只渲染 AnalyticsView | 不渲染；2 秒快照轮询**在分析看板可见时停掉**（否则整个分析视图每 2 秒重建一次），切回任务看板时立刻恢复 |
+
+`client/index.js` 里所有新 state / effect 都追加在 `BoardPanel` 的**末尾**：既有 hook 序号一个不动，
+`AnalyticsView` 是无 hook 的纯展示组件。这样离线冒烟（按序号复用 store 的迷你 React）仍能断言
+「切筛选 → 重取 → 数字跟着变」，而不是只能验真机。
+
+布局（宽容器时 KPI 2×2，窄容器 1 列；趋势与分布都是 div 条形 + 表格等价物，**没有图表库**）：
+
+```text
+┌ 看板  [任务看板] [分析看板]                                      ┐
+├ 分析数据看板   汇总于 16:05:15                                    ┤
+├ 时间范围 [24h][7d][30d][全部] 自定义天数[  ][应用]              ┤
+│ 状态[▾] 负责人[▾] 工作区[▾] 批次[▾] 超时阈值[▾] [清除筛选][刷新]│
+├ 样本口径 账本 16 · 窗口内 14 · 命中 14 · 退休留痕 3（不并入）    ┤
+│  ⚠ 账本没有人员字段，负责人按派发主会话代理（待业务确认）        │
+│  ⚠ 账本没有截止时间字段，逾期为时长代理指标（待业务确认）        │
+├ 任务总量 14 │ 完成率 50%  │ 超时代理 0 │ 未结算 4              ┤
+├ 趋势变化  较上一等长窗口：新建 +14 / 完成 +5 / 完成率 +6.7pp    ┤
+│  [图表][表格]  11-03 ▬▬ 新建 0 · 完成 0 · 异常 0                │
+│                11-09 ▬▬▬ 新建 11 · 完成 5 · 异常 3              │
+├ 状态分布  运行中 ███████ 3 · 21.4%（点行即筛该状态）            ┤
+├ 逾期情况（代理指标） 未结算超阈值 0 / 已结算超阈值 0 / 未知 0   ┤
+├ ▸ 统计口径与数据可得性（展开是三列口径表）                      ┤
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 指标口径表
+
+**口径先行**：所有指标基于**同一批筛选后的任务行**（`matched`），不做第二次过滤。
+时间窗按 `createdAt` 归属（队列视角）；`all` 时连缺创建时间的行也计入。
+分母为 0 一律给 `null`，界面显示 `—` 而不是 `0%`；`1 ≤ n < 5` 照给数值但带 `sampleLow`。
+
+| 指标 | 分子 / 计算 | 分母 / 时间字段 | 数据可得性 |
+| --- | --- | --- | --- |
+| 任务总量 | 筛选后任务条数（含已归档） | 窗口按 `createdAt`；`all` 不限时间 | `dispatch.table.tasks` 全量。退休留痕**只在** `coverage.retiredTraces` 单列，不并入 |
+| 状态分布 | 每个 `status` 的条数 | 任务总量（分母含归档与取消） | `status` 字段直接计数，零值状态不出表格 |
+| 完成率 | `status=done` 的条数 | `done + ended + failed + blocked + interrupted`（`COMPLETION_BASE`）；`cancelled` / `running` / `queued` 排除 | `status`；分子分母都随结果回显 |
+| 超时代理 | 未结算：`now − createdAt > 阈值`；已结算：`settle − createdAt > 阈值` | 默认 24h，可选 8 / 24 / 72 / 168h；阈值随结果回显 | `createdAt` / `settledAt`（旧数据回退 `updatedAt`）。**账本没有 `due_at`：不是业务逾期**，`basis: 'proxy:createdAt'`、`pendingFields: ['due_at']` |
+| 趋势变化 | 按 UTC 自然日分桶：新建按 `createdAt`，完成 / 异常按 `settledAt`；空天由界面按 `trend.range` 补 0 | 一天一行；`all` 且跨度 > 366 天时裁剪并在 `coverage.trendClamped` 说明 | `createdAt` / `settledAt`。跨天结算会落到另一天，这是口径不是误差 |
+| 环比 | 当前窗口 − **上一等长窗口**，套同样的非时间筛选 | 同样按创建时间切队列；`all` 无上一窗口 → `compare.available=false` | 任一窗口无可结算样本时 `rateDelta=null`，界面写「不比较完成率」 |
+| 筛选 | 时间 / 状态 / 负责人 / 工作区 / 批次 / 超时阈值，全部**与**关系 | 候选值 `facets.*` 从**未筛选**的全量账本取（选一个筛选项不会让其它选项消失） | 负责人 = `parentSessionId` 代理；工作区 = `workspaceId`；批次 = `group` |
+
+**「负责人」与「逾期」是代理指标，不是既有事实**：账本的任务对象（`src/dispatch.js` 的 `task`）里
+没有人员字段，也没有截止时间 / SLA 字段。因此：
+
+- 负责人用「派发主会话」`parentSessionId` 代理，缺字段归到 `__unknown__`（界面写「未标注」）；
+- 逾期只统计「创建后超过阈值仍未结算 / 端到端耗时超过阈值」的条数，阈值由用户设定并回显；
+- 界面口径行与口径表都写「待业务确认」，响应里带 `warnings: ['owner-proxy', 'due-at-proxy']`；
+- **待接入字段**：`assignee` / `owner`（真实负责人）、`due_at`（真实截止时间）。接上后应把
+  这两块换成真口径，并保留 `pendingFields` 作为迁移标记；在此之前不要把它们当 SLA 结论用。
+
+### 查询参数与响应
+
+`GET /board/analytics?…`，全部可省略；非法值不报错，在 `scope.warnings` / 界面提示条里退回默认。
+
+| 参数 | 取值 | 缺省 |
+| --- | --- | --- |
+| `window` | `24h` / `7d` / `30d` / `all` / `<n>h` / `<n>d` | `7d`（自定义天数由界面拼 `<n>d`） |
+| `status` | 单个状态或逗号分隔多个 | 全部 |
+| `owner` | `parentSessionId` 或 `__unknown__` | 全部 |
+| `workspaceId` / `hostWorkspaceId` | 工作区 id（两个维度，交集） | 全部 |
+| `group` | 批次名 | 全部 |
+| `overdueHours` | 1…720（夹到合法范围） | `24` |
+
+```text
+{ analyticsVersion, generatedAt, ok,
+  scope:    { window:{key,days,since}, status, statusList, owner, ownerField,
+              workspaceId, hostWorkspaceId, group, overdueHours, timeField, warnings },
+  facets:   { statuses, owners, workspaces, hostWorkspaces, groups },   // 全量账本的候选值
+  coverage: { sourceTasks, retiredTraces, inWindow, matched, excludedByFilters,
+              archived, missingCreatedAt, missingSettledAt, fallbackTimeBasis,
+              trendClamped, sampleLow, truncated },
+  summary:  { total, active, settled, archived, cancelled, byStatus, distribution,
+              completion:{done,base,rate,sampleLow,includes,excludes},
+              overdue:{thresholdHours,basis,dueAtAvailable,pendingFields,
+                       open,settled,unknown,total,rate} },
+  trend:    { days:[{day,created,done,failed,blocked,interrupted,cancelled,ended,settled}],
+              range:{from,to,days}, compare:{available,current,previous,*Delta} },
+  warnings: ['owner-proxy','due-at-proxy', …] }
+```
+
+`coverage.sourceTasks` 用来证明「读的是完整账本」；`truncated.mayUnderestimate` 为真（活表触顶、
+留痕被丢）时界面写「结果为下界」，**不装全量**。口径不清的字段一律标「待业务确认」，
+不编造目标值，也不下管理结论。
+
+两条「不许悄悄消失」的口径：
+
+- **缺 `createdAt` 的行要从 `coverage.missingCreatedAt` 里数出来**。它数的是「过了其它筛选、
+  但没有创建时间」的行：有窗口时这类行进不了窗口的分母，但**不能连计数都没有**——
+  否则一条真实任务就从「缺时间 n」里也消失了，读者根本不知道分母少了几条。
+- **facets 的候选值与筛选的匹配必须同源**。「未标注」（`__unknown__`）这类归一值
+  在候选列表与匹配判据里必须**是同一个值**：两处各写一份（一边归一成 `__unknown__`、
+  一边拿空串比）会让「未标注」永远筛不出任何东西。
+
+### 四种状态与刷新方案
+
+| 状态 | 触发 | 界面 |
+| --- | --- | --- |
+| 加载中 | 首次进入 / 切换筛选 / 手动刷新，还没有数据 | 「正在汇总分析数据…」+「读取完整账本，不使用 200 条快照」；有旧数据时**只切 loading 不清内容**，不闪空白 |
+| 空数据 | `summary.total === 0` | 「这个筛选下没有任务」+「清除筛选」；不画 0% 卡片 |
+| 无样本 | 完成率分母 0、无趋势日、趋势范围无事实 | `—` / 「这个时间范围里没有趋势数据」；`sampleLow` 时加「样本少（n<5）」 |
+| 取数失败 / 降级 | 404（旧版宿主）、网络错误、非法 JSON、Host 返回 `degraded:true` | 有旧数据 → 保留内容 + 黄色「展示的是上一次成功汇总的数据」；没有旧数据 → 错误态 + 「重试」+「回到任务看板」。**任务看板始终可用** |
+
+**刷新方案（静态数据 / 定时刷新 / 实时推送三选一）**：本版走**定时刷新**——分析视图可见时
+`GET /board/analytics` 每 10 秒取一次，筛选变化与手动「刷新」立即重取；页面隐藏时停表并中止在途请求，
+切回可见立刻重取；面板卸载时清定时器与 `AbortController`。任务看板那条 2 秒快照轮询在
+**分析看板可见时整条停掉**（不取数也不落状态）——否则每 2 秒落一次快照状态就把整个分析视图
+重建一次，两套轮询互相踩；切回任务看板时立刻把轮询叫醒。两条链路**互不阻塞、互不清对方状态**。
+Host 聚合是纯内存遍历（不读盘、不发网络），
+一次全量账本遍历在刷新的这一档频率下没有可观测成本；真要上实时推送（SSE / WebSocket）
+应先证明 2 秒级变化有人看，否则只是把轮询成本搬了个地方。
+
+### 兼容、样式与安全
+
+- **零改动保证**：`GET /board`、`GET /board/stats`、`GET /board/retired` 与四个写路由都没改；
+  新增的只是 `src/analytics.js` 和 `GET /board/analytics`。分析数据取不到时任务看板照常工作。
+- **样式一致**：复用 `.dsh-sa-card` / `.dsh-sa-dist` / `.dsh-sa-trend-*` / `.dsh-sa-table` / `.dsh-sa-tab`，
+  颜色走 `var(--dsw-alias-*, fallback)`，不写死明暗配色；颜色之外一律有文字（读屏与复制不依赖像素）。
+- **响应式**：卡片 `auto-fit`、筛选条 `flex-wrap`，并按**容器宽度**（`@container`）而不是视口折行——
+  宽显示器上的窄侧边栏同样会切成单列，容器再窄也不会横向溢出。
+- **交互**：点状态分布行即把「状态」筛选切到该状态（再点一次取消）；趋势支持图表 / 表格等价双形态，
+  图表把连续空天合并成一行（如 `11-02–11-07 ｜ 连续 6 天无任务（空天补 0）`），表格仍逐日给全；
+  「空天」的判据与表格列**同源**（新建 / 完成 / 问题 / **取消** / **结束**）——跨天取消的那天
+  不是空天，否则图表与表格对同一件事给了两个答案；
+  口径表常驻可展开；错误态另有「回到任务看板」入口，正常态用顶部切换条返回。
+- **权限与脱敏**：聚合结果含任务标题、会话 id、工作区名与统计值，不含报告正文；仍只对本机 / 同源页面开放
+  （`readAllowed`），非回环 Host 默认 403。若把这些数字导出到外部报表或多人共享，先按项目要求脱敏
+  标题与路径，并按接收方最小权限控制访问；本看板只做呈现，不做经营判断。
 
 ---
 
@@ -690,8 +874,9 @@ worker 看到的东西必须一样。语义、三个代价与四条硬校验见 
 - 看板的「取消」等价于 agent 调 `dispatch_cancel`（状态与并发位语义一致）。
 - 看板的「重试」是给人用的：能恢复就续跑（与 `dispatch_message` 同一条投递路径），不能恢复就新开会话重投简报。
 - 看板的「续派」等价于 agent 调 `dispatch_launch({ continue_task_id })`（**也是**一条 `dispatch_message`，
-  不新建任务）。区别只在文案：工具侧会先做四条硬校验（归属 / 会话形状 / 工作区 / 别的活跃任务），
-  看板侧只做「必须已结算」这一条——面板上的行本来就是用户眼皮底下的那一条，归属与工作区不会错。
+  不新建任务）。区别只在文案：工具侧会先做归属 / 工作区 / 「别的活跃任务」这几条**只有调用方知道**的校验，
+  看板侧没有调用方，因此只做与任务自身有关的准入（已归档 / 已退休 / 会话形状）——
+  两条入口的这部分准入**共用 `dispatch.continueTask()` 一份实现**，不会分叉。
 - 看板的「归档」等价于 `POST /archive-task`（单条），不是 `POST /archive`（巡检、扫全表）。
 - 看板的「派发目标」是输入框选择器的数据源；`dispatch_launch` 没显式给 `workspace` 时读它。
 - 主会话要续跑一个任务，仍然用 `dispatch_message`（或 `dispatch_launch({ continue_task_id })`）；
