@@ -190,6 +190,18 @@ function reconcile(d, memory) {
     ['retired.latestAt', memory?.retired?.latestAt, latestRetiredAt],
     ['window.days', memory?.window?.days, Number(d.config.memoryWindowDays)],
     ['window.tasks', memory?.window?.tasks, Number(d.config.memoryWindowTasks)],
+    /**
+     * 窗口**实际命中**的条数（未套 tasks 上限）。
+     *
+     * 这一项是「窗口不是装饰」的证据：它必须等于直接遍历账本算出来的数，
+     * 而不是配置的回显。口径与客户端「效果条」一致：非归档、按 `updatedAt`
+     * （没有则 `settledAt`）落在 `since` 之后。
+     */
+    ['window.count', memory?.window?.count, tasks.filter(task => {
+      if (task.archivedAt) return false
+      const at = Date.parse(task.updatedAt || task.settledAt || '')
+      return Number.isFinite(at) && at >= Date.now() - Number(d.config.memoryWindowDays) * 86400000
+    }).length],
     // P1-1 / P1-2 的已读数也必须对账：新增的计数器最容易与真实行为漂开，
     // 而它们正是「合并到底省了几条」「投影到底压了几条」的唯一证据。
     ['merge.windowMs', memory?.merge?.windowMs, d.mergeWindowMs()],
@@ -516,6 +528,39 @@ test('验收6 自检一致：selfCheck().memory 的每个数与账本对账为�
     assert.ok(memory.admission.direct >= 1 && memory.admission.ledger >= 1)
 
     assert.deepEqual(reconcile(d, memory), [], '自检的每个数都必须等于账本的实际值')
+  })
+})
+
+// ---------------------------------------------------------------- 指标窗口不是装饰
+
+/**
+ * `memory.window` 必须是**能被账本核对**的口径，而不是一份配置回显。
+ *
+ * 原来它只有 `days / tasks / since` 三个配置值，而同一块里的 `ledger.tasks`
+ * 报的是活表**全量**（含归档、含窗口外）。两个数摆在一起谁也解释不了谁，
+ * 窗口就成了装饰。现在窗口额外报出**实际命中多少条**，于是
+ * 「窗口命中 N 条 / 账本 M 条」是可以互相核对的两个事实。
+ */
+test('memory.window 报出窗口实际命中的条数（归档与窗口外的不算）', async () => {
+  await withDispatch({}, async ({ d }) => {
+    const days = Number(d.config.memoryWindowDays)
+    const since = Date.now() - days * 86_400_000
+    // 窗口内、非归档：命中。
+    d.table.add(mkTask('in-window', 'done', { updatedAt: iso(60_000) }))
+    // 窗口内但已归档：归档是只读冻结，不进效果指标。
+    d.table.add(mkTask('archived', 'done', { updatedAt: iso(60_000), archivedAt: iso(30_000) }))
+    // 窗口外：不在窗口里。
+    d.table.add(mkTask('out-window', 'done', { updatedAt: iso((days + 1) * 86_400_000) }))
+
+    const memory = await d.memoryStats()
+    assert.equal(memory.window.days, days)
+    assert.equal(memory.window.count, 1,
+      '窗口命中数 = 非归档且落在窗口里的条数（归档与窗口外都不算）')
+    assert.ok(memory.ledger.tasks >= 3, '账本条数是全量，与窗口命中数是两个口径')
+    assert.ok(memory.window.count <= memory.ledger.tasks,
+      '窗口命中数不可能超过账本条数')
+    assert.ok(Date.parse(memory.window.since) <= since + 1000,
+      'since 仍然是窗口起点')
   })
 })
 

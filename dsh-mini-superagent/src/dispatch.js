@@ -2727,8 +2727,26 @@ export class Dispatch {
     let archived = 0
     let pendingInputs = 0
     let unknownInputs = 0
+    /**
+     * 窗口里**实际命中多少条**（未套 `tasks` 条数上限）。
+     *
+     * 为什么必须有这个数：没有它，`window` 只是一份配置回显（7 天 / 200 条），
+     * 而 `ledger.tasks` 报的是**活表全量**（含归档、含窗口外）——两个数摆在一起
+     * 谁也解释不了谁，窗口就成了装饰。给出 `count` 之后，
+     * 「窗口命中 37 条 / 账本 1200 条」是可以互相核对的两个事实。
+     *
+     * 口径与客户端「效果条」那一条**完全一致**：按 `updatedAt`（没有则 `settledAt`）
+     * 落在 `since` 之后、且**非归档**。归档任务不进效果指标，这里也不计。
+     */
+    let windowCount = 0
+    const sinceMs = Date.now() - windowDays * 86_400_000
     for (const task of this.table.tasks.values()) {
-      if (task.archivedAt) archived += 1
+      if (task.archivedAt) {
+        archived += 1
+      } else {
+        const at = Date.parse(task.updatedAt || task.settledAt || '')
+        if (Number.isFinite(at) && at >= sinceMs) windowCount += 1
+      }
       if (task.inputPendingAt && !task.inputReadAt) pendingInputs += 1
       else if (task.inputUnknownAt && !task.inputReadAt) unknownInputs += 1
     }
@@ -2739,7 +2757,14 @@ export class Dispatch {
       }
     }
     return {
-      window: { days: windowDays, tasks: windowTasks, since },
+      window: {
+        days: windowDays,
+        tasks: windowTasks,
+        since,
+        // 窗口实际命中的条数（未套 tasks 上限）。窗口从此不是装饰性的配置回显，
+        // 而是一个能被 ledger 核对的口径。
+        count: windowCount,
+      },
       ledger: {
         tasks: this.table.tasks.size,
         retired: this.retired.size,

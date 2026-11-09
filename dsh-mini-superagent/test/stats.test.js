@@ -917,3 +917,104 @@ test('boardTask 的 elapsed_ms 量到 settled_at 而不是 updated_at', () => {
   })
   assert.equal(boardTask(task).elapsed_ms, 5 * MINUTE)
 })
+
+// ---------------------------------------------------------------- 时间基准与窗口同源
+
+/**
+ * `coverage.timeBasis` 说的是**这个窗口**的时间基准，不是整个账本的。
+ *
+ * 窗口外的行不参与这个窗口的分母，凭什么影响这个窗口的基准？原来 `basisSeen`
+ * 在窗口过滤**之前**就记，于是「窗口内全是 settledAt + 窗口外一条回退基准的老数据」
+ * 会得到 timeBasis='mixed' 而 fallbackCount=0——界面自己跟自己矛盾：
+ * 「口径混用了」却「一条回退都没有」。
+ */
+test('coverage.timeBasis 只反映窗口内的任务（窗口外的老数据不污染它）', () => {
+  const dispatch = fakeDispatch([
+    mkTask('in-window', { settledAt: at(-1 * HOUR) }),
+    // 窗口外 + 回退基准：原来它会把 timeBasis 拽成 mixed。
+    mkTask('out-window', { settledAt: undefined, updatedAt: at(-40 * DAY), createdAt: at(-40 * DAY) }),
+  ])
+  const stats = boardStats(dispatch, { window: '7d' })
+
+  assert.equal(stats.coverage.fallbackCount, 0, '窗口外那条不算回退')
+  assert.equal(stats.coverage.timeBasis, TIME_BASIS.SETTLED,
+    '窗口内的行全是 settledAt，口径就该是 settledAt')
+})
+
+test('timeBasis 与 fallbackCount 永远同源：报 mixed 就一定有回退条数', () => {
+  // 造遍各种组合，钉住「mixed ⇒ fallbackCount ≥ 1」这条不变式。
+  const cases = [
+    [mkTask('a')],
+    [mkTask('a', { settledAt: undefined, updatedAt: at(-HOUR) })],
+    [mkTask('a'), mkTask('b', { settledAt: undefined, updatedAt: at(-HOUR) })],
+    [mkTask('a'), mkTask('b', { settledAt: undefined, updatedAt: at(-40 * DAY) })],
+    [mkTask('a', { settledAt: undefined, updatedAt: at(-HOUR) }), mkTask('b')],
+  ]
+  for (const tasks of cases) {
+    for (const window of ['all', '7d', '30d']) {
+      const { coverage } = boardStats(fakeDispatch(tasks), { window })
+      if (coverage.timeBasis === TIME_BASIS.MIXED) {
+        assert.ok(coverage.fallbackCount >= 1,
+          `mixed 必须伴随回退条数（window=${window}，fallbackCount=${coverage.fallbackCount}）`)
+      }
+      if (coverage.timeBasis === TIME_BASIS.FALLBACK) {
+        assert.ok(coverage.fallbackCount >= 1,
+          `fallback 必须伴随回退条数（window=${window}）`)
+      }
+    }
+  }
+})
+
+// ---------------------------------------------------------------- 可靠性块受工作区约束
+
+/**
+ * `summary.reliability` 是「当前健康」：它**不看窗口**（一条跑了 10 天的任务
+ * 不能因为窗口是 24h 就从健康面板里消失），但它**必须看工作区**。
+ *
+ * 不看工作区的后果：筛了 ws-1，完成数是 1，健康角标里的「未投递报告」却是 2
+ * ——另一个工作区的数字混进来了。两个数字说的不是同一件事。
+ */
+test('summary.reliability 受工作区筛选约束（不混入别的工作区）', () => {
+  const dispatch = fakeDispatch([
+    mkTask('w1', { workspaceId: 'ws-1', delivery: { outcome: 'failed' } }),
+    mkTask('w2', { workspaceId: 'ws-2', delivery: { outcome: 'failed' } }),
+    mkTask('w3', { workspaceId: 'ws-2', delivery: { outcome: 'failed' } }),
+  ])
+
+  const scoped = boardStats(dispatch, { window: 'all', workspaceId: 'ws-1' })
+  assert.equal(scoped.summary.outcome.settled, 1, '完成数只算 ws-1')
+  assert.equal(scoped.summary.reliability.undeliveredReports, 1,
+    '可靠性块必须与完成数同源：否则「完成 1 条」配「未投递 2 条」自相矛盾')
+
+  const other = boardStats(dispatch, { window: 'all', workspaceId: 'ws-2' })
+  assert.equal(other.summary.reliability.undeliveredReports, 2, '换到 ws-2 就是它自己的两条')
+
+  const all = boardStats(dispatch, { window: 'all' })
+  assert.equal(all.summary.reliability.undeliveredReports, 3, '不筛工作区时就是全量')
+})
+
+test('可靠性块按实际归属（hostWorkspaceId）也受同一条约束', () => {
+  const dispatch = fakeDispatch([
+    mkTask('h1', { hostWorkspaceId: 'host-1', delivery: { outcome: 'failed' } }),
+    mkTask('h2', { hostWorkspaceId: 'host-2', delivery: { outcome: 'failed' } }),
+  ])
+  const scoped = boardStats(dispatch, { window: 'all', hostWorkspaceId: 'host-1' })
+  assert.equal(scoped.summary.reliability.undeliveredReports, 1)
+})
+
+// ---------------------------------------------------------------- 降级响应的默认窗口
+
+/**
+ * 降级响应的默认窗口必须与成功路径**同一个来源**（`defaultWindowDays`）。
+ *
+ * 写死 7 天的话，宿主把 `memoryWindowDays` 改成 30，正常路径回显「30d」、
+ * 降级路径回显「7d」——同一个面板上出现两套默认窗口，而用户完全看不出来。
+ */
+test('degradedStats 的默认窗口跟随配置（不写死 7 天）', () => {
+  const dispatch = fakeDispatch([], { config: { memoryWindowDays: 30 } })
+  const stats = degradedStats({}, new Error('聚合炸了'), dispatch)
+  assert.equal(stats.scope.window.key, '30d', '降级窗口必须与成功路径同源')
+
+  const fallback = degradedStats({}, new Error('聚合炸了'))
+  assert.equal(fallback.scope.window.key, '7d', '拿不到 dispatch 时退回 7 天')
+})

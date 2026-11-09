@@ -224,7 +224,6 @@ function collect(dispatch, scope) {
       continue
     }
     const { at, basis } = settleTimeOf(task)
-    basisSeen.add(basis)
     if (!Number.isFinite(at)) {
       /**
        * 时间未知：**绝不能从分母里悄悄消失**（§三.4「不能悄悄从分母消失」）。
@@ -242,6 +241,19 @@ function collect(dispatch, scope) {
     }
     if (!withinWindow(at, sinceMs)) continue
     if (basis === TIME_BASIS.FALLBACK) fallbackCount += 1
+    /**
+     * 时间基准**只记真正参与这个窗口分母的那些行**。
+     *
+     * 两个时机都必须是「窗口之后」：
+     * - 窗口外的行不参与本窗口，凭什么影响本窗口的时间基准？（实测窗口内全是
+     *   settledAt、窗口外一条老数据 → timeBasis='mixed' 而 fallbackCount=0，
+     *   界面自相矛盾）。
+     * - MISSING 不进 `basisSeen`：时间未知的行由 `missingTimes` 单独报，
+     *   混进来会让 timeBasis 变成 mixed 而 fallbackCount 仍是 0。
+     *
+     * 于是 `timeBasis` 与 `fallbackCount` 永远同源：报 mixed 就一定有回退条数。
+     */
+    basisSeen.add(basis)
     settled.push({ task, at, basis })
   }
 
@@ -262,6 +274,18 @@ function collect(dispatch, scope) {
     missingTimes,
     fallbackCount,
     basisSeen,
+    /**
+     * **按工作区筛过、但没按窗口筛过**的任务集合。
+     *
+     * 为什么单独留一份：`summary.reliability` 是「当前健康」（已投递未读、后台活、
+     * 归档失败……），它**不看窗口**——一条跑了 10 天的任务不能因为窗口是 24h
+     * 就从健康面板里消失。但它**必须看工作区**：筛了 ws-1 却在健康角标里
+     * 看见 ws-2 的未投递报告，两个数字说的不是一件事（实测 workspaceId=w1 时
+     * 完成数=1 而 undeliveredReports=2，另一工作区混了进来）。
+     *
+     * 口径与 `collect()` 里那次过滤同源（同一个 `matchesScope`），不另写一份。
+     */
+    scoped: tasks.filter(matchesScope),
   }
 }
 
@@ -752,7 +776,10 @@ export function boardStats(dispatch, scope = {}) {
       durations,
       parallel,
       // 只看非归档任务：归档是只读冻结，它的投递/待读不再是「当前健康」。
-      reliability: reliabilityOf(parts.tasks.filter(task => !isArchived(task))),
+      // 同时**受工作区筛选约束**（`parts.scoped` 与 `collect()` 同源）：
+      // 可靠性块是「当前健康」，不看窗口，但看工作区——否则筛了 ws-1，
+      // 健康角标里却混着 ws-2 的未投递报告，两个数字说的不是同一件事。
+      reliability: reliabilityOf(parts.scoped.filter(task => !isArchived(task))),
     },
     daily: dailyOf(createdInScope, settledRows),
     groups: {
@@ -802,9 +829,13 @@ function retiredReasons(records) {
  *
  * @param {{window?: string, workspaceId?: string, hostWorkspaceId?: string}} [scope]
  * @param {unknown} error
+ * @param {object} [dispatch] Dispatch 实例；缺省时默认窗口退回 7 天。
+ *   传它是为了让降级响应的默认窗口与成功路径**同一个来源**（`defaultWindowDays`）：
+ *   写死 7 天的话，宿主把 `memoryWindowDays` 改成 30 时，正常路径回显「30d」、
+ *   降级路径回显「7d」，同一个面板上出现两套默认窗口。
  */
-export function degradedStats(scope = {}, error) {
-  const window = normalizeWindow(scope?.window, 7)
+export function degradedStats(scope = {}, error, dispatch) {
+  const window = normalizeWindow(scope?.window, defaultWindowDays(dispatch))
   return {
     statsVersion: STATS_VERSION,
     generatedAt: now(),
