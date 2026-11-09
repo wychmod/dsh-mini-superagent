@@ -7,6 +7,7 @@ import test from 'node:test'
 
 import { VERSION } from '../src/constants.js'
 import { boardSnapshot, boardTask, createBoardHandler, retiredSnapshot } from '../src/board.js'
+import { continueLead } from '../src/dispatch.js'
 
 const BASE = '/dsh-mini-superagent/board'
 
@@ -539,7 +540,7 @@ test('退休记录不回落进快照的 tasks 列表', () => {
 
 /** 假宿主：handler 需要 table.get / cancel / retry / message。 */
 function fakeHost(tasks, { cancelThrows = false, messageThrows = false } = {}) {
-  const calls = { cancel: [], retry: [], message: [] }
+  const calls = { cancel: [], retry: [], message: [], continue: [] }
   const agents = new Map([['s1', { id: 's1' }], ['s2', { id: 's2' }]])
   const dispatch = {
     config: { leadSessionId: 'mas-lead' },
@@ -559,7 +560,22 @@ function fakeHost(tasks, { cancelThrows = false, messageThrows = false } = {}) {
       task.attempt = (task.attempt ?? 1) + 1
       return task
     },
-    /** 续派走 `message()`：handler 不新建路由，只把用户的文本转发给它。 */
+    /**
+     * 续派走 `continueTask()`：handler 不新建路由，只把用户的文本转发给它。
+     *
+     * 真实的 `dispatch.continueTask()` 会做归档/归属/会话形状的校验，再加前缀
+     * 投给子会话；这里照着这个形状模拟，好让用例既能断言「走的是 continueTask」，
+     * 又能断言「投出去的东西与派发工具那份同源」。
+     */
+    async continueTask(task, text) {
+      // 与真实 `dispatch.#assertContinuable()` 的第一条判据一致。
+      if (task.archived_at) {
+        throw new Error(`任务 ${task.id} 已归档（${task.archived_at}）：归档是只读冻结，不能再往里续派。`
+          + '请新派一个任务')
+      }
+      calls.continue.push({ id: task.id, text })
+      return this.message(task, `${continueLead()}\n\n${text}`, 'queue')
+    },
     async message(task, text, mode) {
       if (messageThrows) throw new Error('子会话不可用')
       calls.message.push({ id: task.id, text, mode })
@@ -782,7 +798,7 @@ test('快照带每个会话的派发目标', async () => {
  * **拒绝**（409，不能把要求插进正在跑的回合）；message 抛错时也回 409 并带原因。
  */
 
-test('POST /retry 带 message → 走续派（message）而不是 retry', async () => {
+test('POST /retry 带 message → 走续派（continueTask）而不是 retry', async () => {
   const { handler, calls } = fakeHost([makeTask('a', { status: 'done' })])
   const result = await call(handler, {
     method: 'POST', url: `${BASE}/retry`,
@@ -791,11 +807,27 @@ test('POST /retry 带 message → 走续派（message）而不是 retry', async 
   assert.equal(result.status, 200)
   assert.equal(result.json.ok, true)
   assert.deepEqual(calls.retry, [], '带 message 时不该再走 retry（那会换指令语义）')
+  assert.equal(calls.continue.length, 1, '看板续派必须走 dispatch.continueTask()')
+  assert.equal(calls.continue[0].id, 'a')
   assert.equal(calls.message.length, 1)
   assert.equal(calls.message[0].id, 'a')
   assert.match(calls.message[0].text, /把 lint 也跑一遍/, '用户写的话必须原样进会话')
   assert.match(calls.message[0].text, /【续派】/, '前缀必须与 dispatch_launch 的那份同源')
   assert.equal(calls.message[0].mode, 'queue')
+})
+
+test('看板续派走统一校验（归档任务在看板入口同样被拒）', async () => {
+  // 看板入口曾经直接调 `dispatch.message()`，绕开了全部校验：可以对已归档的
+  // 任务续派、可以续派别人的任务。改成 `dispatch.continueTask()` 之后，
+  // 两个入口共用 `#assertContinuable()` 一份准入。
+  const { handler, calls } = fakeHost([makeTask('a', { status: 'done', archived_at: '2026-11-09T01:00:00.000Z' })])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/retry`,
+    body: { task_id: 'a', message: '再跑一下' },
+  })
+  assert.equal(result.status, 409)
+  assert.match(result.json.error, /已归档/)
+  assert.deepEqual(calls.message, [], '被拒时一条消息都不该投出去')
 })
 
 test('POST /retry 带 message 时任务未结算 → 409，且什么都不投递', async () => {

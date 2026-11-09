@@ -8,11 +8,12 @@
  *   GET  /dsh-mini-superagent/board           -> BoardSnapshot
  *   GET  /dsh-mini-superagent/board/retired   -> 已退休任务（只读，见 plans/07 P0-5）
  *   GET  /dsh-mini-superagent/board/stats     -> 全量聚合（只读，见 plans/09 P0）
+ *   GET  /dsh-mini-superagent/board/analytics-> 分析看板聚合（只读，见 docs/board.md）
  *   POST /dsh-mini-superagent/board/cancel    {"task_id"} -> {ok, task}
  *   POST /dsh-mini-superagent/board/retry     {"task_id"} -> {ok, task}
  */
 import { BOARD_ALLOWED_HOSTS, BOARD_HEADER, LOG_PREFIX, SETTLED, VERSION } from './constants.js'
-import { continueLead } from './dispatch.js'
+import { analyticsSnapshot, degradedAnalytics } from './analytics.js'
 import { boardStats, degradedStats } from './stats.js'
 
 /** 路由前缀；客户端 client/index.js 里有一份同样的常量，改一处要改两处。 */
@@ -531,7 +532,41 @@ export function createBoardHandler(ctx, dispatch) {
         } catch (error) {
           // 降级要记日志：不记的话「效果卡一直显示暂不可用」永远查不到原因。
           ctx.logger?.warn?.('%s 看板统计聚合失败，已降级返回: %s', LOG_PREFIX, String(error))
-          return send(res, 200, degradedStats(scope, error))
+          // 降级也要用**同一个**默认窗口来源（`defaultWindowDays`）：写死 7 天的话，
+          // 宿主把 memoryWindowDays 改成 30，降级响应会回显「7d」而正常响应回显「30d」。
+          return send(res, 200, degradedStats(scope, error, dispatch))
+        }
+      }
+
+      /**
+       * 分析数据看板的聚合（与 `/stats` 并列，互不改对方口径）。
+       *
+       * 准入与 `/board` `/stats` 完全同档：只读、不含任务正文、不带正文预览。
+       * 参数全部在 `src/analytics.js` 的 `normalizeAnalyticsScope()` 里归一，
+       * 非法值退回默认并在 `warnings` 里留代码，不在这里另写一套校验。
+       *
+       * 失败降级而不是 500：任务看板每 2 秒轮询，分析看板在窄屏下与它并列，
+       * 一个 500 会让两块面板一起进入「报错 → 重试 → 再报错」的循环。
+       */
+      if (req.method === 'GET' && pathname === `${BASE}/analytics`) {
+        if (!readAllowed(req)) return send(res, 403, { ok: false, error: '看板只对本机或同源页面开放' })
+        let query
+        try { query = new URL(req.url ?? '', 'http://localhost').searchParams }
+        catch { query = new URLSearchParams() }
+        const scope = {
+          window: query.get('window') ?? undefined,
+          status: query.get('status') ?? undefined,
+          owner: query.get('owner') ?? undefined,
+          workspaceId: query.get('workspaceId') ?? undefined,
+          hostWorkspaceId: query.get('hostWorkspaceId') ?? undefined,
+          group: query.get('group') ?? undefined,
+          overdueHours: query.get('overdueHours') ?? undefined,
+        }
+        try {
+          return send(res, 200, analyticsSnapshot(dispatch, scope))
+        } catch (error) {
+          ctx.logger?.warn?.('%s 分析看板聚合失败，已降级返回: %s', LOG_PREFIX, String(error))
+          return send(res, 200, degradedAnalytics(scope, error, dispatch))
         }
       }
 
@@ -638,10 +673,12 @@ export function createBoardHandler(ctx, dispatch) {
                 error: `任务 ${task.id} 还在 ${task.status}，不能续派：等它结算后再补要求，或先取消`,
               })
             }
-            // 用户写的那句话直接进会话；前缀与派发工具的那份同源（`dispatch.continueLaunch`
-            // 也用它），所以两条入口投出去的东西形状一致——否则同一条要求在工具与看板
-            // 两条路上会被 worker 读成两件不同的事。
-            await dispatch.message(task, `${continueLead()}\n\n${continueText}`, 'queue')
+            // 用户写的那句话直接进会话；前缀与派发工具的那份同源，
+            // 投递走 `dispatch.continueTask()`——**工具入口与看板入口共用一条路径**。
+            // 0.8.x 之前这里直接调 `dispatch.message()`，于是绕开了全部校验：
+            // 可以续派别人的任务、可以续派已归档的任务、可以往不是本插件建的
+            // 会话里塞要求。同一个动作两套准入，不是细节差异。
+            await dispatch.continueTask(task, continueText)
           } else {
             await dispatch.retry(task)
           }

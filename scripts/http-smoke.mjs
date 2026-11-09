@@ -6,7 +6,8 @@
  *   node scripts/http-smoke.mjs                       # 默认 http://127.0.0.1:11586
  *   node scripts/http-smoke.mjs http://127.0.0.1:3080  # 指定别的宿主
  *
- * 只做读操作 + 一个可逆的写操作（设目标再清掉）。不派发任务、不归档、不取消任何东西。
+ * 只做读操作 + 一个可逆的写操作（设目标再清掉）；顺带验证分析看板聚合接口。
+ * 不派发任务、不归档、不取消任何东西。
  * 退出码 0 = 全过；1 = 有断言失败。
  */
 const BASE = (process.argv[2] ?? 'http://127.0.0.1:11586').replace(/\/+$/, '')
@@ -96,6 +97,31 @@ if (board.status === 200) {
   check('归档任务都带 archived_at',
     snapshot.tasks.filter(task => task.archived_at).length === snapshot.counts.archived,
     `标了 ${snapshot.tasks.filter(task => task.archived_at).length} / counts ${snapshot.counts.archived}`)
+}
+
+// 2b. 分析数据看板聚合（只读，遍历完整账本）
+console.log('\n分析看板聚合')
+const analytics = await getJson('/analytics?window=7d&overdueHours=24')
+check('GET /board/analytics 返回 200', analytics.status === 200, `实际 ${analytics.status}`)
+const an = analytics.body
+if (analytics.status === 200) {
+  check('ok=true 且带契约版本', an?.ok === true && typeof an?.analyticsVersion === 'number')
+  check('scope 回显窗口与阈值', an?.scope?.window?.key === '7d' && an?.scope?.overdueHours === 24)
+  check('facets 的候选值是数组', Array.isArray(an?.facets?.statuses)
+    && Array.isArray(an?.facets?.owners) && Array.isArray(an?.facets?.workspaces))
+  check('coverage.sourceTasks 是数字（完整账本）', typeof an?.coverage?.sourceTasks === 'number')
+  check('summary 带总量 / 状态分布 / 完成率 / 逾期', typeof an?.summary?.total === 'number'
+    && Array.isArray(an?.summary?.distribution) && an?.summary?.completion !== undefined
+    && an?.summary?.overdue !== undefined)
+  check('逾期自报为代理指标且标记待接入 due_at', an?.summary?.overdue?.dueAtAvailable === false
+    && (an?.summary?.overdue?.pendingFields ?? []).includes('due_at'))
+  check('趋势按天数组 + range 可补空天', Array.isArray(an?.trend?.days)
+    && typeof an?.trend?.range?.from === 'string' && typeof an?.trend?.range?.to === 'string')
+  // 带筛选再问一次：命中数不应超过不带筛选的命中数。
+  const filtered = await getJson('/analytics?window=7d&status=done')
+  check('status 筛选后命中数不超过全量命中数',
+    filtered.status === 200 && filtered.body?.coverage?.matched <= an.coverage?.matched,
+    `全量 ${an.coverage?.matched} → done ${filtered.body?.coverage?.matched}`)
 }
 
 // 3. 派发目标：设置 → 读回 → 清除（可逆）
