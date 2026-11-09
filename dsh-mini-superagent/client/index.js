@@ -106,6 +106,22 @@ window.__ModuleLoader__.load({
       archiveConfirm: '确认归档',
       archiveRunning: '归档中…',
       archiveDone: '归档巡检：扫描 {scanned}，归档 {archived}，失败 {failed}',
+      archiveTask: '归档',
+      archiving: '归档中…',
+      archiveTaskConfirm: '再点一次确认归档',
+      archiveTaskDone: '已归档（历史里仍可查到）',
+      archiveTaskKept: '已归档，但子会话没归档成功：{reason}',
+      /*
+       * 续派（plans/08 阶段 1 · 模型 A）。四个键都要有：按钮、输入框占位、提交、
+       * 以及一句必须写出来的**代价提示**——看板上「续派」不会产生新的一行，
+       * 用户点完只看到原任务又变回运行中，如果没有这句话，会以为按钮坏了。
+       */
+      continueTask: '续派',
+      continuePlaceholder: '补一句要求（不新建任务，追加给同一条子会话）',
+      continueSubmit: '发过去',
+      continueCancel: '算了',
+      continueSending: '发送中…',
+      continueHint: '续派不新建任务：要求追加给这条任务的子会话，列表里仍然只有这一行',
       workspaceAll: '全部工作区',
       workspaceFilter: '按工作区筛选',
       workspaceFallback: '跟随会话目录',
@@ -208,6 +224,252 @@ window.__ModuleLoader__.load({
       targetAutoHint: '按关键词自动匹配一个工作区',
       targetAutoHit: '自动：{title}',
       targetAutoMiss: '自动：没有匹配的工作区',
+
+      /*
+       * ── plans/09 P1：总览 / 效果 / 拆解 三个视图 ──
+       *
+       * 这里的每一条都必须在下面的 TEXT_EN 里有对应项：本文件的文案是 zh/en
+       * **成对硬编码**的（没有构建期抽取），只写中文的那一条在英文界面下会静默
+       * 退回中文。scripts/client-smoke.mjs 里有一条「每个新键出现两次」的断言在守这件事。
+       */
+      'view.tabs': '看板视图',
+      'view.overview': '总览',
+      'view.effect': '效果',
+      'view.breakdown': '拆解',
+      'view.switchHint': '总览回答「现在要我做什么」；效果回答「这段时间干得怎么样」；拆解回答「问题集中在哪个工作区、批次、主会话」',
+      'win.label': '窗口',
+      'win.24h': '24h',
+      'win.days': '{days} 天',
+      'win.all': '全部',
+      'win.scopeNote24h': '只统计最近 24 小时的事实（在跑与排队的任务不受窗口影响，仍会显示）',
+      'win.scopeNoteDays': '只统计最近 {days} 天的事实（在跑与排队的任务不受窗口影响，仍会显示）',
+      'win.scopeNoteAll': '统计全部历史事实，不再限制时间窗',
+      'win.fromMemory': '默认窗口沿用宿主下发的 memory.window，不是前端另设的默认值',
+      'scope.title': '样本口径',
+      'scope.entry': '样本口径 {window} · 查看效果',
+      'scope.entryHint': '窗口只约束统计，不隐藏当前工作；点开进入「效果」视图',
+      'scope.tail': '窗口内结算 n={settled} · 有效耗时 n={valid} · 排除归档 {archived} · 退休 {retired} · 时间未知 {missing}',
+      'scope.lowBadge': '样本少',
+      'scope.lowHint': '样本 n < 5：数值照常显示，但不能当成结论读',
+      'scope.timeBasis': '时间基准：{basis}',
+      'scope.basis.settledAt': '结算时刻 settledAt',
+      'scope.basis.updatedAt-fallback': '最后更新（旧数据回退）',
+      'scope.basis.mixed': '两种基准混用',
+      'scope.basis.missing': '时间未知',
+      'scope.basisHint': 'settledAt 只在任务进入终态时写一次；旧数据没有它才回退 updatedAt，而后者会被报告、追问、归档刷新——所以回退必须标出来',
+      'scope.fallbackFrom': '窗口参数 {value} 无效，已退回宿主默认',
+      'scope.truncated': '账本已到上限，结果可能低估',
+      'scope.truncatedHint': '活表已达 ledgerMaxTasks、退休留痕有丢弃、或有跨度被夹紧；这个窗口的统计只能当下界读',
+      'scope.source': '读了 {n} 条账本记录（含退休留痕，不受 200 条快照上限影响）',
+      'scope.sourceHint': 'sourceTasks = 活表任务 + 退休留痕：它证明这些数字来自完整账本，而不是每 2 秒轮询的那份 200 条快照',
+      'eff.result': '结果',
+      'eff.speed': '速度',
+      'eff.stable': '稳定',
+      'eff.trend': '趋势',
+      'eff.parallel': '并行',
+      'eff.done': '完成量',
+      'eff.doneHint': '窗口内 status=done 的已结算任务数，按结算时刻归属到窗口',
+      'eff.rate': '完成率',
+      'eff.rateHint': 'done ÷ (done + ended + failed + blocked + interrupted)；取消不进分母（取消率单列），免得用户主动收回拉低成功率',
+      'eff.first': '一次完成率',
+      'eff.firstHint': 'attempt=1 且 done ÷ attempt=1 的已结算任务；同样排除取消，衡量「不返工就做完」的比例',
+      'eff.rework': '返工率',
+      'eff.reworkHint': 'attempt>1 的任务 ÷ 窗口内派发的任务；按任务计数，不把每次 attempt 当成新任务重复计',
+      'eff.throughput': '吞吐',
+      'eff.throughputHint': 'done ÷ 窗口自然日数；不用「有任务的天数」做分母，避免低活跃期数字虚高',
+      'eff.saved': '并行节省',
+      'eff.savedHint': 'Σ占用时长 − 墙钟跨度，是粗算，不是工时结算',
+      'eff.estimate': '估算',
+      'eff.stableHint': '失败 / 阻塞 / 中断三项分开，不用「失败」一个词覆盖；分母是已结算（含取消）',
+      'eff.cancelHint': '取消是用户主动收回：它不该进完成率分母，但必须单列，否则「完成数为啥少了」永远解释不清',
+      'eff.perDay': '{value} / 天',
+      'card.settled': '已结算 n={n}',
+      'card.sample': 'n={n}',
+      'card.denom': '÷ n={n}',
+      'card.p50': 'P50',
+      'card.p90': 'P90',
+      'speed.queue': '队列等待',
+      'speed.queueHint': 'startedAt − createdAt；没启动过的排队任务不进分布（当前排队另看总览）',
+      'speed.occupied': '占用时长',
+      'speed.occupiedHint': 'settledAt − startedAt，包含后台收尾；它不是「纯模型执行时长」',
+      'speed.endToEnd': '端到端',
+      'speed.endToEndHint': 'settledAt − createdAt，约等于队列等待 + 占用时长',
+      'st.recovery': '重试后恢复',
+      'st.recoveryHint': 'attempt>1 且 done ÷ attempt>1 的已结算任务；账本没有尝试历史，这是当前能给的近似值',
+      'trend.day': '日期',
+      'trend.created': '新派',
+      'trend.done': '完成',
+      'trend.problems': '失败·阻塞·中断',
+      'trend.median': '耗时中位数',
+      'trend.saved': '并行节省',
+      'trend.chart': '图表',
+      'trend.table': '表格',
+      'trend.modeLabel': '趋势呈现方式',
+      'trend.chartHint': '条形只是辅助：每个数值都以文字写在同一行，颜色之外还有文字',
+      'trend.empty': '窗口内还没有按天可统计的事实',
+      'trend.none': '无记录',
+      'trend.noneHint': '这个日期在窗口内，但账本里没有任何事实；不要把它当成 0 读',
+      'trend.detail': '当天明细：新派 {created} · 完成 {done} · 失败/阻塞/中断 {problems} · 耗时中位数 {median} · 并行节省 {saved}',
+      'trend.onlyFacts': '只列窗口内真实有事实的日期；补齐的日期显示「无记录」，不当成 0',
+      'par.occupied': '占用总和',
+      'par.occupiedHint': 'Σ(settledAt − startedAt)，只含时间完整的已结算任务',
+      'par.wall': '墙钟跨度',
+      'par.wallHint': 'max(settledAt) − min(startedAt)；单条任务时它等于该任务的占用时长',
+      'par.factor': '并行倍数',
+      'par.factorHint': '占用总和 ÷ 墙钟跨度；跨度为 0 时显示 —（单条任务没有倍数可说）',
+      'par.sample': '样本 n={n}',
+      'par.reasons': '更粗的原因：{list}',
+      'par.reason.sample-low': '样本少',
+      'par.reason.updatedAt-fallback': '部分时间回退到 updatedAt',
+      'par.reason.durations-clamped': '有时长被夹紧',
+      'par.reason.ledger-truncated': '账本已到上限',
+      'par.reason.missing-times': '有任务缺时间',
+      'br.workspaces': '工作区',
+      'br.batches': '批次',
+      'br.sessions': '主会话',
+      'br.distribution': '状态与退休原因',
+      'br.dimTarget': '派发目标',
+      'br.dimHost': '实际归属',
+      'br.dimNote': '口径：{label}（{field}）',
+      'br.dimTargetHint': '派发目标 workspace_id：用户把任务派向哪里；总览筛选沿用这个口径',
+      'br.dimHostHint': '实际归属 host_workspace_id：子会话实际挂在哪个工作区，没指定目标时它就是当天的派发工作区',
+      'br.col.name': '工作区',
+      'br.col.batch': '批次',
+      'br.col.session': '主会话',
+      'br.col.running': '在跑',
+      'br.col.queued': '排队',
+      'br.col.done': '完成',
+      'br.col.rate': '完成率',
+      'br.col.median': 'P50 占用',
+      'br.col.failed': '失败',
+      'br.col.blocked': '阻塞',
+      'br.col.saved': '并行节省',
+      'br.col.last': '最后活动',
+      'br.col.progress': '进度',
+      'br.col.pending': '待处理',
+      'br.col.wall': '批次墙钟',
+      'br.col.dispatched': '派发',
+      'br.col.failedCount': '失败数',
+      'br.pendingHint': '待处理 = 失败 + 阻塞 + 中断，与总览「需要你处理」同一口径',
+      'br.wallHint': '批次墙钟 = max(updatedAt) − min(createdAt)；成员全部结算后它停止增长',
+      'br.lastHint': '取成员里最晚的活动时刻（结算 / 更新 / 创建）；账本没有批次级报告时刻',
+      'br.rowHint': '点这一行把「{name}」设为过滤条件并回到总览',
+      'br.empty': '这个窗口里还没有可拆解的数据',
+      'br.emptyHint': '窗口内没有结算或当前任务；放宽窗口，或者先派发一个任务',
+      'br.statusTitle': '状态分布',
+      'br.statusHint': '横向条形；点一行把该状态设为过滤条件并回到总览',
+      'br.retiredTitle': '退休原因分布',
+      'br.retiredHint': '直接使用稳定代码分组，不拿错误文本猜类别',
+      'br.retiredEmpty': '窗口内没有被退休的任务',
+      'br.statusEmpty': '窗口内没有状态记录',
+      'br.noName': '（无名称）',
+      'drill.active': '已筛选 {label}',
+      'drill.clear': '清除 ×',
+      'drill.target': '工作区（派发目标）：{name}',
+      'drill.host': '工作区（实际归属）：{name}',
+      'drill.batch': '批次：{name}',
+      'drill.parent': '主会话：{name}',
+      'drill.status': '状态：{name}',
+      'drill.onlyList': '批次 / 主会话 / 状态筛选只作用于总览列表；/board/stats 只接受 window、workspaceId、hostWorkspaceId，所以效果与拆解的数字仍是整个窗口的口径',
+      'stats.loading': '正在聚合统计…',
+      'stats.unavailable': '统计暂不可用',
+      'stats.unavailableHint': '总览不受影响，仍按 /board 快照工作；效果与拆解需要 /board/stats',
+      'stats.noSummary': '统计返回里没有可用的汇总（字段缺失或宿主版本较旧）',
+      'stats.retry': '重试统计',
+      'stats.back': '回到总览',
+      'stats.meta': 'statsVersion {version} · 聚合于 {when} · {source}',
+      'unit.ms': '毫秒',
+      'unit.s': '秒',
+      'unit.min': '分',
+      'unit.hour': '时',
+
+      /*
+       * ── plans/09 P2：历史视图 + 任务详情抽屉 ──
+       *
+       * 这些键与上面的 P1 一样是 zh/en **成对硬编码**的：只写中文的那一条在英文
+       * 界面下会静默退回中文，所以每一条都必须同时出现在 TEXT_EN 里
+       * （scripts/client-smoke.mjs 的「TEXT 与 TEXT_EN 键集合完全一致」在守这件事）。
+       */
+      'view.history': '历史',
+      'hist.sub.all': '全部',
+      'hist.sub.archived': '已归档',
+      'hist.sub.retired': '已退休',
+      'hist.subLabel': '历史子视图',
+      'hist.subHint': '「全部」是 /board 快照（活表 + 已归档）；退休留痕走独立只读路由，只在「已退休」里列出',
+      'hist.search': '搜索',
+      'hist.searchHint': '按 task_id、标题、worker_session_id、工作区搜索',
+      'hist.clear': '清除筛选',
+      'hist.status': '状态',
+      'hist.statusAll': '全部状态',
+      'hist.workspace': '工作区',
+      'hist.time': '时间',
+      'hist.timeHint': '时间按创建时刻过滤；退休留痕没有创建时刻，改用退休时刻',
+      'hist.retried': '是否重试',
+      'hist.background': '是否有后台',
+      'hist.sort': '排序',
+      'hist.sort.created': '创建时间',
+      'hist.sort.settled': '结算时间',
+      'hist.sort.elapsed': '耗时',
+      'hist.col.task': '任务',
+      'hist.col.status': '状态',
+      'hist.col.workspace': '工作区',
+      'hist.col.created': '创建',
+      'hist.col.end': '结束',
+      'hist.col.elapsed': '耗时',
+      'hist.page': '第 {from}–{to} / 共 {n} 条',
+      'hist.total': '筛选后 {n} / 共 {total} 条',
+      'hist.prev': '上一页',
+      'hist.next': '下一页',
+      'hist.empty': '这个筛选下没有任务',
+      'hist.cap': '快照只含最近 {shown} 条（共 {total} 条）；更早的记录请用 dispatch_list / dispatch_inspect',
+      'hist.notOpenable': '退休留痕与已归档行没有可打开的子会话，只能复制 id 或看抽屉里的留痕',
+      'hist.copied': '已复制 {id}',
+      'hist.copyFailed': '复制失败：{reason}（可手抄 {id}）',
+      'drawer.title': '任务详情',
+      'drawer.close': '关闭',
+      'drawer.lifecycle': '生命周期',
+      'drawer.st.created': '创建',
+      'drawer.st.started': '开始',
+      'drawer.st.reported': '报告',
+      'drawer.st.settled': '结算',
+      'drawer.st.archived': '归档',
+      'drawer.st.retired': '退休',
+      'drawer.noTime': '没有记录',
+      'drawer.scope': '简报与目录',
+      'drawer.brief': '简报',
+      'drawer.briefMissing': '快照只投影标题，完整简报请用 dispatch_inspect {id}',
+      'drawer.cwd': '工作目录',
+      'drawer.taskDir': '任务目录',
+      'drawer.target': '目标工作区',
+      'drawer.reports': '报告与最后输出',
+      'drawer.reportCount': '报告数',
+      'drawer.lastReport': '最后一次报告',
+      'drawer.lastOutput': '最后输出',
+      'drawer.fullTextHint': '完整报告正文、更早的报告与完整简报请用 dispatch_inspect {id}',
+      'drawer.faults': '重试与错误',
+      'drawer.attempt': '第几次',
+      'drawer.retryAt': '重试时间',
+      'drawer.error': '错误',
+      'drawer.archiveError': '归档失败',
+      'drawer.frozenAt': '冻结时刻',
+      'drawer.delivery': '追问投递',
+      'drawer.inputPending': '已投递，worker 未读',
+      'drawer.inputRead': '已读',
+      'drawer.inputNone': '没有追问',
+      'drawer.background': '后台 job / subagent',
+      'drawer.backgroundJobs': 'shell job',
+      'drawer.backgroundSubagents': 'subagent',
+      'drawer.backgroundSinceLabel': '起始时刻',
+      'drawer.backgroundKilled': '后台已被终止',
+      'drawer.backgroundNone': '没有后台 job / subagent',
+      'drawer.backgroundState': '当前状态',
+      'drawer.prepare': 'prepare 结果',
+      'drawer.prepareAtNoWhen': '准备时刻',
+      'drawer.prepareNone': '没有准备记录（未配置任务目录，或还没开始准备）',
+      'drawer.openSession': '打开子会话',
+      'drawer.noSessionHint': '这条记录没有可打开的子会话（已归档或已退休），只能复制 id 去 dispatch_inspect 查',
+      'drawer.retiredNote': '该任务已退休：只保留留痕（何时、为什么、最后一条摘要），报告正文不可用',
+      'drawer.summary': '最后一条摘要',
     }
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
@@ -258,6 +520,17 @@ window.__ModuleLoader__.load({
       archiveConfirm: 'Confirm archive',
       archiveRunning: 'Archiving…',
       archiveDone: 'Archive sweep: scanned {scanned}, archived {archived}, failed {failed}',
+      archiveTask: 'Archive',
+      archiving: 'Archiving…',
+      archiveTaskConfirm: 'Click again to confirm',
+      archiveTaskDone: 'Archived (still findable in history)',
+      archiveTaskKept: 'Archived, but the worker session was not: {reason}',
+      continueTask: 'Continue',
+      continuePlaceholder: 'One more requirement (no new task; appended to the same worker session)',
+      continueSubmit: 'Send',
+      continueCancel: 'Cancel',
+      continueSending: 'Sending…',
+      continueHint: 'Continuing creates no new task: the requirement goes to this task’s worker session, so this is still the only row',
       workspaceAll: 'All workspaces',
       workspaceFilter: 'Filter by workspace',
       workspaceFallback: 'Follows session cwd',
@@ -346,6 +619,240 @@ window.__ModuleLoader__.load({
       targetAutoHint: 'Pick a workspace from the typed keywords',
       targetAutoHit: 'Auto: {title}',
       targetAutoMiss: 'Auto: no workspace matches',
+
+      /* plans/09 P1：与上面 TEXT 里新增的键一一对应（缺一条就会在英文界面退回中文）。 */
+      'view.tabs': 'Board view',
+      'view.overview': 'Overview',
+      'view.effect': 'Performance',
+      'view.breakdown': 'Breakdown',
+      'view.switchHint': 'Overview answers "what needs me now"; Performance answers "how did this period go"; Breakdown answers "where are the problems concentrated".',
+      'win.label': 'window',
+      'win.24h': '24h',
+      'win.days': '{days}d',
+      'win.all': 'all',
+      'win.scopeNote24h': 'Counting only facts from the last 24 hours (running and queued tasks ignore the window and still show)',
+      'win.scopeNoteDays': 'Counting only facts from the last {days} days (running and queued tasks ignore the window and still show)',
+      'win.scopeNoteAll': 'Counting every fact in the ledger, with no time limit',
+      'win.fromMemory': 'The default window follows memory.window from the host; the client invents no default of its own',
+      'scope.title': 'Sample scope',
+      'scope.entry': 'Scope {window} · open performance',
+      'scope.entryHint': 'The window only limits statistics; it never hides current work. Click to open the Performance view.',
+      'scope.tail': 'settled in window n={settled} · valid durations n={valid} · archived excluded {archived} · retired {retired} · time unknown {missing}',
+      'scope.lowBadge': 'low sample',
+      'scope.lowHint': 'n < 5: the value still shows, but it is not a conclusion',
+      'scope.timeBasis': 'time basis: {basis}',
+      'scope.basis.settledAt': 'settledAt',
+      'scope.basis.updatedAt-fallback': 'updatedAt fallback (old data)',
+      'scope.basis.mixed': 'mixed bases',
+      'scope.basis.missing': 'time unknown',
+      'scope.basisHint': 'settledAt is written once when a task reaches a terminal state; only older records fall back to updatedAt, which reports, follow-ups and archiving keep refreshing — so the fallback must be labelled.',
+      'scope.fallbackFrom': 'window parameter {value} was invalid; fell back to the host default',
+      'scope.truncated': 'ledger is at its cap; results may be undercounted',
+      'scope.truncatedHint': 'The live table hit ledgerMaxTasks, retired traces were dropped, or spans were clamped; treat this window as a lower bound.',
+      'scope.source': 'read {n} ledger records (retired traces included, not limited by the 200-task snapshot)',
+      'scope.sourceHint': 'sourceTasks = live-table tasks + retired traces: it proves these numbers come from the full ledger, not from the 200-task snapshot polled every 2 s',
+      'eff.result': 'Outcome',
+      'eff.speed': 'Speed',
+      'eff.stable': 'Stability',
+      'eff.trend': 'Trend',
+      'eff.parallel': 'Parallel',
+      'eff.done': 'Done',
+      'eff.doneHint': 'Settled tasks with status=done inside the window, attributed by settlement time',
+      'eff.rate': 'Completion',
+      'eff.rateHint': 'done ÷ (done + ended + failed + blocked + interrupted); cancellations stay out of the denominator (their own rate is listed separately)',
+      'eff.first': 'First-pass',
+      'eff.firstHint': 'attempt=1 and done ÷ settled with attempt=1; cancellations excluded, measuring "finished without rework"',
+      'eff.rework': 'Rework',
+      'eff.reworkHint': 'tasks with attempt>1 ÷ tasks dispatched in the window; counted per task, not per attempt',
+      'eff.throughput': 'Throughput',
+      'eff.throughputHint': 'done ÷ calendar days in the window; not "days that had tasks", which inflates quiet periods',
+      'eff.saved': 'Saved',
+      'eff.savedHint': 'Σ occupied − wall span; a rough estimate, not time accounting',
+      'eff.estimate': 'estimated',
+      'eff.stableHint': 'Failed / blocked / interrupted are counted separately; one word "failure" would hide the rest. The denominator is settled (cancellations included).',
+      'eff.cancelHint': 'Cancelling is the user taking work back: it must not lower the completion rate, but it must be visible on its own',
+      'eff.perDay': '{value} / day',
+      'card.settled': 'settled n={n}',
+      'card.sample': 'n={n}',
+      'card.denom': '÷ n={n}',
+      'card.p50': 'P50',
+      'card.p90': 'P90',
+      'speed.queue': 'Queue wait',
+      'speed.queueHint': 'startedAt − createdAt; queued tasks that never started are not a sample here (current queue depth lives on the overview)',
+      'speed.occupied': 'Occupied',
+      'speed.occupiedHint': 'settledAt − startedAt, including background wrap-up; this is not "pure model execution time"',
+      'speed.endToEnd': 'End to end',
+      'speed.endToEndHint': 'settledAt − createdAt, roughly queue wait + occupied',
+      'st.recovery': 'Recovered after retry',
+      'st.recoveryHint': 'attempt>1 and done ÷ settled with attempt>1; the ledger keeps no attempt history, so this is the best available approximation',
+      'trend.day': 'Date',
+      'trend.created': 'Dispatched',
+      'trend.done': 'Done',
+      'trend.problems': 'Failed·blocked·interrupted',
+      'trend.median': 'Median duration',
+      'trend.saved': 'Saved',
+      'trend.chart': 'Chart',
+      'trend.table': 'Table',
+      'trend.modeLabel': 'How the trend is shown',
+      'trend.chartHint': 'Bars are decoration only: every value is written as text on the same row, so colour is never the only channel',
+      'trend.empty': 'No per-day facts inside this window yet',
+      'trend.none': 'no record',
+      'trend.noneHint': 'The day is inside the window but the ledger holds no fact for it; do not read it as zero',
+      'trend.detail': 'Detail for {day}: dispatched {created} · done {done} · failed/blocked/interrupted {problems} · median duration {median} · saved {saved}',
+      'trend.onlyFacts': 'Only days that really have facts are listed; padded days say "no record" instead of zero',
+      'par.occupied': 'Occupied total',
+      'par.occupiedHint': 'Σ(settledAt − startedAt) over settled tasks with complete times',
+      'par.wall': 'Wall span',
+      'par.wallHint': 'max(settledAt) − min(startedAt); with one task it equals that task\'s occupied time',
+      'par.factor': 'Parallel factor',
+      'par.factorHint': 'occupied total ÷ wall span; shown as — when the span is 0 (one task has no factor)',
+      'par.sample': 'sample n={n}',
+      'par.reasons': 'made rougher by: {list}',
+      'par.reason.sample-low': 'small sample',
+      'par.reason.updatedAt-fallback': 'some times fall back to updatedAt',
+      'par.reason.durations-clamped': 'some durations were clamped',
+      'par.reason.ledger-truncated': 'ledger is at its cap',
+      'par.reason.missing-times': 'some tasks lack times',
+      'br.workspaces': 'Workspaces',
+      'br.batches': 'Batches',
+      'br.sessions': 'Parent sessions',
+      'br.distribution': 'Status and retirement reasons',
+      'br.dimTarget': 'dispatch target',
+      'br.dimHost': 'actual host',
+      'br.dimNote': 'scope: {label} ({field})',
+      'br.dimTargetHint': 'Dispatch target workspace_id: where the user sent the task; the overview filter keeps this dimension',
+      'br.dimHostHint': 'Actual host workspace_id: the workspace the worker session really runs in',
+      'br.col.name': 'Workspace',
+      'br.col.batch': 'Batch',
+      'br.col.session': 'Parent session',
+      'br.col.running': 'Running',
+      'br.col.queued': 'Queued',
+      'br.col.done': 'Done',
+      'br.col.rate': 'Rate',
+      'br.col.median': 'P50 occupied',
+      'br.col.failed': 'Failed',
+      'br.col.blocked': 'Blocked',
+      'br.col.saved': 'Saved',
+      'br.col.last': 'Last activity',
+      'br.col.progress': 'Progress',
+      'br.col.pending': 'Pending',
+      'br.col.wall': 'Batch wall',
+      'br.col.dispatched': 'Dispatched',
+      'br.col.failedCount': 'Failures',
+      'br.pendingHint': 'Pending = failed + blocked + interrupted, the same set the overview calls "needs you"',
+      'br.wallHint': 'Batch wall = max(updatedAt) − min(createdAt); it stops growing once every member has settled',
+      'br.lastHint': 'The latest member activity (settled / updated / created); the ledger keeps no batch-level report time',
+      'br.rowHint': 'Click this row to filter by "{name}" and return to the overview',
+      'br.empty': 'Nothing to break down inside this window',
+      'br.emptyHint': 'No settled or current tasks in the window; widen it, or dispatch a task first',
+      'br.statusTitle': 'Status distribution',
+      'br.statusHint': 'Horizontal bars; click a row to filter by that status and return to the overview',
+      'br.retiredTitle': 'Retirement reasons',
+      'br.retiredHint': 'Stable codes only; error text is never used to guess a category',
+      'br.retiredEmpty': 'No task was retired inside this window',
+      'br.statusEmpty': 'No status recorded inside this window',
+      'br.noName': '(no name)',
+      'drill.active': 'Filtered by {label}',
+      'drill.clear': 'Clear ×',
+      'drill.target': 'Workspace (dispatch target): {name}',
+      'drill.host': 'Workspace (actual host): {name}',
+      'drill.batch': 'Batch: {name}',
+      'drill.parent': 'Parent session: {name}',
+      'drill.status': 'Status: {name}',
+      'drill.onlyList': 'Batch / parent-session / status filters narrow the overview list only; /board/stats accepts window, workspaceId and hostWorkspaceId, so the performance and breakdown numbers still cover the whole window',
+      'stats.loading': 'Aggregating statistics…',
+      'stats.unavailable': 'Statistics are temporarily unavailable',
+      'stats.unavailableHint': 'The overview is unaffected and keeps working from the /board snapshot; performance and breakdown need /board/stats',
+      'stats.noSummary': 'The statistics response carries no usable summary (missing fields, or an older host)',
+      'stats.retry': 'Retry statistics',
+      'stats.back': 'Back to overview',
+      'stats.meta': 'statsVersion {version} · aggregated at {when} · {source}',
+      'unit.ms': 'ms',
+      'unit.s': 's',
+      'unit.min': 'min',
+      'unit.hour': 'h',
+
+      /* plans/09 P2：历史视图 + 任务详情抽屉（与上面 TEXT 的 P2 段一一对应）。 */
+      'view.history': 'History',
+      'hist.sub.all': 'All',
+      'hist.sub.archived': 'Archived',
+      'hist.sub.retired': 'Retired',
+      'hist.subLabel': 'History sub-view',
+      'hist.subHint': '"All" is the /board snapshot (live table + archived); retired traces come from their own read-only route and are listed only under "Retired"',
+      'hist.search': 'Search',
+      'hist.searchHint': 'Search by task_id, title, worker_session_id or workspace',
+      'hist.clear': 'Clear filters',
+      'hist.status': 'Status',
+      'hist.statusAll': 'All statuses',
+      'hist.workspace': 'Workspace',
+      'hist.time': 'Time',
+      'hist.timeHint': 'Time filters by creation time; retired traces have no creation time, so their retirement time is used',
+      'hist.retried': 'Retried only',
+      'hist.background': 'With background only',
+      'hist.sort': 'Sort',
+      'hist.sort.created': 'Created',
+      'hist.sort.settled': 'Settled',
+      'hist.sort.elapsed': 'Duration',
+      'hist.col.task': 'Task',
+      'hist.col.status': 'Status',
+      'hist.col.workspace': 'Workspace',
+      'hist.col.created': 'Created',
+      'hist.col.end': 'Ended',
+      'hist.col.elapsed': 'Duration',
+      'hist.page': 'Rows {from}–{to} of {n}',
+      'hist.total': '{n} of {total} after filtering',
+      'hist.prev': 'Previous',
+      'hist.next': 'Next',
+      'hist.empty': 'No tasks under these filters',
+      'hist.cap': 'The snapshot holds only the latest {shown} rows ({total} total); use dispatch_list / dispatch_inspect for older ones',
+      'hist.notOpenable': 'Retired traces and archived rows have no openable worker session; copy the id or read the drawer trace instead',
+      'hist.copied': 'Copied {id}',
+      'hist.copyFailed': 'Copy failed: {reason} (copy {id} by hand)',
+      'drawer.title': 'Task detail',
+      'drawer.close': 'Close',
+      'drawer.lifecycle': 'Lifecycle',
+      'drawer.st.created': 'Created',
+      'drawer.st.started': 'Started',
+      'drawer.st.reported': 'Reported',
+      'drawer.st.settled': 'Settled',
+      'drawer.st.archived': 'Archived',
+      'drawer.st.retired': 'Retired',
+      'drawer.noTime': 'not recorded',
+      'drawer.scope': 'Brief and directories',
+      'drawer.brief': 'Brief',
+      'drawer.briefMissing': 'The snapshot projects only the title; use dispatch_inspect {id} for the full brief',
+      'drawer.cwd': 'Working dir',
+      'drawer.taskDir': 'Task dir',
+      'drawer.target': 'Target workspace',
+      'drawer.reports': 'Reports and last output',
+      'drawer.reportCount': 'Reports',
+      'drawer.lastReport': 'Last report',
+      'drawer.lastOutput': 'Last output',
+      'drawer.fullTextHint': 'Use dispatch_inspect {id} for full report bodies, earlier reports and the complete brief',
+      'drawer.faults': 'Retries and errors',
+      'drawer.attempt': 'Attempt',
+      'drawer.retryAt': 'Retried at',
+      'drawer.error': 'Error',
+      'drawer.archiveError': 'Archive failed',
+      'drawer.frozenAt': 'Frozen at',
+      'drawer.delivery': 'Follow-up delivery',
+      'drawer.inputPending': 'delivered, not read by the worker',
+      'drawer.inputRead': 'read',
+      'drawer.inputNone': 'no follow-up',
+      'drawer.background': 'Background jobs / subagents',
+      'drawer.backgroundJobs': 'shell jobs',
+      'drawer.backgroundSubagents': 'subagents',
+      'drawer.backgroundSinceLabel': 'Since',
+      'drawer.backgroundKilled': 'The background was terminated',
+      'drawer.backgroundNone': 'No background jobs or subagents',
+      'drawer.backgroundState': 'State',
+      'drawer.prepare': 'prepare result',
+      'drawer.prepareAtNoWhen': 'Prepared at',
+      'drawer.prepareNone': 'No prepare record (no task dir configured, or preparation never ran)',
+      'drawer.openSession': 'Open worker session',
+      'drawer.noSessionHint': 'This record has no openable worker session (archived or retired); copy the id and query it with dispatch_inspect',
+      'drawer.retiredNote': 'This task was retired: only the trace remains (when, why, the last summary); report bodies are unavailable',
+      'drawer.summary': 'Last summary',
     }
 
     /** 当前翻译函数；attachLocale 成功后会替换成 locale 绑定的 t()。 */
@@ -400,12 +907,51 @@ window.__ModuleLoader__.load({
     }
     const STATUS_FALLBACK = { color: 'var(--dsw-alias-label-tertiary, #8b8b8b)', pulse: false }
 
-    /** 可操作的任务给出按钮：进行中→取消；需要处理/已结束→重试。 */
+    /**
+     * 一条已结算任务能做哪些操作。
+     *
+     * 从「返回单个 kind」改成「返回主操作 + 是否可归档」，因为**归档与重试不是
+     * 互斥的**：一个被中断的任务，用户既要能重试，也要能「别再挡在我面前」。
+     * 原来只返回一个 kind，等于逼着每条状态只能有一个按钮，而取消对终态又是
+     * 硬拒绝（`dispatch.cancel()` 见到 `SETTLED` 直接抛）——于是
+     * `interrupted/failed/blocked/ended` 这些行只剩「重试」，永远卡在
+     * 「需要你处理」区，正是用户报的「只有重试会一直卡着」。
+     *
+     * 返回形状（两个字段都必给，调用方不用判 undefined）：
+     * - `primary`：主按钮 kind（`'cancel'` / `'retry'` / `null`）。
+     *   `null` 表示这一行没有主操作（例如已完成的、已取消的）。
+     * - `archive`：是否给「归档」按钮。**覆盖全部终态**
+     *   （`interrupted|failed|blocked|ended|done|cancelled`），这是用户明确要求的
+     *   范围；`running|queued` 不给——归档会把还在写的会话冻成只读。
+     *
+     * 为什么不把 `interrupted` 改成 `cancelled` 来消掉这个按钮：plans/09 §四 A
+     * 规定「取消不进完成率分母」。把中断改写成取消会同时污染取消率与完成率——
+     * 两个指标都变成「谁点过按钮」的函数，而不是执行结果。
+     */
     function actionOf(status) {
-      if (status === 'running' || status === 'queued') return 'cancel'
-      if (status === 'failed' || status === 'interrupted' || status === 'ended' || status === 'blocked') return 'retry'
-      return null
+      /*
+       * `continue`：能不能在这一行上「续派」（plans/08 阶段 1）。
+       *
+       * **只给已结算的行**（`done|blocked|failed|cancelled|ended|interrupted`），
+       * 也就是 `!SETTLED` 的反面。为什么不是「所有行」：宿主侧的续派走
+       * `POST /retry` + `message`，而它对未结算任务会回 409（不能把一条要求插进
+       * 正在跑的回合）。按钮出现在一个必然失败的组合上，比不出现更糟——
+       * 用户点一下只会拿到一句错误，还得自己猜为什么。
+       *
+       * 归档行仍然一个按钮都不给：`archived` 在 `TaskCard` 里已经短路成
+       * `NO_ACTIONS`，见那里的注释（归档 = 只读冻结）。
+       */
+      if (status === 'running' || status === 'queued') return { primary: 'cancel', archive: false, continue: false }
+      if (status === 'failed' || status === 'interrupted' || status === 'ended' || status === 'blocked') {
+        return { primary: 'retry', archive: true, continue: true }
+      }
+      // done / cancelled 没有主操作，但仍然需要「归档」把它们从列表里收走。
+      if (status === 'done' || status === 'cancelled') return { primary: null, archive: true, continue: true }
+      return { primary: null, archive: false, continue: false }
     }
+
+    /** 「这一行没有操作按钮」。单独提出来是为了让 `actionOf` 的返回形状只有一种。 */
+    const NO_ACTIONS = { primary: null, archive: false, continue: false }
 
     /**
      * 五个过滤 chip 的定义。
@@ -960,7 +1506,214 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    /* ───────────────── 派发目标：与输入框控件、@ 候选共用的数据层 ───────────────── */
+    /**
+     * 读写 `/board/stats`（plans/09 §六.1）时要用的窗口键。
+     *
+     * 为什么把 `24h` 和 `all` 写成字面量、其余按天拼：Host 侧 `normalizeWindow()`
+     * 的合法语法就是 `all` 或 `<n>h` / `<n>d`（见 src/stats.js 的 `WINDOW_RE`）。
+     * 前端这里只是**拼查询参数**，不重新定义口径；真正的归一化仍在 Host 做，
+     * 所以这里允许拼出 `30d` 这种「将来可能被 Host 夹紧」的值而不本地校验。
+     */
+    const WINDOW_ALL = 'all'
+    /** 顶部窗口 chip 的固定顺序（24h 在前：运营最常看的是「今天」）。 */
+    const WINDOW_PRESETS = [
+      { id: '24h', labelKey: 'win.24h' },
+      { id: '7d', labelKey: 'win.days', labelVars: { days: 7 } },
+      { id: '30d', labelKey: 'win.days', labelVars: { days: 30 } },
+      { id: WINDOW_ALL, labelKey: 'win.all' },
+    ]
+
+    /**
+     * 把一个窗口 id 变成人话的「只统计最近 N 天」。
+     *
+     * plans/07 §九 要求「切换窗口时提示只统计最近 N 天」：数字口径一变而界面不说，
+     * 同一个 86% 会在两个窗口之间悄悄漂移，读者却以为自己在看同一件事。
+     * `all` 要说清「不再限制时间窗」，`24h` 说「最近 24 小时」——三句话各写各的，
+     * 不能合并成一句「当前窗口」。
+     */
+    function windowScopeNote(windowId) {
+      if (windowId === WINDOW_ALL) return tr('win.scopeNoteAll')
+      if (windowId === '24h') return tr('win.scopeNote24h')
+      const days = windowDaysOf(windowId)
+      return days > 0 ? fill(tr('win.scopeNoteDays'), { days: days }) : tr('win.scopeNoteAll')
+    }
+
+    /** `7d` → 7；`24h` → 1；`all` → 0（0 表示「不按天」）。 */
+    function windowDaysOf(windowId) {
+      if (typeof windowId !== 'string') return 0
+      const match = /^(\d+)([hd])$/i.exec(windowId.trim())
+      if (!match) return 0
+      const amount = Number(match[1])
+      if (!Number.isFinite(amount) || amount <= 0) return 0
+      return match[2].toLowerCase() === 'h' ? amount / 24 : amount
+    }
+
+    /** 窗口 chip 上显示的字（24h / 7 天 / 30 天 / 全部）。 */
+    function windowChipLabel(preset) {
+      return fill(tr(preset.labelKey), preset.labelVars || {})
+    }
+
+    /**
+     * 拼 `/board/stats` 的查询串。
+     *
+     * 三个参数**各有各的来源**，不能合并：
+     * - `window` 是用户选的（默认来自 memory.window，见 `defaultWindowKey()`）；
+     * - `workspaceId` 是派发目标（总览的下拉也用它）；
+     * - `hostWorkspaceId` 是实际归属（只有拆解页的「实际归属」口径会传）。
+     * 同时给两个工作区参数就是交集，Host 那边也是这么判的（src/stats.js `matchesScope`）。
+     */
+    function statsQuery(scope) {
+      const params = []
+      const windowId = scope && typeof scope.window === 'string' && scope.window ? scope.window : ''
+      if (windowId) params.push('window=' + encodeURIComponent(windowId))
+      if (scope && scope.workspaceId) params.push('workspaceId=' + encodeURIComponent(scope.workspaceId))
+      if (scope && scope.hostWorkspaceId) params.push('hostWorkspaceId=' + encodeURIComponent(scope.hostWorkspaceId))
+      return params.length ? '?' + params.join('&') : ''
+    }
+
+    /**
+     * 默认窗口：**沿用宿主下发的 `memory.window`**，不是前端另造一个。
+     *
+     * plans/09 §三.1 的原话是「默认沿用 memory.window，而不是前端另造一套默认」。
+     * 两处各编一个默认值的后果是：同一个筛选条件下，总览与效果的分母不同，
+     * 而用户以为自己只是换了个视图。
+     *
+     * 映射规则只有一条：能对上 24h / 7d / 30d 就用它，否则按天拼 `<n>d`
+     * （Host 的 `WINDOW_RE` 接受任意正整数天）；连天数都拿不到才退回 7d，
+     * 并且把「宿主没给」这件事留给样本口径行去说（`scope.fallbackFrom` 之外的降级）。
+     */
+    function defaultWindowKey(memory) {
+      const window = pickWindow(memory)
+      if (!window) return '7d'
+      const days = num(window.days, 0)
+      if (days > 0) {
+        if (Math.abs(days - 1) < 0.01) return '24h'
+        const rounded = Math.round(days)
+        return (rounded > 0 ? rounded : 1) + 'd'
+      }
+      // 只有 since 没有 days：按 since 到现在的实际跨度折算，别装作「窗口未知」。
+      const span = Number.isFinite(window.sinceAt) ? Date.now() - window.sinceAt : 0
+      if (span > 0) {
+        const derived = Math.max(1, Math.round(span / 86400000))
+        return derived === 1 ? '24h' : derived + 'd'
+      }
+      return '7d'
+    }
+
+    /**
+     * 读全量统计聚合（plans/09 §六.1）。
+     *
+     * 与 `readBoard` 的降级路子一致：非 2xx / 形状不对都抛错，由面板决定
+     * 「统计暂不可用」——**绝不静默返回空结构**，否则 n=0 与 HTTP 404 会被
+     * 画成同一个界面（§八.6「不能统一显示 0」）。
+     *
+     * 形状只校验最小的一条：`coverage` 是对象。`summary` 可能为 null（Host 降级），
+     * 那由渲染层单独判——校验失败与「降级成功」是两件事。
+     */
+    async function readStats(query, signal) {
+      const response = await fetch(API + '/stats' + (query || ''), {
+        method: 'GET',
+        headers: { accept: 'application/json', ...AUTH_HEADERS },
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal,
+      })
+      if (!response.ok) {
+        const error = new Error(tr('httpError') + ' HTTP ' + response.status)
+        error.status = response.status
+        throw error
+      }
+      let data
+      try {
+        data = await response.json()
+      } catch (error) {
+        throw new Error(tr('badResponse'))
+      }
+      if (!data || !data.coverage || typeof data.coverage !== 'object') throw new Error(tr('badResponse'))
+      return data
+    }
+
+    /**
+     * 有效的比率 → 百分比文本；null / 非法值给 em dash。
+     *
+     * §三.4：`n=0` 显示 `—` 而不是 `0`。Host 已经把分母为 0 的比率算成 null，
+     * 这里只负责**不再把 null 变回 0**。
+     */
+    function percentText(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1000) / 10 + '%' : tr('stat.none')
+    }
+
+    /**
+     * 计数文本：`0` 与「没有样本」是两件事（§八.6）。
+     *
+     * `samples` 为 0 时一律给 em dash：这时候的 0 不是「做了 0 个」，而是
+     * 「这个窗口里没有可统计的事实」。
+     */
+    function countText(value, samples) {
+      if (typeof samples === 'number' && Number.isFinite(samples) && samples <= 0) return tr('stat.none')
+      return typeof value === 'number' && Number.isFinite(value) ? String(value) : tr('stat.none')
+    }
+
+    /** 毫秒 → 可读时长；null / NaN 给 em dash（不显示「0 秒」，那会被读成「瞬间完成」）。 */
+    function durationText(ms) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms)) return tr('stat.none')
+      if (ms < 1000) return Math.round(ms) + ' ' + tr('unit.ms')
+      return formatDuration(ms)
+    }
+
+    /** 倍数/比值：保留 2 位；null 给 em dash（单条任务没有倍数可说）。 */
+    function factorText(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) + '×' : tr('stat.none')
+    }
+
+    /**
+     * 时间基准的人话。
+     *
+     * `updatedAt-fallback` 必须在界面上**看得见**（plans/09 §三.4、§八.6）：
+     * 回退基准算出来的结算时刻会被后续报告/追问刷新，两个窗口看着同一份账本
+     * 却得到不同的「完成时间」。认不出的基准原样显示，不编一个「未知」把线索抹掉。
+     */
+    function timeBasisText(basis) {
+      if (!basis) return ''
+      const known = {
+        settledAt: 'scope.basis.settledAt',
+        'updatedAt-fallback': 'scope.basis.updatedAt-fallback',
+        mixed: 'scope.basis.mixed',
+        missing: 'scope.basis.missing',
+      }
+      return known[basis] ? tr(known[basis]) : String(basis)
+    }
+
+    /**
+     * 一条分组行点击后要写进哪里（plans/09 §五.3 下钻）。
+     *
+     * 返回 `null` 表示这行没有可筛的键（例如没有 id 的批次）。**不要**用
+     * 「名字为空」当判据：批次名可能是空串，但主会话 id 绝不会。
+     */
+    function drillOf(kind, row) {
+      if (!row || typeof row !== 'object') return null
+      if (kind === 'workspace') {
+        const id = typeof row.workspaceId === 'string' && row.workspaceId ? row.workspaceId : ''
+        if (id) return { kind: 'workspaceId', value: id, name: row.title || id }
+        const host = typeof row.hostWorkspaceId === 'string' && row.hostWorkspaceId ? row.hostWorkspaceId : ''
+        if (host) return { kind: 'hostWorkspaceId', value: host, name: row.title || host }
+        return null
+      }
+      if (kind === 'batch') {
+        const name = typeof row.group === 'string' ? row.group : ''
+        return name ? { kind: 'group', value: name, name: name } : null
+      }
+      if (kind === 'parent') {
+        const id = typeof row.parentSessionId === 'string' ? row.parentSessionId : ''
+        return id ? { kind: 'parentSessionId', value: id, name: id } : null
+      }
+      if (kind === 'status') {
+        const status = typeof row.status === 'string' ? row.status : ''
+        return status ? { kind: 'status', value: status, name: tr('status.' + status) } : null
+      }
+      return null
+    }
+
 
     /** 快照缓存时长：@ 候选每敲一个字都会问一次，没必要每次拉全量任务。 */
     const SNAPSHOT_CACHE_MS = 10000
@@ -1468,6 +2221,43 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
 }
 .dsh-sa-btn-confirm { color: var(--dsw-alias-state-warn-primary, #b45309); }
+/*
+ * 续派的输入行（plans/08 阶段 1）。
+ *
+ * 为什么它长在**行下面**而不是弹一个对话框：续派是「在已有任务上补一句」，
+ * 用户的判断依据就是这条任务本身（标题、状态、上一轮摘要）——把行藏到弹窗后面，
+ * 等于让人凭记忆写要求。放在行内，上下文一直在视野里。
+ *
+ * 高度固定 26px 与按钮对齐；flex: 1 让它吃掉整行的宽度，短句一行写完。
+ */
+.dsh-sa-continue {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px 7px;
+  flex-wrap: wrap;
+}
+.dsh-sa-continue-input {
+  flex: 1 1 180px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: var(--dsw-radius-sm, 6px);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.06));
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12, 12px);
+}
+.dsh-sa-continue-input:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 1px;
+}
+.dsh-sa-continue-hint {
+  flex: 1 1 100%;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
 /* 窗口口径：贴着效果数字右侧，弱化为说明文字，不抢数字的注意力。 */
 .dsh-sa-stat-window {
   align-self: flex-end;
@@ -1510,6 +2300,459 @@ window.__ModuleLoader__.load({
 .dsh-sa-chip:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
   outline-offset: 1px;
+}
+/*
+ * ── plans/09 P1：视图切换 / 窗口选择 / 样本口径 / 效果卡 / 拆解表 / 趋势 ──
+ *
+ * 全部样式都挂在 .dsh-sa 前缀下、随面板 <style> 一起卸载（本文件顶部的约定）。
+ * 这里**不用任何图表库**（plans/09 §九）：趋势与分布都是 div 条形 + 表格，
+ * 颜色之外一律有文字，读屏与复制都不依赖像素。
+ */
+.dsh-sa-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.dsh-sa-tab {
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12, 12px);
+  cursor: pointer;
+  transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+}
+.dsh-sa-tab:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.dsh-sa-tab[aria-selected="true"] {
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+  background: var(--dsw-alias-accent-soft, rgba(77,107,254,.12));
+  font-weight: 600;
+}
+.dsh-sa-tab:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 1px;
+}
+.dsh-sa-win {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dsh-sa-win-label {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+/*
+ * 窗口提示条：切窗口时必须说清「只统计最近 N 天」（plans/07 §九）。
+ * 用 info 语气而不是警告：窗口变窄本身不是错误，但它改变分母，必须显眼。
+ */
+.dsh-sa-scopenote {
+  flex: none;
+  padding: 6px 16px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-secondary, inherit);
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08));
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+}
+/* 样本口径行：固定出现在效果与拆解视图顶部，n=0/样本少/时间回退都在这一行里说。 */
+.dsh-sa-scope {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-scope-title { font-weight: 600; color: var(--dsw-alias-label-secondary, inherit); }
+.dsh-sa-scope-warn { color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dsh-sa-scope-low {
+  padding: 0 5px;
+  border-radius: 7px;
+  background: var(--dsw-alias-state-warn-tertiary, rgba(217,119,6,.12));
+  color: var(--dsw-alias-state-warn-primary, #b45309);
+}
+.dsh-sa-view { display: flex; flex-direction: column; gap: 2px; padding-bottom: 16px; }
+.dsh-sa-cardgroup { padding-top: 10px; }
+.dsh-sa-cardgroup-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 16px 6px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-cardgroup-title { font-weight: 600; color: var(--dsw-alias-label-secondary, inherit); }
+/*
+ * 卡片行用 grid 的 auto-fit 而不是 flex-wrap。
+ *
+ * flex 的问题是「最后一行只剩一张卡时它会撑满整行」（4 张卡 → 3+1，那张卡宽得像
+ * 一个区块标题）；auto-fit 让每行等宽、列数随容器走，小屏自动折成 2 列 / 1 列。
+ * 卡片数量按组不同（结果 6、速度 3、稳定 5、并行 4），所以列数不能写死。
+ *
+ * minmax 下限定在 168px：这是让「结果」的 6 张卡在常规面板宽度下排成 3×2 的
+ * 临界值——4 列时第一行 4 张、第二行 2 张会在右侧留一个空洞，看起来像少画了卡。
+ */
+.dsh-sa-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 8px;
+  padding: 0 16px;
+}
+.dsh-sa-card {
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.22));
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.05));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dsh-sa-card-label {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-card-value {
+  font-size: var(--dsw-font-s-13, 13px);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.dsh-sa-card-sub {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-card-fail .dsh-sa-card-value { color: var(--dsw-alias-state-error-primary, #dc2626); }
+.dsh-sa-card-warn .dsh-sa-card-value { color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dsh-sa-card-ok .dsh-sa-card-value { color: var(--dsw-alias-state-success-primary, #16a34a); }
+/* 分布与趋势的横向条形：宽度是百分比，但同一行永远有文字，颜色不是唯一通道。 */
+.dsh-sa-rows { display: flex; flex-direction: column; }
+.dsh-sa-dist {
+  display: grid;
+  grid-template-columns: minmax(88px, 168px) 1fr auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.1));
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12, 12px);
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-sa-dist:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.07)); }
+.dsh-sa-dist:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: -2px;
+}
+.dsh-sa-dist-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-sa-dist-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
+  overflow: hidden;
+}
+.dsh-sa-dist-fill { height: 100%; border-radius: 4px; background: var(--dsw-alias-brand-primary, #4d6bfe); }
+.dsh-sa-dist-fill-ok { background: var(--dsw-alias-state-success-primary, #16a34a); }
+.dsh-sa-dist-fill-warn { background: var(--dsw-alias-state-warn-primary, #d97706); }
+.dsh-sa-dist-fill-fail { background: var(--dsw-alias-state-error-primary, #dc2626); }
+.dsh-sa-dist-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-secondary, inherit);
+  white-space: nowrap;
+}
+/* 拆解三表：小屏可折行（overflow-x 而不是硬裁），表头写明口径。 */
+.dsh-sa-tablewrap { padding: 0 16px; overflow-x: auto; }
+.dsh-sa-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--dsw-font-xxs-12, 12px);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-table th,
+.dsh-sa-table td {
+  padding: 5px 8px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12));
+}
+.dsh-sa-table th {
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-size: var(--dsw-font-xxxs-11, 11px);
+}
+.dsh-sa-table th:first-child,
+.dsh-sa-table td:first-child { text-align: left; white-space: normal; }
+.dsh-sa-table tbody tr[data-drill] { cursor: pointer; }
+.dsh-sa-table tbody tr[data-drill]:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.07)); }
+.dsh-sa-table tbody tr[data-drill]:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: -2px;
+}
+.dsh-sa-table-name { overflow-wrap: anywhere; }
+.dsh-sa-dim {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 16px 8px;
+  flex-wrap: wrap;
+}
+.dsh-sa-dim-note {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+/* 下钻提示：筛选一旦生效必须一直可见，否则「这个数字为什么是 3」无处可查。 */
+.dsh-sa-drill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+  font-size: var(--dsw-font-xxs-12, 12px);
+}
+.dsh-sa-drill-label {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-accent-soft, rgba(77,107,254,.12));
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+}
+/*
+ * 趋势行：日期 / 条形 / 文字三段。
+ *
+ * 文字列必须能折行（white-space: normal）：这一行的文字就是「不靠颜色也能读数」
+ * 的全部证据（plans/09 §五.2、§八.8），把它 ellipsis 掉等于只剩颜色在说话。
+ * 之前写成 nowrap 时，长语言的读数（英文的 failed·blocked·interrupted）
+ * 会被裁掉半截——那正是「图表有表格等价物」要避免的失真。
+ */
+.dsh-sa-trend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 16px;
+}
+.dsh-sa-trend-row {
+  display: grid;
+  grid-template-columns: 84px minmax(64px, 1fr) minmax(0, 1.4fr);
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-trend-day { color: var(--dsw-alias-label-secondary, inherit); white-space: nowrap; }
+.dsh-sa-trend-bars { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dsh-sa-trend-track {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.12));
+  overflow: hidden;
+}
+.dsh-sa-trend-fill { height: 100%; border-radius: 3px; }
+.dsh-sa-trend-fill-done { background: var(--dsw-alias-state-success-primary, #16a34a); }
+.dsh-sa-trend-fill-created { background: var(--dsw-alias-state-business-primary, #3b82f6); }
+.dsh-sa-trend-fill-problems { background: var(--dsw-alias-state-error-primary, #dc2626); }
+.dsh-sa-trend-text {
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.dsh-sa-toggle { display: inline-flex; gap: 4px; }
+
+/*
+ * ── plans/09 P2：历史视图 + 任务详情抽屉 ──
+ *
+ * 这里全部是「表格 + 抽屉」，没有任何图表库（§九）。两个刻意的取舍：
+ * 1. 历史表第一列可以折行（white-space: normal）：标题 + 徽标 + task_id 挤在
+ *    一个 nowrap 单元格里，中文标题会被裁成半截——那正是「可读」要避免的；
+ * 2. 抽屉是**文档流里的一块**而不是 fixed 遮罩：面板本身在宿主的槽里滚动，
+ *    fixed 定位会跑到视口外，也会盖住别家 DOM（本文件顶部的约定：不碰别家 DOM）。
+ */
+.dsh-sa-histbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+}
+.dsh-sa-hist-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-hist-field-label { flex: none; }
+.dsh-sa-hist-search { flex: 1 1 200px; min-width: 160px; }
+.dsh-sa-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: var(--dsw-radius-sm, 6px);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12, 12px);
+}
+.dsh-sa-input:focus-visible,
+.dsh-sa-select:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 1px;
+}
+/* 历史表第一列（任务）允许折行，其余列保持 nowrap 的数字对齐。 */
+.dsh-sa-hist-table { table-layout: auto; }
+.dsh-sa-hist-table th:first-child,
+.dsh-sa-hist-table td:first-child { white-space: normal; min-width: 150px; }
+/*
+ * 真机预览里这张表一度被裁掉最后一列：tablewrap 的 overflow-x 能滚，但**看不见的
+ * 滚动**等于「这列不存在」（用户不会去猜右边还有东西）。所以窄列显式压窄，
+ * 工作区列给一个上限并 ellipsis——它是最长又最不精确的那一列。
+ */
+.dsh-sa-hist-table th,
+.dsh-sa-hist-table td { padding: 5px 6px; }
+.dsh-sa-hist-ws { max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
+.dsh-sa-hist-status { white-space: nowrap; }
+.dsh-sa-hist-end { white-space: nowrap; }
+.dsh-sa-hist-tagkind {
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-size: var(--dsw-font-xxxs-11, 11px);
+}
+.dsh-sa-hist-title {
+  display: block;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, inherit);
+  overflow-wrap: anywhere;
+}
+.dsh-sa-hist-row { cursor: pointer; }
+.dsh-sa-hist-row:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.07)); }
+.dsh-sa-hist-row:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: -2px;
+}
+/* 冻结行（归档 / 退休）：降透明度但仍可点开抽屉——抽屉是它们唯一的去处。 */
+.dsh-sa-hist-row-frozen { opacity: .78; }
+.dsh-sa-hist-row[data-selected="true"] {
+  background: var(--dsw-alias-accent-soft, rgba(77,107,254,.12));
+}
+.dsh-sa-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+}
+/* 抽屉：文档流里的一块，宽度随面板收窄。 */
+.dsh-sa-drawer {
+  margin: 10px 16px 16px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
+  border-radius: var(--dsw-radius-md, 10px);
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  overflow: hidden;
+}
+.dsh-sa-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08));
+}
+.dsh-sa-drawer-title { font-weight: 600; font-size: var(--dsw-font-xxs-12, 12px); }
+.dsh-sa-drawer-title2 {
+  padding: 0 0 6px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.dsh-sa-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px 12px;
+}
+.dsh-sa-drawer-block { padding-bottom: 8px; }
+.dsh-sa-drawer-block-title {
+  padding-bottom: 4px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+.dsh-sa-kv {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 6px;
+  padding: 2px 0;
+  font-size: var(--dsw-font-xxs-12, 12px);
+}
+.dsh-sa-kv-label {
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  overflow-wrap: anywhere;
+}
+.dsh-sa-kv-value {
+  color: var(--dsw-alias-label-primary, inherit);
+  overflow-wrap: anywhere;
+}
+/* 生命周期六步：横排、可折行；缺的一步写「没有记录」并降透明度。 */
+.dsh-sa-steps {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0 0 4px;
+  list-style: none;
+}
+.dsh-sa-step {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 84px;
+  padding: 5px 8px;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08));
+}
+.dsh-sa-step-missing { opacity: .55; }
+.dsh-sa-step-label {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-step-value { font-variant-numeric: tabular-nums; }
+.dsh-sa-drawer-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+}
+@media (max-width: 640px) {
+  .dsh-sa-kv { grid-template-columns: 1fr; gap: 1px; }
+}
+@media (max-width: 640px) {
+  .dsh-sa-dist { grid-template-columns: 1fr; }
+  .dsh-sa-trend-row { grid-template-columns: 1fr; gap: 2px; }
+  .dsh-sa-cards { grid-template-columns: 1fr; }
 }
 @keyframes dsh-sa-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
@@ -2259,8 +3502,22 @@ window.__ModuleLoader__.load({
       const pulse = archived ? false : meta.pulse
       const statusText = tr('status.' + task.status)
       const elapsed = elapsedOf(task, props.now, props.fetchedAt)
-      const kind = archived ? null : actionOf(task.status)
+      /*
+       * 归档行什么都不给：它已经在「已归档」里了，再给一个归档按钮没有意义，
+       * 重试也不该出现在历史行上（那会让「冻结只读」看起来还能复活）。
+       */
+      const actions = archived ? NO_ACTIONS : actionOf(task.status)
+      const kind = actions.primary
       const busyKind = props.busy[task.task_id]
+      /*
+       * 续派的两个状态由面板统一持有（与归档的 `archiveAsk` 同一套做法）：
+       * `continueAsk` 是「哪一行正开着输入框」，`continueDraft` 是那一行的草稿。
+       * `TaskCard` 是无 hook 的展示组件，自己存不了草稿——它每次渲染都会重建。
+       */
+      const continueOpen = !archived && Boolean(actions.continue)
+        && props.continueAsk === task.task_id
+      const continueText = continueOpen && typeof props.continueDraft === 'string' ? props.continueDraft : ''
+      const continueBusy = busyKind === 'continue'
       const summary = task.last_report && typeof task.last_report.summary === 'string'
         ? task.last_report.summary
         : ''
@@ -2350,6 +3607,12 @@ window.__ModuleLoader__.load({
        */
       const archivedAria = archived ? tr('archivedHint') : undefined
 
+      /*
+       * 主操作（取消 / 重试）。渲染条件保持原样：只有 `kind` 存在才画。
+       * 归档按钮是**独立**的第二个按钮，见下面的 `archiveAction`：两者可能同时出现
+       * （例如 interrupted 既有「重试」也有「归档」），所以不能再用一个三元式
+       * 决定「这一行有没有按钮」。
+       */
       const action = kind
         ? h(
             'button',
@@ -2372,6 +3635,134 @@ window.__ModuleLoader__.load({
                 : kind === 'cancel'
                   ? tr('cancel')
                   : tr('retryTask'),
+          )
+        : null
+
+      /*
+       * 归档按钮（plans/09 用户反馈：「已经中断的任务应该加取消或者归档按钮，
+       * 要不然只有重试会一直卡着」）。
+       *
+       * 三个关键决定：
+       * - **二次确认**：归档是写操作，会话会被冻成只读（`archivedSessionIds`），
+       *   误触的代价是「一条任务从待办区消失」。第一次点击只进确认态，
+       *   4 秒内没再点自动退回（`confirmArchive` 状态由面板统一管，与工具栏
+       *   「立即归档」共用同一套 4 秒过期逻辑）。
+       * - **走 `/archive-task` 而不是 `/archive`**：后者是**巡检**——不读 body、
+       *   按保留期扫全表、回 `{scanned, archived, failed}`。拿它做单条归档会
+       *   把别的超期任务一起扫走，而用户点的是「这一条」。
+       * - **文案用 `archiveTaskConfirm` 而不是 `archiveConfirm`**：后者是工具栏
+       *   「立即归档」巡检的确认词（「确认归档」），两条路文案要能分清到底在确认
+       *   哪一件事。同一个 `archiveTask` 词干不能复用，否则读屏里也分不出来。
+       */
+      const archiving = busyKind === 'archive'
+      // 确认态由面板统一持有（`archiveAsk` 是「哪一行在等确认」的 task_id），
+      // 一行只认自己的 id，不会出现两行同时点亮。
+      const archiveStage = props.archiveAsk && props.archiveAsk === task.task_id ? 1 : 0
+      const archiveAction = actions.archive
+        ? h(
+            'button',
+            {
+              key: 'archive-action',
+              type: 'button',
+              className: 'dsh-sa-btn'
+                + (archiveStage === 1 ? ' dsh-sa-btn-confirm' : ''),
+              disabled: Boolean(busyKind),
+              title: archiveStage === 1 ? tr('archiveTaskConfirm') : tr('archiveTask'),
+              onClick: function (event) {
+                if (event && event.stopPropagation) event.stopPropagation()
+                props.handlers.act('archive', task)
+              },
+            },
+            archiving ? tr('archiving') : archiveStage === 1 ? tr('archiveTaskConfirm') : tr('archiveTask'),
+          )
+        : null
+
+      /*
+       * 续派按钮 + 行内输入（plans/08 阶段 1）。
+       *
+       * **只出现在已结算行**（判据在 `actionOf` 里，`actions.continue`）。
+       * 点一下展开输入框，填一句要求后按「发过去」——它走的是 `POST /retry` 带
+       * `message`，宿主侧转发给 `dispatch.message()`，**不新建任务**。
+       *
+       * 为什么必须在行里写一句 `continueHint`：续派成功后看板上不会有新行，
+       * 用户唯一能看到的变化是这条任务从「已完成」变回「运行中」。不解释这件事，
+       * 按钮看起来就像「点了没反应」。
+       */
+      const continueAction = actions.continue
+        ? h(
+            'button',
+            {
+              key: 'continue-action',
+              type: 'button',
+              className: 'dsh-sa-btn',
+              disabled: Boolean(busyKind),
+              title: tr('continuePlaceholder'),
+              'data-continue': task.task_id,
+              onClick: function (event) {
+                if (event && event.stopPropagation) event.stopPropagation()
+                props.continueHandlers.toggle(task)
+              },
+            },
+            continueBusy ? tr('continueSending') : tr('continueTask'),
+          )
+        : null
+
+      /** 展开后的输入行：一个文本框 + 发送/取消。 */
+      const continueRow = continueOpen
+        ? h(
+            'div',
+            { key: 'continue-row', className: 'dsh-sa-continue' },
+            h('input', {
+              key: 'input',
+              type: 'text',
+              className: 'dsh-sa-continue-input',
+              placeholder: tr('continuePlaceholder'),
+              value: continueText,
+              disabled: continueBusy,
+              'aria-label': tr('continuePlaceholder'),
+              'data-continue-input': task.task_id,
+              onInput: function (event) {
+                if (event && event.stopPropagation) event.stopPropagation()
+                props.continueHandlers.input(task, event && event.target ? event.target.value : '')
+              },
+              onKeyDown: function (event) {
+                if (!event) return
+                if (event.stopPropagation) event.stopPropagation()
+                if (event.key === 'Enter') props.continueHandlers.submit(task)
+                else if (event.key === 'Escape') props.continueHandlers.toggle(task)
+              },
+            }),
+            h(
+              'button',
+              {
+                key: 'send',
+                type: 'button',
+                className: 'dsh-sa-btn dsh-sa-btn-primary',
+                disabled: continueBusy || !continueText.trim(),
+                'data-continue-send': task.task_id,
+                onClick: function (event) {
+                  if (event && event.stopPropagation) event.stopPropagation()
+                  props.continueHandlers.submit(task)
+                },
+              },
+              continueBusy ? tr('continueSending') : tr('continueSubmit'),
+            ),
+            h(
+              'button',
+              {
+                key: 'dismiss',
+                type: 'button',
+                className: 'dsh-sa-btn',
+                disabled: continueBusy,
+                'data-continue-cancel': task.task_id,
+                onClick: function (event) {
+                  if (event && event.stopPropagation) event.stopPropagation()
+                  props.continueHandlers.toggle(task)
+                },
+              },
+              tr('continueCancel'),
+            ),
+            h('span', { key: 'hint', className: 'dsh-sa-continue-hint' }, tr('continueHint')),
           )
         : null
 
@@ -2464,8 +3855,16 @@ window.__ModuleLoader__.load({
             ? h('span', { key: 'archived-at', className: 'dsh-sa-meta' }, formatRelative(task.archived_at, props.now))
             : null,
           elapsed ? h('span', { key: 'elapsed', className: 'dsh-sa-meta dsh-sa-elapsed' }, elapsed) : null,
+          /*
+           * 三个按钮的次序：主操作 → 续派 → 归档。
+           * 续派排在归档前，因为两者的紧迫程度不同：续派是「还要它接着干」，
+           * 归档是「收走」。把收走夹在中间会让最常用的动作落在最右边。
+           */
           action,
+          continueAction,
+          archiveAction,
         ),
+        continueRow,
         percent > 0
           ? h(
               'div',
@@ -2540,6 +3939,1528 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ───────────────── plans/09 P1：效果 / 拆解 的展示组件 ───────────────── */
+
+    /**
+     * 一张指标卡：标签 + 大号数值 + 可选的「分母 / 样本」小字。
+     *
+     * 第三行的存在是 plans/09 §八.1「每条比例都可追到分子分母」在界面上的落点：
+     * 一个孤零零的 67% 不能被复核，`÷ n=3` 才能让人自己去数。
+     * `tone` 只影响数值颜色，且**同一个数值永远有文字标签**，颜色不是唯一通道（§八.8）。
+     */
+    function EffectCard(props) {
+      const tone = props.tone === 'fail' ? ' dsh-sa-card-fail'
+        : props.tone === 'warn' ? ' dsh-sa-card-warn'
+          : props.tone === 'ok' ? ' dsh-sa-card-ok' : ''
+      return h(
+        'div',
+        { className: 'dsh-sa-card' + tone, 'data-card': props.id || undefined, title: props.hint || undefined },
+        h('span', { className: 'dsh-sa-card-label' }, props.label),
+        h('span', { className: 'dsh-sa-card-value' }, String(props.value)),
+        props.sub ? h('span', { className: 'dsh-sa-card-sub' }, props.sub) : null,
+      )
+    }
+
+    /** 一个卡片分组：标题 + 说明 + 卡片行。 */
+    function CardGroup(props) {
+      return h(
+        'section',
+        { className: 'dsh-sa-cardgroup', 'data-group': props.id || undefined },
+        h(
+          'div',
+          { className: 'dsh-sa-cardgroup-head' },
+          h('span', { className: 'dsh-sa-cardgroup-title' }, props.title),
+          props.hint ? h('span', { className: 'dsh-sa-cardgroup-title' }, props.hint) : null,
+        ),
+        h('div', { className: 'dsh-sa-cards' }, props.children),
+      )
+    }
+
+    /**
+     * 样本口径行（plans/09 §三.4、§八.6）。
+     *
+     * 固定一句话把五件事说完：窗口内结算 / 有效耗时 / 排除归档 / 退休 / 时间未知。
+     * 三个细节不能省：
+     * - `n=0` 显示 `—`：0 会被读成「整整一个窗口什么都没做成」；
+     * - `1≤n<5` 标「样本少」：数值照给，但不能当结论；
+     * - `timeBasis` 是回退基准时必须可见：否则「完成时间」在两次轮询之间会变。
+     */
+    function ScopeLine(props) {
+      const coverage = props.coverage && typeof props.coverage === 'object' ? props.coverage : null
+      const settled = coverage ? num(coverage.settled, 0) : 0
+      const valid = coverage ? num(coverage.validDurations, 0) : 0
+      const archived = coverage ? num(coverage.excludedArchived, 0) : 0
+      const retired = coverage ? num(coverage.excludedRetired, 0) : 0
+      const missing = coverage ? num(coverage.missingTimes, 0) : 0
+      const truncated = coverage && coverage.truncated ? coverage.truncated : null
+      /*
+       * 「样本少」的判据用 settled（结算样本），不是 validDurations：
+       * 一条任务可以结算了但没有 startedAt，于是 settled=3 / valid=1。
+       * 前者决定「比率可不可信」，后者决定「时长分布可不可信」，两个门槛各自成立。
+       * 门槛 5 不在这里编：Host 用 `SAMPLE_LOW_BELOW` 判完，前端只在样本量上复述。
+       */
+      const low = settled > 0 && settled < 5
+      const basis = coverage ? coverage.timeBasis : null
+      const basisKey = basis ? String(basis) : ''
+      /** 计数：n=0 时整行给 em dash，其余如实报数（0 是真的 0 就写 0）。 */
+      const tail = coverage
+        ? fill(tr('scope.tail'), {
+            settled: settled > 0 ? String(settled) : tr('stat.none'),
+            valid: valid > 0 ? String(valid) : tr('stat.none'),
+            archived: String(archived),
+            retired: String(retired),
+            missing: String(missing),
+          })
+        : fill(tr('scope.tail'), {
+            settled: tr('stat.none'), valid: tr('stat.none'), archived: tr('stat.none'),
+            retired: tr('stat.none'), missing: tr('stat.none'),
+          })
+      const windowId = props.windowId || ''
+      return h(
+        'div',
+        { className: 'dsh-sa-scope', role: 'status', 'aria-live': 'polite', 'data-scope': 'true' },
+        h('span', { className: 'dsh-sa-scope-title' }, tr('scope.title')),
+        h('span', { className: 'dsh-sa-scope-window', title: tr('win.fromMemory') }, scopeWindowText(windowId)),
+        h('span', { className: 'dsh-sa-scope-counts' }, tail),
+        low
+          ? h('span', { className: 'dsh-sa-scope-low', title: tr('scope.lowHint') }, tr('scope.lowBadge'))
+          : null,
+        basisKey && basisKey !== 'settledAt'
+          ? h('span', { className: 'dsh-sa-scope-warn', title: tr('scope.basisHint') },
+              fill(tr('scope.timeBasis'), { basis: timeBasisText(basisKey) }))
+          : null,
+        coverage && coverage.fallbackFrom
+          ? h('span', { className: 'dsh-sa-scope-warn' }, fill(tr('scope.fallbackFrom'), { value: String(coverage.fallbackFrom) }))
+          : null,
+        truncated
+          ? h('span', { className: 'dsh-sa-scope-warn', title: tr('scope.truncatedHint') }, tr('scope.truncated'))
+          : null,
+        coverage && num(coverage.sourceTasks, 0) > 0
+          ? h('span', { className: 'dsh-sa-scope-source', title: tr('scope.sourceHint') },
+              fill(tr('scope.source'), { n: num(coverage.sourceTasks, 0) }))
+          : null,
+      )
+    }
+
+    /** 窗口键的人话：24h → 24 小时；7d → 7 天；all → 全部。 */
+    function scopeWindowText(windowId) {
+      if (!windowId || windowId === WINDOW_ALL) return tr('win.all')
+      const match = /^(\d+)([hd])$/i.exec(String(windowId))
+      if (!match) return String(windowId)
+      const amount = Number(match[1])
+      if (match[2].toLowerCase() === 'h') return amount + 'h'
+      return fill(tr('win.days'), { days: amount })
+    }
+
+    /**
+     * 横向条形列表（状态分布 / 退休原因共用）。
+     *
+     * plans/09 §五.3 明确「用横向条形列表，不用九色 donut」：donut 要么用颜色
+     * 单独表意（§八.8 禁止），要么逼人围着圆环逐段比对角度。横向条形的同一行
+     * 里就写着名字、数量和占比，读屏可读、可复制、可点。
+     *
+     * 每行是 `<button>`：键盘可达（§八.8），点一行把该键设为过滤条件（`onPick`）。
+     * 没有 `onPick` 时退化成不可点的 div —— 例如退休原因没有可筛的任务键。
+     */
+    function DistRows(props) {
+      const rows = Array.isArray(props.rows) ? props.rows : []
+      if (!rows.length) return h('div', { className: 'dsh-sa-blank' }, props.empty || tr('stat.none'))
+      const max = rows.reduce(function (peak, row) {
+        return Math.max(peak, num(row.count, 0))
+      }, 0)
+      return h(
+        'div',
+        { className: 'dsh-sa-rows', role: 'list' },
+        rows.map(function (row, index) {
+          const count = num(row.count, 0)
+          // 宽度按「占最大值」而不是「占总数」：小类目在按总数算时全是 1~2%，
+          // 条形退化成一条细线，反而看不出相对大小。
+          const width = max > 0 ? Math.max(2, Math.round((count / max) * 100)) : 0
+          const share = typeof row.share === 'number' && Number.isFinite(row.share) ? Math.round(row.share * 1000) / 10 + '%' : ''
+          const label = props.labelOf ? props.labelOf(row, index) : String(row.name || row.key || '')
+          const body = [
+            h('span', { key: 'name', className: 'dsh-sa-dist-name' }, label),
+            h(
+              'span',
+              { key: 'track', className: 'dsh-sa-dist-track', 'aria-hidden': 'true' },
+              h('span', {
+                className: 'dsh-sa-dist-fill' + (props.toneOf ? ' ' + props.toneOf(row) : ''),
+                style: { width: width + '%', display: 'block' },
+              }),
+            ),
+            h('span', { key: 'value', className: 'dsh-sa-dist-value' }, String(count) + (share ? ' · ' + share : '')),
+          ]
+          const pick = props.onPick
+            ? function () { props.onPick(row) }
+            : undefined
+          if (!pick) {
+            return h('div', { key: 'd' + index, className: 'dsh-sa-dist', role: 'listitem' }, body)
+          }
+          return h(
+            'button',
+            {
+              key: 'd' + index,
+              type: 'button',
+              className: 'dsh-sa-dist',
+              role: 'listitem',
+              title: props.pickHint ? props.pickHint(label) : undefined,
+              onClick: pick,
+            },
+            body,
+          )
+        }),
+      )
+    }
+
+    /** 拆解表的一行：`cells` 里每一项已是文本；`onPick` 存在时整行可点、可键盘触发。 */
+    function DrillRow(props) {
+      const onPick = props.onPick
+      const activate = onPick
+        ? function (event) {
+            if (event) {
+              if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return
+              if (event.preventDefault) event.preventDefault()
+            }
+            onPick()
+          }
+        : undefined
+      return h(
+        'tr',
+        {
+          'data-drill': onPick ? 'true' : undefined,
+          title: props.hint || undefined,
+          tabIndex: onPick ? 0 : undefined,
+          onClick: activate,
+          onKeyDown: activate,
+        },
+        (props.cells || []).map(function (cell, index) {
+          const isName = index === 0
+          return h(
+            isName ? 'th' : 'td',
+            { key: 'c' + index, scope: isName ? 'row' : undefined, className: isName ? 'dsh-sa-table-name' : undefined },
+            cell,
+          )
+        }),
+      )
+    }
+
+    /** 表头一行。 */
+    function DrillHead(props) {
+      return h(
+        'thead',
+        null,
+        h('tr', null, (props.columns || []).map(function (label, index) {
+          return h('th', { key: 'h' + index, scope: 'col' }, label)
+        })),
+      )
+    }
+
+    /** 趋势区的「图表 / 表格」切换（plans/09 §五.2：图表必须有表格等价物）。 */
+    function TrendToggle(props) {
+      const mode = props.mode === 'table' ? 'table' : 'chart'
+      return h(
+        'span',
+        { className: 'dsh-sa-toggle', role: 'group', 'aria-label': tr('trend.modeLabel') },
+        ['chart', 'table'].map(function (id) {
+          return h(
+            'button',
+            {
+              key: id,
+              type: 'button',
+              className: 'dsh-sa-tab',
+              'aria-pressed': mode === id,
+              'aria-selected': mode === id,
+              'data-trend-mode': id,
+              onClick: function () { props.onChange(id) },
+            },
+            id === 'chart' ? tr('trend.chart') : tr('trend.table'),
+          )
+        }),
+      )
+    }
+
+    /**
+     * 趋势区：按天的新派 / 完成 / 失败·阻塞·中断 / 耗时中位数 / 并行节省。
+     *
+     * 两种形态共用**同一份数据**（Host 的 `daily`），切换只改呈现：
+     * - `chart`：每天一行，两根细条形（完成/新派/问题各自一根，各自带文字）；
+     * - `table`：真正的 `<table>`，可整块复制进表格软件核对。
+     *
+     * 「只列真实有事实的日期」是刻意的（plans/09 §五.2 与 §八.6）：
+     * Host 的 `daily` 只为有事实的天产生行；前端补齐空天会把「这天没有任务」
+     * 画成 0，而 0 是可被当成「数据丢失」或「确实零产出」两种读法的假事实。
+     */
+    function TrendBlock(props) {
+      const days = Array.isArray(props.days) ? props.days : []
+      if (!days.length) return h(Blank, { title: tr('trend.empty'), hint: tr('trend.onlyFacts') })
+      const peak = days.reduce(function (top, day) {
+        return Math.max(top, num(day.created, 0), num(day.done, 0), problemsOf(day))
+      }, 0)
+      if (props.mode === 'table') {
+        return h(
+          'div',
+          { className: 'dsh-sa-tablewrap' },
+          h(
+            'table',
+            { className: 'dsh-sa-table dsh-sa-trend-table' },
+            h(DrillHead, {
+              columns: [
+                tr('trend.day'), tr('trend.created'), tr('trend.done'), tr('trend.problems'),
+                tr('trend.median'), tr('trend.saved'),
+              ],
+            }),
+            h('tbody', null, days.map(function (day, index) {
+              return h(
+                'tr',
+                { key: day.day || 'day' + index },
+                h('th', { scope: 'row', className: 'dsh-sa-table-name' }, String(day.day || '')),
+                h('td', null, String(num(day.created, 0))),
+                h('td', null, String(num(day.done, 0))),
+                h('td', null, String(problemsOf(day))),
+                h('td', null, day.medianDuration === null || day.medianDuration === undefined ? tr('stat.none') : durationText(day.medianDuration)),
+                h('td', null, day.saved === null || day.saved === undefined ? tr('stat.none') : durationText(day.saved)),
+              )
+            })),
+          ),
+        )
+      }
+      return h(
+        'div',
+        { className: 'dsh-sa-trend', title: tr('trend.chartHint') },
+        days.map(function (day, index) {
+          const created = num(day.created, 0)
+          const done = num(day.done, 0)
+          const problems = problemsOf(day)
+          const widthOf = function (value) { return peak > 0 ? Math.max(value > 0 ? 2 : 0, Math.round((value / peak) * 100)) : 0 }
+          return h(
+            'div',
+            {
+              key: day.day || 'day' + index,
+              className: 'dsh-sa-trend-row',
+              // 每个点都能读到当天明细（plans/09 §五.2「不要求悬浮才能读数」）：
+              // 文字部分就在同一行，title 只是额外补充。
+              title: fill(tr('trend.detail'), {
+                day: String(day.day || ''),
+                created: created,
+                done: done,
+                problems: problems,
+                median: day.medianDuration === null || day.medianDuration === undefined ? tr('stat.none') : durationText(day.medianDuration),
+                saved: day.saved === null || day.saved === undefined ? tr('stat.none') : durationText(day.saved),
+              }),
+            },
+            h('span', { className: 'dsh-sa-trend-day' }, String(day.day || '')),
+            h(
+              'span',
+              { className: 'dsh-sa-trend-bars', 'aria-hidden': 'true' },
+              h('span', { className: 'dsh-sa-trend-track' },
+                h('span', { className: 'dsh-sa-trend-fill dsh-sa-trend-fill-created', style: { width: widthOf(created) + '%', display: 'block' } })),
+              h('span', { className: 'dsh-sa-trend-track' },
+                h('span', { className: 'dsh-sa-trend-fill dsh-sa-trend-fill-done', style: { width: widthOf(done) + '%', display: 'block' } })),
+              h('span', { className: 'dsh-sa-trend-track' },
+                h('span', { className: 'dsh-sa-trend-fill dsh-sa-trend-fill-problems', style: { width: widthOf(problems) + '%', display: 'block' } })),
+            ),
+            h(
+              'span',
+              { className: 'dsh-sa-trend-text' },
+              tr('trend.created') + ' ' + created + ' · ' + tr('trend.done') + ' ' + done + ' · '
+                + tr('trend.problems') + ' ' + problems + ' · '
+                + tr('trend.median') + ' ' + (day.medianDuration === null || day.medianDuration === undefined ? tr('stat.none') : durationText(day.medianDuration)),
+            ),
+          )
+        }),
+      )
+    }
+
+    /** 一天的「失败·阻塞·中断」合计：三个状态始终分开计数，这里只是图上的一根条。 */
+    function problemsOf(day) {
+      return num(day && day.failed, 0) + num(day && day.blocked, 0) + num(day && day.interrupted, 0)
+    }
+
+    /**
+     * 效果视图（plans/09 §五.2）。
+     *
+     * 布局顺序**固定**为 结果 → 速度 → 稳定 → 趋势 → 并行，不按数据多少重排：
+     * 每次进来都是同一个顺序，人才知道「往下滚一格看速度」。
+     *
+     * 所有数字都来自 `/board/stats`（完整账本聚合），**不拿 200 条快照凑**：
+     * 快照只服务总览列表；用截断的列表算比例，分母从一开始就是错的（§八.2）。
+     */
+    function EffectView(props) {
+      const stats = props.stats
+      const summary = stats && stats.summary && typeof stats.summary === 'object' ? stats.summary : null
+      if (!summary) {
+        // 降级：Host 明确说 summary=null（聚合失败时故意给 null 而不是空对象，
+        // 免得被读成「全是 0」）。这里照抄那个判断，不给假数字。
+        return h(Blank, {
+          title: tr('stats.unavailable'),
+          hint: tr('stats.noSummary'),
+          action: h('button', { type: 'button', className: 'dsh-sa-btn', onClick: props.onRetry }, tr('stats.retry')),
+        })
+      }
+      const outcome = summary.outcome && typeof summary.outcome === 'object' ? summary.outcome : {}
+      const durations = summary.durations && typeof summary.durations === 'object' ? summary.durations : {}
+      const parallel = summary.parallel && typeof summary.parallel === 'object' ? summary.parallel : {}
+      const settled = num(outcome.settled, 0)
+      const completionBase = num(outcome.completionBase, 0)
+      const sampleLow = Boolean(settled > 0 && settled < 5)
+      /**
+       * 「分母 / 样本」这一行。
+       *
+       * 完成率的分母与「已结算」不是同一个数（取消不进分母），所以两个都写出来：
+       * 只写一个会让另一个永远查不到（§八.1「所有比例可追到分子分母」）。
+       */
+      const denomSub = function (part, whole) {
+        return fill(tr('card.denom'), { n: whole }) + (part !== undefined ? ' · ' + String(part) : '')
+      }
+      const sampleSub = function (count) {
+        const base = fill(tr('card.sample'), { n: count })
+        return sampleLow ? base + ' · ' + tr('scope.lowBadge') : base
+      }
+
+      const resultCards = [
+        h(EffectCard, {
+          key: 'done', id: 'done', label: tr('eff.done'), hint: tr('eff.doneHint'),
+          value: countText(outcome.done, settled), tone: 'ok',
+        }),
+        h(EffectCard, {
+          key: 'rate', id: 'rate', label: tr('eff.rate'), hint: tr('eff.rateHint'),
+          value: percentText(outcome.completionRate),
+          // 完成率的分母是 COMPLETION_BASE（不含取消），与「已结算」分开写。
+          sub: fill(tr('card.denom'), { n: completionBase }),
+        }),
+        h(EffectCard, {
+          key: 'first', id: 'first', label: tr('eff.first'), hint: tr('eff.firstHint'),
+          value: percentText(outcome.firstPassRate),
+          sub: fill(tr('card.denom'), { n: num(outcome.firstAttemptCount, 0) }),
+        }),
+        h(EffectCard, {
+          key: 'rework', id: 'rework', label: tr('eff.rework'), hint: tr('eff.reworkHint'),
+          value: percentText(outcome.reworkRate),
+          sub: fill(tr('card.denom'), { n: num(outcome.dispatched, 0) }),
+        }),
+        h(EffectCard, {
+          key: 'throughput', id: 'throughput', label: tr('eff.throughput'), hint: tr('eff.throughputHint'),
+          value: typeof outcome.throughput?.perDay === 'number' && Number.isFinite(outcome.throughput.perDay)
+            ? fill(tr('eff.perDay'), { value: Math.round(outcome.throughput.perDay * 100) / 100 })
+            : tr('stat.none'),
+          sub: outcome.throughput && outcome.throughput.days ? String(outcome.throughput.days) + ' d' : '',
+        }),
+        h(EffectCard, {
+          key: 'saved', id: 'saved', label: tr('eff.saved'), hint: tr('eff.savedHint'),
+          value: parallel.savedMs === null || parallel.savedMs === undefined ? tr('stat.none') : durationText(parallel.savedMs),
+          sub: tr('eff.estimate') + ' · ' + fill(tr('par.sample'), { n: num(parallel.sample, 0) }),
+        }),
+      ]
+
+      /**
+       * 速度卡：三个分布各给 P50/P90。
+       *
+       * P50 看典型、P90 看长尾，**不给平均数**（plans/09 §四 B）：一个 40 分钟的
+       * 任务能把平均拉到完全不像「这一条算不算慢」的基线。`card.p50` / `card.p90`
+       * 是文字标签，不靠位置猜（§八.8 颜色/位置之外要有文字）。
+       */
+      const speedCard = function (id, label, hint, dist) {
+        const p50 = dist && Number.isFinite(dist.p50) ? durationText(dist.p50) : tr('stat.none')
+        const p90 = dist && Number.isFinite(dist.p90) ? durationText(dist.p90) : tr('stat.none')
+        const count = num(dist && dist.count, 0)
+        return h(EffectCard, {
+          key: id,
+          id: id,
+          label: label,
+          hint: hint,
+          value: p50,
+          sub: tr('card.p90') + ' ' + p90 + ' · ' + fill(tr('card.sample'), { n: count })
+            + (dist && dist.sampleLow ? ' · ' + tr('scope.lowBadge') : ''),
+        })
+      }
+      const speedCards = [
+        speedCard('queueWait', tr('speed.queue'), tr('speed.queueHint'), durations.queueWait),
+        speedCard('occupied', tr('speed.occupied'), tr('speed.occupiedHint'), durations.occupied),
+        speedCard('endToEnd', tr('speed.endToEnd'), tr('speed.endToEndHint'), durations.endToEnd),
+      ]
+
+      /*
+       * 稳定卡：失败 / 阻塞 / 中断 / 取消 / 重试后恢复。
+       *
+       * 前三项各自一个卡（plans/09 §四 A：「三项分开，不能用『失败』一个词覆盖」）；
+       * 取消单列且分母是「全部已结算（含取消）」，与完成率的分母不同——
+       * 共用分母等于把「用户改了主意」算成「任务没做成」。
+       */
+      const stableCards = [
+        h(EffectCard, { key: 'failed', id: 'failed', label: tr('status.failed'), value: countText(outcome.failed, settled), sub: percentText(outcome.failureRate), tone: outcome.failed > 0 ? 'fail' : undefined }),
+        h(EffectCard, { key: 'blocked', id: 'blocked', label: tr('status.blocked'), value: countText(outcome.blocked, settled), sub: percentText(outcome.blockRate), tone: outcome.blocked > 0 ? 'warn' : undefined }),
+        h(EffectCard, { key: 'interrupted', id: 'interrupted', label: tr('status.interrupted'), value: countText(outcome.interrupted, settled), sub: percentText(outcome.interruptedRate), tone: outcome.interrupted > 0 ? 'warn' : undefined }),
+        h(EffectCard, {
+          key: 'cancelled', id: 'cancelled', label: tr('status.cancelled'), hint: tr('eff.cancelHint'),
+          value: countText(outcome.cancelled, settled),
+          // 取消率的分母是 settled（含取消本身），显式写出来免得被当成完成率的分母。
+          sub: percentText(outcome.cancelRate) + ' · ' + fill(tr('card.denom'), { n: settled }),
+        }),
+        h(EffectCard, {
+          key: 'recovery', id: 'recovery', label: tr('st.recovery'), hint: tr('st.recoveryHint'),
+          value: percentText(outcome.recoveryRate),
+          sub: fill(tr('card.denom'), { n: num(outcome.retriedCount, 0) }),
+        }),
+      ]
+
+      /*
+       * 并行区：占用总和 / 墙钟跨度 / 并行节省 / 并行倍数。
+       *
+       * 四个数一起给，是因为「节省」单独看没有意义：占用总和 4 小时、墙钟 2 小时
+       * 才说明省了 2 小时；只给一个 2 小时读者无法复核。`estimated` 恒真，
+       * 所以「估算」这个词是常驻标签而不是条件渲染——它不是工时结算。
+       */
+      const parallelCards = [
+        h(EffectCard, { key: 'p-occupied', id: 'occupied-total', label: tr('par.occupied'), hint: tr('par.occupiedHint'), value: parallel.occupiedMs === null || parallel.occupiedMs === undefined ? tr('stat.none') : durationText(parallel.occupiedMs) }),
+        h(EffectCard, { key: 'p-wall', id: 'wall', label: tr('par.wall'), hint: tr('par.wallHint'), value: parallel.wallMs === null || parallel.wallMs === undefined ? tr('stat.none') : durationText(parallel.wallMs) }),
+        h(EffectCard, { key: 'p-saved', id: 'saved-total', label: tr('eff.saved'), hint: tr('eff.savedHint'), value: parallel.savedMs === null || parallel.savedMs === undefined ? tr('stat.none') : durationText(parallel.savedMs), sub: tr('eff.estimate') }),
+        h(EffectCard, { key: 'p-factor', id: 'factor', label: tr('par.factor'), hint: tr('par.factorHint'), value: factorText(parallel.factor), sub: tr('eff.estimate') }),
+      ]
+      /*
+       * 「为什么这个数字更粗」：Host 把原因放在 `parallel.reasons` 里（都是可核对的事实，
+       * 不是形容词）。原样翻成一句人话，不合并成一个「不太准」的形容词。
+       */
+      const reasonList = Array.isArray(parallel.reasons) ? parallel.reasons : []
+      const reasonsText = reasonList.length
+        ? fill(tr('par.reasons'), {
+            list: reasonList.map(function (reason) {
+              const key = 'par.reason.' + reason
+              const text = tr(key)
+              // tr() 缺键时原样返回键名：这里把机器键露出来也好过编一个「未知」。
+              return text === key ? String(reason) : text
+            }).join(' · '),
+          })
+        : ''
+
+      return h(
+        'div',
+        { className: 'dsh-sa-view', 'data-view': 'effect' },
+        h(CardGroup, {
+          id: 'result', title: tr('eff.result'), hint: sampleLow ? tr('scope.lowBadge') : '',
+        }, resultCards),
+        h(CardGroup, { id: 'speed', title: tr('eff.speed'), hint: '' }, speedCards),
+        h(CardGroup, { id: 'stable', title: tr('eff.stable'), hint: tr('eff.stableHint') }, stableCards),
+        h(
+          'section',
+          { className: 'dsh-sa-cardgroup', 'data-group': 'trend' },
+          h(
+            'div',
+            { className: 'dsh-sa-cardgroup-head' },
+            h('span', { className: 'dsh-sa-cardgroup-title' }, tr('eff.trend')),
+            h('span', { className: 'dsh-sa-grow' }),
+            h(TrendToggle, { mode: props.trendMode, onChange: props.onTrendMode }),
+          ),
+          h(TrendBlock, { days: stats && Array.isArray(stats.daily) ? stats.daily : [], mode: props.trendMode }),
+        ),
+        h(CardGroup, { id: 'parallel', title: tr('eff.parallel'), hint: tr('eff.estimate') }, parallelCards),
+        reasonsText ? h('div', { className: 'dsh-sa-dim' }, h('span', { className: 'dsh-sa-dim-note' }, reasonsText)) : null,
+      )
+    }
+
+    /**
+     * 拆解视图（plans/09 §五.3）。
+     *
+     * 四张表/条：工作区（可切两个维度）、批次、主会话、状态与退休原因横向条形。
+     * 表头必须写明当前口径：**派发目标 `workspace_id`** 与 **实际归属
+     * `host_workspace_id`** 是两件事，混用会让「这个工作区为什么 0 完成」
+     * 得到两种互相矛盾的答案（§三.3、§八.4）。
+     */
+    function BreakdownView(props) {
+      const stats = props.stats
+      const groups = stats && stats.groups && typeof stats.groups === 'object' ? stats.groups : null
+      if (!groups) {
+        return h(Blank, {
+          title: tr('stats.unavailable'),
+          hint: tr('stats.noSummary'),
+          action: h('button', { type: 'button', className: 'dsh-sa-btn', onClick: props.onRetry }, tr('stats.retry')),
+        })
+      }
+      const workspaces = groups.workspaces && typeof groups.workspaces === 'object' ? groups.workspaces : {}
+      const dimension = workspaces.dimension && typeof workspaces.dimension === 'object' ? workspaces.dimension : null
+      const rowsOf = function (kind) {
+        if (kind === 'host') return Array.isArray(workspaces.byHost) ? workspaces.byHost : []
+        return Array.isArray(workspaces.byTarget) ? workspaces.byTarget : []
+      }
+      const dim = props.dimension === 'host' ? 'host' : 'target'
+      const wsRows = rowsOf(dim)
+      const batches = Array.isArray(groups.batches) ? groups.batches : []
+      const sessions = Array.isArray(groups.parentSessions) ? groups.parentSessions : []
+      const statuses = Array.isArray(groups.statuses) ? groups.statuses : []
+      const retired = Array.isArray(groups.retiredReasons) ? groups.retiredReasons : []
+      /*
+       * 口径文字**从 Host 给的字段名拼**（`workspace_id` / `host_workspace_id`），
+       * 不在前端抄一份：字段改名时这里会跟着变，抄一份的结果是表头永远落后一拍。
+       */
+      const dimField = dimension
+        ? (dim === 'host' ? dimension.host : dimension.target)
+        : (dim === 'host' ? 'host_workspace_id' : 'workspace_id')
+      const dimLabel = dim === 'host' ? tr('br.dimHost') : tr('br.dimTarget')
+
+      /** 三张表共用的行：名字列 + 数字列，整行可点下钻。 */
+      const table = function (key, columns, rows, build, kind) {
+        if (!rows.length) {
+          return h(Blank, { title: tr('br.empty'), hint: tr('br.emptyHint') })
+        }
+        return h(
+          'div',
+          { className: 'dsh-sa-tablewrap' },
+          h(
+            'table',
+            { className: 'dsh-sa-table', 'data-table': key },
+            h(DrillHead, { columns: columns }),
+            h('tbody', null, rows.map(function (row, index) {
+              const cells = build(row)
+              const drill = drillOf(kind, row)
+              return h(DrillRow, {
+                key: (row.workspaceId || row.hostWorkspaceId || row.group || row.parentSessionId || 'r') + index,
+                cells: cells,
+                hint: drill ? fill(tr('br.rowHint'), { name: drill.name }) : undefined,
+                onPick: drill && props.onDrill ? function () { props.onDrill(drill) } : undefined,
+              })
+            })),
+          ),
+        )
+      }
+
+      const rateCell = function (rate, denominator) {
+        return percentText(rate) + (denominator !== undefined ? ' / n=' + denominator : '')
+      }
+
+      const workspaceTable = h(
+        'section',
+        { className: 'dsh-sa-cardgroup', 'data-group': 'workspaces' },
+        h(
+          'div',
+          { className: 'dsh-sa-cardgroup-head' },
+          h('span', { className: 'dsh-sa-cardgroup-title' }, tr('br.workspaces')),
+          h('span', { className: 'dsh-sa-grow' }),
+          h(
+            'span',
+            { className: 'dsh-sa-toggle', role: 'group', 'aria-label': tr('br.workspaces') },
+            [
+              { id: 'target', label: tr('br.dimTarget'), hint: tr('br.dimTargetHint') },
+              { id: 'host', label: tr('br.dimHost'), hint: tr('br.dimHostHint') },
+            ].map(function (item) {
+              return h(
+                'button',
+                {
+                  key: item.id,
+                  type: 'button',
+                  className: 'dsh-sa-tab',
+                  'aria-pressed': dim === item.id,
+                  'aria-selected': dim === item.id,
+                  'data-dim': item.id,
+                  title: item.hint,
+                  onClick: function () { props.onDimension(item.id) },
+                },
+                item.label,
+              )
+            }),
+          ),
+        ),
+        // 表头写明当前口径：两个工作区维度不混用（§三.3），这一行就是那条断言的界面证据。
+        h('div', { className: 'dsh-sa-dim' },
+          h('span', { className: 'dsh-sa-dim-note' }, fill(tr('br.dimNote'), { label: dimLabel, field: dimField }))),
+        table(
+          'workspaces',
+          [
+            tr('br.col.name'), tr('br.col.running'), tr('br.col.queued'), tr('br.col.done'),
+            tr('br.col.rate'), tr('br.col.median'), tr('br.col.failed'), tr('br.col.blocked'),
+            tr('br.col.saved'), tr('br.col.last'),
+          ],
+          wsRows,
+          function (row) {
+            return [
+              row.title || row.workspaceId || row.hostWorkspaceId || tr('br.noName'),
+              String(num(row.running, 0)),
+              String(num(row.queued, 0)),
+              countText(row.done, num(row.settled, 0)),
+              rateCell(row.completionRate, num(row.settled, 0)),
+              row.medianOccupiedMs === null || row.medianOccupiedMs === undefined ? tr('stat.none') : durationText(row.medianOccupiedMs),
+              String(num(row.failed, 0)),
+              String(num(row.blocked, 0)),
+              row.savedMs === null || row.savedMs === undefined ? tr('stat.none') : durationText(row.savedMs),
+              row.lastActivityAt ? formatRelative(row.lastActivityAt, props.now) : tr('stat.none'),
+            ]
+          },
+          'workspace',
+        ),
+      )
+
+      const batchTable = h(
+        'section',
+        { className: 'dsh-sa-cardgroup', 'data-group': 'batches' },
+        h('div', { className: 'dsh-sa-cardgroup-head' },
+          h('span', { className: 'dsh-sa-cardgroup-title' }, tr('br.batches')),
+          h('span', { className: 'dsh-sa-cardgroup-title' }, tr('br.wallHint'))),
+        table(
+          'batches',
+          [
+            tr('br.col.batch'), tr('br.col.progress'), tr('br.col.running'), tr('br.col.pending'),
+            tr('br.col.wall'), tr('br.col.saved'), tr('br.col.last'),
+          ],
+          batches,
+          function (row) {
+            const total = num(row.total, num(row.dispatched, 0))
+            const done = num(row.done, 0)
+            // 待处理 = 失败 + 阻塞 + 中断，与总览「需要你处理」同一口径（§八.1）。
+            const pending = num(row.failed, 0) + num(row.blocked, 0) + num(row.interrupted, 0)
+            return [
+              row.group || tr('br.noName'),
+              done + '/' + total,
+              String(num(row.running, 0)),
+              String(pending),
+              row.wallClockMs === null || row.wallClockMs === undefined ? tr('stat.none') : durationText(row.wallClockMs),
+              row.savedMs === null || row.savedMs === undefined ? tr('stat.none') : durationText(row.savedMs),
+              row.lastActivityAt ? formatRelative(row.lastActivityAt, props.now) : tr('stat.none'),
+            ]
+          },
+          'batch',
+        ),
+      )
+
+      const sessionTable = h(
+        'section',
+        { className: 'dsh-sa-cardgroup', 'data-group': 'sessions' },
+        h('div', { className: 'dsh-sa-cardgroup-head' },
+          h('span', { className: 'dsh-sa-cardgroup-title' }, tr('br.sessions'))),
+        table(
+          'sessions',
+          [
+            tr('br.col.session'), tr('br.col.dispatched'), tr('br.col.running'), tr('br.col.done'),
+            tr('br.col.rate'), tr('br.col.failedCount'), tr('br.col.last'),
+          ],
+          sessions,
+          function (row) {
+            return [
+              row.parentSessionId || tr('br.noName'),
+              String(num(row.dispatched, 0)),
+              String(num(row.running, 0)),
+              countText(row.done, num(row.settled, 0)),
+              rateCell(row.completionRate, num(row.settled, 0)),
+              String(num(row.failed, 0)),
+              row.lastActivityAt ? formatRelative(row.lastActivityAt, props.now) : tr('stat.none'),
+            ]
+          },
+          'parent',
+        ),
+      )
+
+      /*
+       * 状态与退休原因：横向条形列表，**不用九色 donut**（§五.3）。
+       *
+       * 状态条可点（下钻到该状态），退休原因条不可点：退休留痕没有可回查的任务行，
+       * 点开只会得到一个空列表——那比不可点更糟。
+       */
+      const statusRows = statuses.map(function (row) {
+        return { status: row.status, count: num(row.count, 0), share: row.share }
+      })
+      const retiredRows = retired.map(function (row) {
+        return { reason: row.reason, count: num(row.count, 0) }
+      })
+      const distribution = h(
+        'section',
+        { className: 'dsh-sa-cardgroup', 'data-group': 'distribution' },
+        h('div', { className: 'dsh-sa-cardgroup-head' },
+          h('span', { className: 'dsh-sa-cardgroup-title' }, tr('br.distribution'))),
+        h('div', { className: 'dsh-sa-subhead' }, tr('br.statusTitle')),
+        h(DistRows, {
+          rows: statusRows,
+          empty: tr('br.statusEmpty'),
+          labelOf: function (row) { return tr('status.' + row.status) },
+          toneOf: function (row) {
+            if (row.status === 'done') return 'dsh-sa-dist-fill-ok'
+            if (row.status === 'failed') return 'dsh-sa-dist-fill-fail'
+            if (row.status === 'blocked' || row.status === 'interrupted') return 'dsh-sa-dist-fill-warn'
+            return ''
+          },
+          pickHint: function (label) { return fill(tr('br.rowHint'), { name: label }) },
+          onPick: props.onDrill
+            ? function (row) {
+                const drill = drillOf('status', row)
+                if (drill) props.onDrill(drill)
+              }
+            : undefined,
+        }),
+        h('div', { className: 'dsh-sa-subhead' }, tr('br.retiredTitle')),
+        h('div', { className: 'dsh-sa-dim' }, h('span', { className: 'dsh-sa-dim-note' }, tr('br.retiredHint'))),
+        h(DistRows, {
+          rows: retiredRows,
+          empty: tr('br.retiredEmpty'),
+          labelOf: function (row) {
+            const known = { 'cap-count': 'retired.reason.cap-count', 'cap-days': 'retired.reason.cap-days' }
+            return known[row.reason] ? tr(known[row.reason]) : String(row.reason || tr('retired.reason.none'))
+          },
+        }),
+      )
+
+      const empty = !wsRows.length && !batches.length && !sessions.length && !statuses.length && !retiredRows.length
+      return h(
+        'div',
+        { className: 'dsh-sa-view', 'data-view': 'breakdown' },
+        empty ? h(Blank, { title: tr('br.empty'), hint: tr('br.emptyHint') }) : [
+          workspaceTable, batchTable, sessionTable, distribution,
+        ],
+      )
+    }
+
+    /* ───────────────────── 历史视图与任务详情抽屉（plans/09 §五.4 · P2） ───────────────────── */
+
+    /**
+     * 一页多少条历史。
+     *
+     * §五.4 要求「表格替代无限长卡片列表，超过 50 条分页或分段加载」：50 条正好
+     * 是「滚一屏能读完」与「翻页不频繁」的折中。/board 快照本身最多 200 条
+     * （`MAX_TASKS`），所以最坏也就 4 页，不需要做虚拟滚动那一套。
+     */
+    const HISTORY_PAGE_SIZE = 50
+
+    /** 历史子视图：全部 / 已归档 / 已退休（与 §五.4 的三个子视图逐字对应）。 */
+    const HISTORY_TABS = [
+      { id: 'all', labelKey: 'hist.sub.all' },
+      { id: 'archived', labelKey: 'hist.sub.archived' },
+      { id: 'retired', labelKey: 'hist.sub.retired' },
+    ]
+
+    /**
+     * 历史排序键。
+     *
+     * 顺序就是 §五.4 写的「创建 / 结算 / 耗时 / 状态」；`status` 的标签复用状态筛选
+     * 那一个键（同一个词，不新造文案），所以这里只列四个 id。
+     */
+    const HISTORY_SORTS = [
+      { id: 'created', labelKey: 'hist.sort.created' },
+      { id: 'settled', labelKey: 'hist.sort.settled' },
+      { id: 'elapsed', labelKey: 'hist.sort.elapsed' },
+      { id: 'status', labelKey: 'hist.status' },
+    ]
+
+    /** 解析快照里的 ISO 时间戳；解析不出来一律 NaN（=「没有记录」），绝不当成 0。 */
+    function timeAt(stamp) {
+      const at = typeof stamp === 'string' ? Date.parse(stamp) : NaN
+      return Number.isFinite(at) ? at : NaN
+    }
+
+    /**
+     * 把两种数据源归一成一行历史记录。
+     *
+     * 为什么要归一：活表与归档任务来自 `/board` 快照（`boardTask()` 的 snake_case
+     * 投影），退休留痕来自 `/board/retired`（`retiredEntry()`）。两者字段不同，
+     * 直接混进一个数组排序时，「退休行没有 created_at」会被 `|| 0` 变成
+     * 「1970 年创建」，于是退休记录永远排在最后 —— 而用户刚想找的恰恰是它。
+     *
+     * 归一之后**缺字段仍然是 null**，由渲染层写「没有记录」，
+     * 不用一个能参与比较的假时间去填空。
+     */
+    function historyRowOf(source, kind) {
+      const record = source && typeof source === 'object' ? source : {}
+      const retired = kind === 'retired'
+      return {
+        kind: retired ? 'retired' : 'task',
+        task_id: typeof record.task_id === 'string' ? record.task_id : '',
+        title: typeof record.title === 'string' ? record.title : '',
+        status: typeof record.status === 'string' ? record.status : '',
+        created_at: retired ? null : (record.created_at || null),
+        started_at: retired ? null : (record.started_at || null),
+        settled_at: retired ? null : (record.settled_at || null),
+        time_basis: retired ? null : (record.time_basis || null),
+        /*
+         * 退休留痕没有结算时刻，它只有「被移出账本」的那一刻（§三.2 的 retiredAt）。
+         * 这里另起字段而不是塞进 settled_at：把退休写成结算，等于断言它「做完了」。
+         */
+        retired_at: retired ? (record.retired_at || null) : null,
+        retired_reason: retired ? (record.retired_reason || null) : null,
+        archived_at: record.archived_at || null,
+        frozen_at: record.frozen_at || null,
+        elapsed_ms: retired ? null : num(record.elapsed_ms, null),
+        attempt: num(record.attempt, 1),
+        group: typeof record.group === 'string' ? record.group : '',
+        workspace_id: record.workspace_id || null,
+        workspace_title: record.workspace_title || null,
+        host_workspace_id: record.host_workspace_id || null,
+        host_workspace_title: record.host_workspace_title || null,
+        worker_session_id: record.worker_session_id || null,
+        report_count: num(record.report_count, 0),
+        last_report: record.last_report && typeof record.last_report === 'object' ? record.last_report : null,
+        last_text_preview: typeof record.last_text_preview === 'string' ? record.last_text_preview : '',
+        background: record.background && typeof record.background === 'object' ? record.background : null,
+        background_killed: record.background_killed || null,
+        input_pending_at: record.input_pending_at || null,
+        input_read_at: record.input_read_at || null,
+        input_unknown_at: record.input_unknown_at || null,
+        error: typeof record.error === 'string' ? record.error : '',
+        archive_error: typeof record.archive_error === 'string' ? record.archive_error : '',
+        cwd: typeof record.cwd === 'string' ? record.cwd : '',
+        task_dir: typeof record.task_dir === 'string' ? record.task_dir : '',
+        prepare_at: record.prepare_at || null,
+        // 退休留痕只剩最后一条摘要：账本封顶的目的就是让写放大有上界。
+        summary: retired && typeof record.summary === 'string' ? record.summary : '',
+      }
+    }
+
+    /**
+     * 这一行「结束」在哪一刻：已结算任务取 `settled_at`，退休留痕取 `retired_at`。
+     *
+     * 两个都解析不出来就返回 NaN —— 排序时排到末尾，而不是冒充
+     * 「很久以前结束的」，那会让「最老的记录」这一列全是时间未知的行。
+     */
+    function historyEndAt(row) {
+      const settled = timeAt(row && row.settled_at)
+      if (Number.isFinite(settled)) return settled
+      return timeAt(row && row.retired_at)
+    }
+
+    /**
+     * 搜索：task_id、标题、worker_session_id、工作区（§五.4 列的四个字段）。
+     *
+     * 工作区**两个维度都算命中**：用户记得的是「派到 A」还是「实际挂在 B」，
+     * 在搜索框里是同一个念头；只搜一个维度会让另一个维度上的记忆搜不到自己那行。
+     * 大小写不敏感，空查询恒真（= 不筛）。
+     */
+    function historyMatches(row, query) {
+      const needle = String(query == null ? '' : query).trim().toLowerCase()
+      if (!needle) return true
+      const haystack = [
+        row.task_id, row.title, row.worker_session_id,
+        row.workspace_id, row.workspace_title, row.host_workspace_id, row.host_workspace_title,
+      ].filter(function (value) { return typeof value === 'string' && value })
+        .join('\n')
+        .toLowerCase()
+      return haystack.indexOf(needle) >= 0
+    }
+
+    /**
+     * 历史视图的筛选（与搜索取交集）。
+     *
+     * `since` 是一个**时刻**而不是窗口键：窗口键由调用方用既有的 `windowDaysOf()`
+     * 换算，这里不重新定义「7 天」是多少毫秒。
+     *
+     * 退休留痕没有 createdAt，时间筛选改用 `retired_at`：否则「最近 7 天」里永远
+     * 看不到它们，而刚被退休的那批正是用户最想问「它去哪了」的。
+     * 两边时间都未知的行**不因为「不知道」被丢掉**——留在列表里让读者自己看到
+     * 「没有记录」，比静默消失在筛选里诚实（§八.6）。
+     */
+    function filterHistoryRows(rows, filters) {
+      const state = filters || {}
+      const since = typeof state.since === 'number' && Number.isFinite(state.since) ? state.since : NaN
+      return rows.filter(function (row) {
+        if (state.status && row.status !== state.status) return false
+        if (state.workspace && row.workspace_id !== state.workspace) return false
+        if (state.retried && num(row.attempt, 1) <= 1) return false
+        if (state.background && !row.background) return false
+        if (Number.isFinite(since)) {
+          const created = timeAt(row.created_at)
+          const basis = Number.isFinite(created) ? created : timeAt(row.retired_at)
+          if (Number.isFinite(basis) && basis < since) return false
+        }
+        return true
+      })
+    }
+
+    /**
+     * 排序。
+     *
+     * 四个键都**先比「有没有这个时间／数」**再比值：把缺字段当成 0 会让这些行
+     * 固定钉在一端，看起来像「有一批 1970 年的任务」。NaN 一律排到末尾，
+     * 同值时按 task_id 倒序，保证同一份快照每次渲染顺序一致（不然 2 秒轮询会
+     * 让行在视觉上跳来跳去）。
+     */
+    function sortHistoryRows(rows, key) {
+      const ordered = rows.slice()
+      if (key === 'status') {
+        // 状态序沿用 STATUS_META 的展示序（running → queued → …），不在这里再抄一份。
+        const rank = Object.keys(STATUS_META)
+        ordered.sort(function (a, b) {
+          const left = rank.indexOf(a.status)
+          const right = rank.indexOf(b.status)
+          // 认不出的状态排最后，而不是当成第 0 个（那会让未知状态排最前）。
+          return (left < 0 ? rank.length : left) - (right < 0 ? rank.length : right)
+            || String(b.task_id).localeCompare(String(a.task_id))
+        })
+        return ordered
+      }
+      const valueOf = function (row) {
+        if (key === 'settled') return historyEndAt(row)
+        if (key === 'elapsed') return num(row.elapsed_ms, NaN)
+        return timeAt(row.created_at)
+      }
+      ordered.sort(function (a, b) {
+        const left = valueOf(a)
+        const right = valueOf(b)
+        const leftKnown = Number.isFinite(left)
+        const rightKnown = Number.isFinite(right)
+        if (leftKnown && rightKnown) return right - left
+        if (leftKnown) return -1
+        if (rightKnown) return 1
+        return String(b.task_id).localeCompare(String(a.task_id))
+      })
+      return ordered
+    }
+
+    /** 「没有记录」的统一写法：`n=0` 与「字段不存在」都不能靠 em dash 偷偷混过去。 */
+    function stampText(stamp, now) {
+      const at = timeAt(stamp)
+      if (!Number.isFinite(at)) return tr('drawer.noTime')
+      return formatRelative(stamp, now)
+    }
+
+    /**
+     * 历史表格里的一行。
+     *
+     * 行本身可点 = 打开**详情抽屉**（不是打开子会话）：本视图要回答的是
+     * 「这条任务发生了什么」，跳走会打断比较。打开子会话的入口在抽屉里，
+     * 且只在真的有活会话时出现（§五.4「退休行不假装能打开子会话」）。
+     */
+    function HistoryRow(props) {
+      const row = props.row
+      const statusMeta = STATUS_META[row.status] || STATUS_FALLBACK
+      const archived = Boolean(row.archived_at)
+      const retired = row.kind === 'retired'
+      const tags = []
+      if (retired) tags.push(h('span', { key: 'retired', className: 'dsh-sa-tag dsh-sa-tag-retired' }, tr('filter.retired')))
+      if (archived) tags.push(h('span', { key: 'archived', className: 'dsh-sa-tag dsh-sa-tag-archived' }, tr('archivedTag')))
+      if (row.group) tags.push(h('span', { key: 'group', className: 'dsh-sa-tag dsh-sa-tag-group' }, tr('groupTag')))
+      if (num(row.attempt, 1) > 1) {
+        tags.push(h('span', { key: 'attempt', className: 'dsh-sa-tag' }, tr('attemptPrefix') + num(row.attempt, 1) + tr('attemptSuffix')))
+      }
+      if (row.background) {
+        tags.push(h('span', { key: 'bg', className: 'dsh-sa-tag dsh-sa-tag-bg', title: tr('backgroundHint') }, tr('backgroundTag')))
+      }
+      /*
+       * 「待读」与「未读未知」互斥，判据照抄 TaskCard（宿主侧已互斥，这里再加一道）：
+       * 两个矛盾状态同时画出来，比只画错一个更糟。
+       */
+      const unread = Boolean(row.input_pending_at) && !row.input_read_at && !row.input_unknown_at
+      const unknownRead = Boolean(row.input_unknown_at) && !row.input_read_at
+      if (unread) tags.push(h('span', { key: 'unread', className: 'dsh-sa-tag dsh-sa-tag-unread', title: tr('unreadHint') }, tr('unreadTag')))
+      if (unknownRead) {
+        tags.push(h('span', { key: 'unknown', className: 'dsh-sa-tag dsh-sa-tag-unknown', title: tr('unknownReadHint') }, tr('unknownReadTag')))
+      }
+
+      const activate = function (event) {
+        if (event) {
+          if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return
+          if (event.preventDefault) event.preventDefault()
+        }
+        props.onSelect(row)
+      }
+
+      /*
+       * 「结束」一列而不是「结算 / 退休」两列。
+       *
+       * 一条记录只有一个结束方式：已结算任务结束于 `settled_at`，退休留痕结束于
+       * `retired_at`，还没结束的行（running/queued）两个都是空。拆成两列会让每一行
+       * 永远有一半是 `—`，而表格宽度在面板里很紧张（真机预览里第六列被裁掉过）。
+       * 内含的**标签**区分来源（「结算」/「退休」），不靠位置猜（§八.8）。
+       */
+      const endCell = function (row) {
+        if (row.kind === 'retired') {
+          // 退休原因的完整人话放在格子的 title 上：面板宽度不够时，一列里塞
+          // 「时间 + 原因」会把整张表挤到需要横向滚动，而 hover 随时能读到。
+          return h('span', null, [
+            h('span', { key: 'k', className: 'dsh-sa-hist-tagkind' }, tr('drawer.st.retired')),
+            ' ' + stampText(row.retired_at, props.now),
+          ])
+        }
+        if (row.settled_at) {
+          return h('span', null, [
+            h('span', { key: 'k', className: 'dsh-sa-hist-tagkind' }, tr('drawer.st.settled')),
+            ' ' + stampText(row.settled_at, props.now),
+          ])
+        }
+        // 还没结算：写「没有记录」，不拿创建时刻冒充结束时刻（§八.6 不装全量）。
+        return tr('stat.none')
+      }
+      /** 「结束」那一格的 title：退休写原因、结算写时间基准，其余为空（不编提示）。 */
+      const endTitle = function (row) {
+        if (row.kind === 'retired') return retiredReasonText(row.retired_reason)
+        if (row.settled_at && row.time_basis === 'updatedAt-fallback') return timeBasisText(row.time_basis)
+        return undefined
+      }
+
+      const retiredText = retired
+        ? fill(tr('retired.ago'), { when: stampText(row.retired_at, props.now) }) + ' · ' + retiredReasonText(row.retired_reason)
+        : tr('stat.none')
+
+      return h(
+        'tr',
+        {
+          className: 'dsh-sa-hist-row' + (archived || retired ? ' dsh-sa-hist-row-frozen' : ''),
+          'data-history-row': row.task_id,
+          'data-kind': row.kind,
+          'data-status': row.status,
+          'data-selected': props.selected ? 'true' : undefined,
+          'aria-selected': props.selected ? true : undefined,
+          tabIndex: 0,
+          title: tr('drawer.title') + '\n' + row.task_id,
+          onClick: activate,
+          onKeyDown: activate,
+        },
+        h(
+          'th',
+          { scope: 'row', className: 'dsh-sa-table-name' },
+          h('span', { className: 'dsh-sa-hist-title' }, row.title || tr('noTitle')),
+          tags,
+          h('code', { className: 'dsh-sa-id' }, row.task_id),
+          // 退休行唯一的操作是复制 id：它没有可打开的子会话（§五.4）。
+          retired
+            ? h('button', {
+                type: 'button',
+                className: 'dsh-sa-btn',
+                'data-history-copy': row.task_id,
+                title: tr('retired.copyHint') + '：' + row.task_id,
+                onClick: function (event) {
+                  if (event && event.stopPropagation) event.stopPropagation()
+                  props.onCopy(row)
+                },
+              }, tr('retired.action'))
+            : null,
+        ),
+        h(
+          'td',
+          { className: 'dsh-sa-hist-status' },
+          h('span', { className: 'dsh-sa-dot', style: { color: archived || retired ? 'var(--dsw-alias-label-tertiary, #8b8b8b)' : statusMeta.color }, 'aria-hidden': 'true' }),
+          ' ',
+          tr('status.' + row.status),
+        ),
+        h('td', { className: 'dsh-sa-hist-ws', title: [row.workspace_title || '', row.host_workspace_title || row.host_workspace_id || ''].filter(Boolean).join('\n') },
+          workspaceTitleOf(row)),
+        h('td', null, stampText(row.created_at, props.now)),
+        h('td', { className: 'dsh-sa-hist-end', title: endTitle(row) }, endCell(row)),
+        h('td', null, row.elapsed_ms === null || row.elapsed_ms === undefined ? tr('stat.none') : durationText(row.elapsed_ms)),
+      )
+    }
+
+    /**
+     * 任务详情抽屉（plans/09 §五.4 的七块）。
+     *
+     * 数据全部来自**已经拿到的快照／留痕**，没有任何一次额外请求：
+     * 抽屉要能在一帧内打开，而且浏览器半边拿不到 `dispatch_inspect` 工具。
+     * 快照里没有的字段（完整简报、完整报告正文、更早的报告）在这里**明说**
+     * 「请用 dispatch_inspect <id>」，绝不拿最后一条摘要冒充完整正文（§八.9）。
+     */
+    function TaskDrawer(props) {
+      const row = props.row
+      const now = props.now
+      const retired = row.kind === 'retired'
+      const archived = Boolean(row.archived_at)
+      /** 一块详情：标题 + 若干 label/value 行。`data-drawer-block` 给断言用。 */
+      const block = function (id, title, children) {
+        return h(
+          'section',
+          { className: 'dsh-sa-drawer-block', 'data-drawer-block': id, key: id },
+          h('div', { className: 'dsh-sa-drawer-block-title' }, title),
+          children,
+        )
+      }
+      const kv = function (key, label, value, hint) {
+        return h(
+          'div',
+          { className: 'dsh-sa-kv', key: key, title: hint || undefined },
+          h('span', { className: 'dsh-sa-kv-label' }, label),
+          h('span', { className: 'dsh-sa-kv-value' }, value),
+        )
+      }
+      /** 有值就显示值，没值显示「没有记录」——不是空白，也不是 em dash 一笔带过。 */
+      const valueOr = function (value, fallback) {
+        if (value === null || value === undefined || value === '') return fallback || tr('drawer.noTime')
+        return String(value)
+      }
+
+      /*
+       * 生命周期五步（§五.4「创建 → 开始 → 报告 → 结算 → 归档/退休」）。
+       * 每一步单独渲染、缺的一步写「没有记录」：用户要能一眼看出「它根本没开始」，
+       * 而不是在一行挤在一起的时间戳里自己推算。
+       */
+      const steps = [
+        { id: 'created', label: tr('drawer.st.created'), at: row.created_at },
+        { id: 'started', label: tr('drawer.st.started'), at: row.started_at },
+        { id: 'reported', label: tr('drawer.st.reported'), at: row.last_report ? row.last_report.at : null },
+        { id: 'settled', label: tr('drawer.st.settled'), at: row.settled_at },
+        { id: 'archived', label: tr('drawer.st.archived'), at: row.archived_at || row.frozen_at },
+        { id: 'retired', label: tr('drawer.st.retired'), at: row.retired_at },
+      ]
+      const lifecycle = h(
+        'ol',
+        { className: 'dsh-sa-steps' },
+        steps.map(function (step) {
+          const known = Number.isFinite(timeAt(step.at))
+          return h(
+            'li',
+            {
+              key: step.id,
+              className: 'dsh-sa-step' + (known ? '' : ' dsh-sa-step-missing'),
+              'data-step': step.id,
+              'data-step-known': known ? 'true' : 'false',
+            },
+            h('span', { className: 'dsh-sa-step-label' }, step.label),
+            h('span', { className: 'dsh-sa-step-value' }, known ? stampText(step.at, now) : tr('drawer.noTime')),
+          )
+        }),
+      )
+
+      const briefId = row.task_id
+      const scopeBlock = block('scope', tr('drawer.scope'), [
+        kv('brief', tr('drawer.brief'), fill(tr('drawer.briefMissing'), { id: briefId }), fill(tr('drawer.briefMissing'), { id: briefId })),
+        kv('cwd', tr('drawer.cwd'), valueOr(row.cwd, tr('workspaceFallback'))),
+        kv('dir', tr('drawer.taskDir'), valueOr(row.task_dir)),
+        kv(
+          'target',
+          tr('drawer.target'),
+          row.workspace_title || row.workspace_id || tr('workspaceFallback'),
+          row.workspace_id || '',
+        ),
+        kv(
+          'host',
+          tr('br.dimHost'),
+          row.host_workspace_title || row.host_workspace_id || tr('workspaceFallback'),
+          row.host_workspace_id || '',
+        ),
+      ])
+
+      const lastReport = row.last_report
+      const reportLines = []
+      reportLines.push(kv('count', tr('drawer.reportCount'), String(num(row.report_count, 0))))
+      if (lastReport) {
+        const bits = [lastReport.at ? stampText(lastReport.at, now) : tr('drawer.noTime')]
+        if (lastReport.status) bits.push(tr('status.' + lastReport.status))
+        if (lastReport.summary) bits.push(firstLine(lastReport.summary))
+        reportLines.push(kv('last', tr('drawer.lastReport'), bits.filter(Boolean).join(' · '), lastReport.summary || ''))
+      } else {
+        reportLines.push(kv('last', tr('drawer.lastReport'), tr('drawer.noTime')))
+      }
+      const outputText = row.last_text_preview
+        || (retired && row.summary ? row.summary : '')
+      reportLines.push(kv(
+        'output',
+        tr('drawer.lastOutput'),
+        outputText ? firstLine(outputText) : tr('drawer.noTime'),
+        outputText,
+      ))
+      const reportsBlock = block('reports', tr('drawer.reports'), reportLines)
+
+      const faultLines = [
+        kv('attempt', tr('drawer.attempt'), String(num(row.attempt, 1))),
+        kv('retry', tr('drawer.retryAt'), row.last_report && row.last_report.status === 'retried' ? stampText(row.last_report.at, now) : tr('drawer.noTime')),
+        kv('error', tr('drawer.error'), valueOr(row.error, tr('stat.none'))),
+        kv('archiveError', tr('drawer.archiveError'), valueOr(row.archive_error, tr('stat.none'))),
+        kv('frozen', tr('drawer.frozenAt'), row.frozen_at ? stampText(row.frozen_at, now) : tr('drawer.noTime')),
+      ]
+      const faultsBlock = block('faults', tr('drawer.faults'), faultLines)
+
+      let deliveryText = tr('drawer.inputNone')
+      if (row.input_read_at) deliveryText = tr('drawer.inputRead') + ' · ' + stampText(row.input_read_at, now)
+      else if (row.input_pending_at) deliveryText = tr('drawer.inputPending') + ' · ' + stampText(row.input_pending_at, now)
+      else if (row.input_unknown_at) deliveryText = tr('unknownReadTag') + ' · ' + stampText(row.input_unknown_at, now)
+      const deliveryBlock = block('delivery', tr('drawer.delivery'), [
+        kv('delivery', tr('drawer.delivery'), deliveryText, tr('unreadHint')),
+      ])
+
+      const backgroundLines = []
+      if (row.background) {
+        /*
+         * 三行都写「数量」与「起点」这一个事实，标签不复述块标题：
+         * 块标题已经写了「后台 job / subagent」，行标签再写一遍就是同一句话说两次。
+         */
+        backgroundLines.push(kv('jobs', tr('drawer.backgroundJobs'), String(num(row.background.jobs, 0))))
+        backgroundLines.push(kv('subagents', tr('drawer.backgroundSubagents'), String(num(row.background.subagents, 0))))
+        backgroundLines.push(kv(
+          'since',
+          tr('drawer.backgroundSinceLabel'),
+          row.background.since ? stampText(row.background.since, now) : tr('drawer.noTime'),
+        ))
+      } else {
+        backgroundLines.push(kv('none', tr('drawer.backgroundState'), tr('drawer.backgroundNone')))
+      }
+      if (row.background_killed) {
+        backgroundLines.push(kv('killed', tr('drawer.backgroundKilled'), stampText(row.background_killed, now)))
+      }
+      const backgroundBlock = block('background', tr('drawer.background'), backgroundLines)
+
+      const prepareBlock = block('prepare', tr('drawer.prepare'), [
+        kv(
+          'prepareAt',
+          tr('drawer.prepareAtNoWhen'),
+          row.prepare_at ? stampText(row.prepare_at, now) : tr('drawer.prepareNone'),
+        ),
+        kv('prepareDir', tr('drawer.taskDir'), valueOr(row.task_dir)),
+      ])
+
+      /*
+       * 打开子会话：只有「有 worker_session_id、没归档、不是退休留痕」时才给按钮。
+       * 三个条件缺一不可——归档会话会被宿主清成空白主视图（见 TaskCard 那段注释），
+       * 退休留痕则连会话都不在了。其余情况只给复制 id，并说明为什么。
+       */
+      const canOpen = Boolean(row.worker_session_id) && !archived && !retired
+      const footer = h(
+        'div',
+        { className: 'dsh-sa-drawer-foot' },
+        canOpen
+          ? h('button', {
+              type: 'button',
+              className: 'dsh-sa-btn dsh-sa-btn-primary',
+              'data-drawer-open': row.task_id,
+              onClick: function () { props.onOpen(row) },
+            }, tr('drawer.openSession'))
+          : h('button', {
+              type: 'button',
+              className: 'dsh-sa-btn',
+              'data-drawer-copy': row.task_id,
+              onClick: function () { props.onCopy(row) },
+            }, tr('retired.action')),
+        canOpen ? null : h('span', { className: 'dsh-sa-dim-note' }, tr('drawer.noSessionHint')),
+        retired ? h('span', { className: 'dsh-sa-dim-note', 'data-drawer-retired-note': 'true' }, tr('drawer.retiredNote')) : null,
+      )
+
+      return h(
+        'aside',
+        {
+          className: 'dsh-sa-drawer',
+          role: 'complementary',
+          'aria-label': tr('drawer.title'),
+          'data-drawer': row.task_id,
+          'data-drawer-kind': row.kind,
+        },
+        h(
+          'div',
+          { className: 'dsh-sa-drawer-head' },
+          h('span', { className: 'dsh-sa-drawer-title' }, tr('drawer.title')),
+          h('code', { className: 'dsh-sa-id' }, row.task_id),
+          h('span', { className: 'dsh-sa-grow' }),
+          h('button', {
+            type: 'button',
+            className: 'dsh-sa-btn',
+            'data-drawer-close': 'true',
+            onClick: function () { props.onClose() },
+          }, tr('drawer.close')),
+        ),
+        h('div', { className: 'dsh-sa-drawer-body' }, [
+          h('div', { className: 'dsh-sa-drawer-title2' }, row.title || tr('noTitle')),
+          block('lifecycle', tr('drawer.lifecycle'), lifecycle),
+          scopeBlock,
+          reportsBlock,
+          faultsBlock,
+          deliveryBlock,
+          backgroundBlock,
+          prepareBlock,
+          h('div', { className: 'dsh-sa-dim' },
+            h('span', { className: 'dsh-sa-dim-note' }, fill(tr('drawer.fullTextHint'), { id: row.task_id }))),
+          footer,
+        ]),
+      )
+    }
+
+    /**
+     * 历史视图（plans/09 §五.4）。
+     *
+     * 布局固定为 **子视图 → 搜索与筛选 → 排序 → 表格 → 分页**，不按数据多少重排：
+     * 每次进来都是同一个顺序，用户才知道往下滚能看到什么。
+     *
+     * 数据来源是 `/board` 快照（活表 + 已归档）与 `/board/retired`（退休留痕），
+     * **不依赖 `/board/stats`**：统计挂了历史照样能用（§八.10 的降级要求）。
+     */
+    function HistoryView(props) {
+      const rows = Array.isArray(props.rows) ? props.rows : []
+      const total = num(props.total, 0)
+      const page = num(props.page, 0)
+      const pages = Math.max(1, num(props.pages, 1))
+      const from = total > 0 ? page * HISTORY_PAGE_SIZE + 1 : 0
+      const to = Math.min(total, (page + 1) * HISTORY_PAGE_SIZE)
+
+      const subTabs = h(
+        'div',
+        { className: 'dsh-sa-tabs', role: 'tablist', 'aria-label': tr('hist.subLabel') },
+        HISTORY_TABS.map(function (item) {
+          return h('button', {
+            key: item.id,
+            type: 'button',
+            role: 'tab',
+            className: 'dsh-sa-tab',
+            'aria-selected': props.sub === item.id,
+            'data-hist-sub': item.id,
+            title: tr('hist.subHint'),
+            onClick: function () { props.onSub(item.id) },
+          }, tr(item.labelKey))
+        }),
+      )
+
+      const select = function (key, label, value, onChange, options, title) {
+        return h(
+          'label',
+          { className: 'dsh-sa-hist-field', key: key, title: title || label },
+          h('span', { className: 'dsh-sa-hist-field-label' }, label),
+          h(
+            'select',
+            {
+              className: 'dsh-sa-select',
+              'data-hist-field': key,
+              value: value,
+              onChange: function (event) {
+                onChange(event && event.target ? event.target.value : '')
+              },
+            },
+            options,
+          ),
+        )
+      }
+
+      const statusOptions = [h('option', { key: '__all', value: '' }, tr('hist.statusAll'))]
+        // 状态选项直接来自 STATUS_META 的键：那是客户端唯一一份状态表，
+        // 不在这里抄第三份（抄的那份迟早与状态点/文案不同步）。
+        .concat(Object.keys(STATUS_META).map(function (status) {
+          return h('option', { key: status, value: status }, tr('status.' + status))
+        }))
+
+      const workspaceOptions = [h('option', { key: '__all', value: '' }, tr('workspaceAll'))]
+        .concat((Array.isArray(props.workspaces) ? props.workspaces : []).map(function (item) {
+          return h('option', { key: item.id, value: item.id }, item.title || item.id)
+        }))
+
+      const timeOptions = WINDOW_PRESETS.map(function (preset) {
+        return h('option', { key: preset.id, value: preset.id }, windowChipLabel(preset))
+      })
+
+      const sortOptions = HISTORY_SORTS.map(function (item) {
+        return h('option', { key: item.id, value: item.id }, tr(item.labelKey))
+      })
+
+      const toggle = function (key, label, pressed, onToggle, hint) {
+        return h(
+          'button',
+          {
+            key: key,
+            type: 'button',
+            className: 'dsh-sa-chip',
+            'aria-pressed': pressed,
+            'data-hist-toggle': key,
+            title: hint || label,
+            onClick: function () { onToggle(!pressed) },
+          },
+          label,
+        )
+      }
+
+      const bar = h(
+        'div',
+        { className: 'dsh-sa-histbar' },
+        h(
+          'label',
+          { className: 'dsh-sa-hist-field dsh-sa-hist-search', title: tr('hist.searchHint') },
+          h('span', { className: 'dsh-sa-hist-field-label' }, tr('hist.search')),
+          h('input', {
+            type: 'search',
+            className: 'dsh-sa-input',
+            'data-hist-search': 'true',
+            placeholder: tr('hist.searchHint'),
+            value: props.query,
+            onChange: function (event) {
+              props.onQuery(event && event.target ? event.target.value : '')
+            },
+          }),
+        ),
+        select('status', tr('hist.status'), props.status, props.onStatus, statusOptions),
+        select('workspace', tr('hist.workspace'), props.workspaceId, props.onWorkspace, workspaceOptions),
+        select('time', tr('hist.time'), props.timeKey, props.onTime, timeOptions, tr('hist.timeHint')),
+        select('sort', tr('hist.sort'), props.sort, props.onSort, sortOptions),
+        toggle('retried', tr('hist.retried'), props.retried, props.onRetried),
+        toggle('background', tr('hist.background'), props.background, props.onBackground),
+        h('span', { className: 'dsh-sa-grow' }),
+        h('button', {
+          type: 'button',
+          className: 'dsh-sa-btn',
+          'data-hist-clear': 'true',
+          onClick: function () { props.onClear() },
+        }, tr('hist.clear')),
+      )
+
+      const notes = []
+      if (props.truncated) {
+        notes.push(h(
+          'div',
+          { key: 'cap', className: 'dsh-sa-strip dsh-sa-strip-warn', role: 'status', 'aria-live': 'polite' },
+          h('span', { className: 'dsh-sa-strip-text', title: fill(tr('hist.cap'), { shown: num(props.truncated.shown, 0), total: num(props.truncated.total, 0) }) },
+            fill(tr('hist.cap'), { shown: num(props.truncated.shown, 0), total: num(props.truncated.total, 0) })),
+        ))
+      }
+      if (props.dropped > 0) {
+        notes.push(h(
+          'div',
+          { key: 'dropped', className: 'dsh-sa-strip dsh-sa-strip-warn', role: 'status', 'aria-live': 'polite' },
+          h('span', { className: 'dsh-sa-strip-text' }, fill(tr('retired.dropped'), { n: props.dropped })),
+        ))
+      }
+
+      const table = rows.length
+        ? h(
+            'div',
+            { className: 'dsh-sa-tablewrap' },
+            h(
+              'table',
+              { className: 'dsh-sa-table dsh-sa-hist-table', 'data-table': 'history' },
+              h(DrillHead, {
+                columns: [
+                  tr('hist.col.task'), tr('hist.col.status'), tr('hist.col.workspace'), tr('hist.col.created'),
+                  tr('hist.col.end'), tr('hist.col.elapsed'),
+                ],
+              }),
+              h('tbody', null, rows.map(function (row) {
+                return h(HistoryRow, {
+                  key: row.kind + ':' + row.task_id,
+                  row: row,
+                  now: props.now,
+                  selected: Boolean(props.selected) && props.selected.task_id === row.task_id && props.selected.kind === row.kind,
+                  onSelect: props.onSelect,
+                  onCopy: props.onCopy,
+                })
+              })),
+            ),
+          )
+        : h(Blank, { title: tr('hist.empty'), hint: props.emptyHint || tr('hist.subHint') })
+
+      const pager = h(
+        'div',
+        { className: 'dsh-sa-pager' },
+        h('span', { className: 'dsh-sa-meta', 'data-hist-range': 'true' },
+          fill(tr('hist.page'), { from: from, to: to, n: total })),
+        h('span', { className: 'dsh-sa-grow' }),
+        h('span', { className: 'dsh-sa-meta' }, fill(tr('hist.total'), { n: total, total: num(props.rawTotal, total) })),
+        h('button', {
+          type: 'button',
+          className: 'dsh-sa-btn',
+          'data-hist-page': 'prev',
+          disabled: page <= 0,
+          onClick: function () { props.onPage(Math.max(0, page - 1)) },
+        }, tr('hist.prev')),
+        h('button', {
+          type: 'button',
+          className: 'dsh-sa-btn',
+          'data-hist-page': 'next',
+          disabled: page >= pages - 1,
+          onClick: function () { props.onPage(Math.min(pages - 1, page + 1)) },
+        }, tr('hist.next')),
+      )
+
+      return h(
+        'div',
+        { className: 'dsh-sa-view dsh-sa-hist', 'data-view': 'history', 'data-hist-view': props.sub },
+        subTabs,
+        bar,
+        h('div', { className: 'dsh-sa-dim' }, h('span', { className: 'dsh-sa-dim-note' }, tr('hist.notOpenable'))),
+        notes,
+        table,
+        pager,
+        props.drawerRow
+          ? h(TaskDrawer, {
+              row: props.drawerRow,
+              now: props.now,
+              onClose: props.onCloseDrawer,
+              onCopy: props.onCopy,
+              onOpen: props.onOpen,
+            })
+          : null,
+      )
+    }
+
     function BoardPanel() {
       const [snapshot, setSnapshot] = useState(null)
       const [fetchedAt, setFetchedAt] = useState(0)
@@ -2558,10 +5479,85 @@ window.__ModuleLoader__.load({
       const [archiveStage, setArchiveStage] = useState(0)
       const [archiving, setArchiving] = useState(false)
       /**
+       * 行内归档的两步确认：存的是「正在等确认的 task_id」。
+       *
+       * 与工具栏的 `archiveStage` 分开：工具栏确认的是**巡检**（`/archive`，
+       * 会扫全表），行内确认的是**单条**（`/archive-task`）。共用一个状态槽会
+       * 让「刚点了工具栏确认」把某一行也点亮成确认态，反过来也一样。
+       * 4 秒过期由下面那条 effect 统一处理。
+       */
+      const [archiveAsk, setArchiveAsk] = useState('')
+      /*
+       * 续派的行内状态（plans/08 阶段 1），与 `archiveAsk` 同构：
+       * `continueAsk` 是「哪一行开着输入框」（task_id），`continueDraft` 是那一行的草稿。
+       *
+       * 为什么不把草稿存在 `TaskCard` 里：它是无 hook 的展示组件（每 2 秒轮询都会
+       * 重建一次），存在组件内部的草稿会在第一次轮询后消失——用户写了一半的话
+       * 被系统吞掉，比写错更让人不敢用。
+       */
+      const [continueAsk, setContinueAsk] = useState('')
+      const [continueDraft, setContinueDraft] = useState('')
+      /**
        * 退休视图的数据：{ state: 'idle'|'loading'|'ok'|'fail', data, error }。
        * 与快照分开持有：它只在选中「已退休」时才取，取失败也只影响这一个视图。
        */
       const [retired, setRetired] = useState({ state: 'idle', data: null, error: '' })
+      /**
+       * 当前视图：总览 / 效果 / 拆解 / 历史（plans/09 §二）。
+       *
+       * 默认 `overview` 而不是「上次看的视图」：总览是操作首页，一进来就该看到
+       * 「现在要我做什么」。记住上次视图会让一个停在「拆解」的看板在下次打开时
+       * 把需要处理的任务藏起来。
+       */
+      const [view, setView] = useState('overview')
+      /*
+       * ── plans/09 P2：历史视图的视图内状态 ──
+       *
+       * 全部与 `view` 分开持有：历史是「停下来查证据」的视图，它的搜索词与分页
+       * 不该跟着 2 秒轮询被重置。`histPage` 在筛选条件变化时要归零（否则会停在
+       * 一个已经不存在的页码上看到空表），归零由下面那处 setter 统一做。
+       */
+      const [histSub, setHistSub] = useState('all')
+      const [histQuery, setHistQuery] = useState('')
+      const [histStatus, setHistStatus] = useState('')
+      const [histWorkspace, setHistWorkspace] = useState('')
+      const [histTime, setHistTime] = useState('all')
+      const [histSort, setHistSort] = useState('created')
+      const [histRetried, setHistRetried] = useState(false)
+      const [histBackground, setHistBackground] = useState(false)
+      const [histPage, setHistPage] = useState(0)
+      /**
+       * 抽屉里那一行：`{ kind, task_id }` 只记身份，不存整行快照。
+       *
+       * 存整行的话，2 秒轮询把任务从 running 变成 done 之后，抽屉仍然显示旧的
+       * 状态与旧的生命周期——「详情」与账本不一致，正是 §八.9 要防的事。
+       * 每次渲染按身份去当前数据里重新找一遍，找不到（退休记录被清理）就自动关闭。
+       */
+      const [drawerKey, setDrawerKey] = useState(null)
+      /**
+       * 窗口键。`null` 表示「还没定」——真正的默认值要等快照里的 memory.window 到手
+       * 才能确定（plans/09 §三.1：默认沿用 memory.window，不是前端另造默认）。
+       * 一旦用户点过 chip，`windowPicked` 就为 true，之后不再被 memory 覆盖。
+       */
+      const [windowKey, setWindowKey] = useState(null)
+      const windowPicked = useRef(false)
+      /** 拆解页的工作区维度：'target'（派发目标）或 'host'（实际归属）。 */
+      const [dimension, setDimension] = useState('target')
+      /** 趋势区形态：'chart' | 'table'（plans/09 §五.2 图表/表格双形态）。 */
+      const [trendMode, setTrendMode] = useState('chart')
+      /**
+       * 下钻筛选：`{ kind, value, name }`，kind ∈ workspaceId | hostWorkspaceId |
+       * group | parentSessionId | status。**与顶部 `workspace` 下拉是同一件事的两种入口**：
+       * 点工作区行时两者一起写，否则会出现「下拉说我筛了 A、提示条说我筛了 B」。
+       */
+      const [drill, setDrill] = useState(null)
+      /**
+       * `/board/stats` 的数据：`{ state: 'idle'|'loading'|'ok'|'fail', data, error }`。
+       *
+       * 与快照**分开持有**（plans/09 §八.10）：stats 挂了必须让总览照常工作。
+       * `state==='fail'` 只影响效果/拆解两个视图，绝不白屏。
+       */
+      const [statsState, setStatsState] = useState({ state: 'idle', data: null, error: '' })
 
       /** 面板内所有写操作的 AbortController，卸载时统一中止。 */
       const inFlight = useRef(null)
@@ -2669,9 +5665,14 @@ window.__ModuleLoader__.load({
        * 与 2 秒轮询解耦：退休记录一旦生成就不再变化（它描述的是"已经消失"这件事），
        * 跟着快照每 2 秒拉一次纯属浪费，也会让视图在手滑时闪。
        * 依赖 generation：用户点重试 / 归档后再进来能拿到新数据。
+       *
+       * plans/09 P2：历史视图的「已退休」子视图**复用同一份数据**（`retired`），
+       * 不另开一条取数路径与一份缓存——两条路径迟早对同一条留痕给出不同的
+       * 「退休时刻」，而那张表格的存在意义就是「时间能对上」。
        */
+      const retiredNeeded = filter === 'retired' || (view === 'history' && histSub === 'retired')
       useEffect(function () {
-        if (filter !== 'retired') return undefined
+        if (!retiredNeeded) return undefined
         let disposed = false
         const controller = new AbortController()
         setRetired(function (current) {
@@ -2691,7 +5692,7 @@ window.__ModuleLoader__.load({
           disposed = true
           controller.abort()
         }
-      }, [filter, generation])
+      }, [retiredNeeded, generation])
 
       useEffect(function () {
         if (!hasRunning) return undefined
@@ -2707,6 +5708,13 @@ window.__ModuleLoader__.load({
         return function () { clearTimeout(id) }
       }, [archiveStage])
 
+      /* 行内归档同样 4 秒过期：与工具栏确认态同一条规则，手感一致。 */
+      useEffect(function () {
+        if (!archiveAsk) return undefined
+        const id = setTimeout(function () { setArchiveAsk('') }, 4000)
+        return function () { clearTimeout(id) }
+      }, [archiveAsk])
+
       /** 带中止控制的 POST，控制器统一登记，卸载时一并 abort。 */
       const post = useCallback(function (path, body) {
         const controller = new AbortController()
@@ -2716,17 +5724,119 @@ window.__ModuleLoader__.load({
         })
       }, [])
 
-      /* 写操作：取消 / 重试。成功后立刻重新取一次快照。 */
+      /* 写操作：取消 / 重试 / 单条归档 / 续派。成功后立刻重新取一次快照。 */
       const act = useCallback(function (kind, task) {
         if (!task || !task.task_id) return
         if (busy[task.task_id]) return
+        /*
+         * 归档走**两步确认**，而且这一步不占用 `busy`：
+         * 第一次点击只是把这一行点进确认态（不产生请求），4 秒内再点才真发。
+         * 把它塞进 `busy` 会让按钮在还没发请求时就变成「归档中…」并禁用，
+         * 用户既看不到确认提示，也点不了第二次——等于确认态永远走不完。
+         */
+        if (kind === 'archive') {
+          if (archiveAsk !== task.task_id) {
+            setArchiveAsk(task.task_id)
+            return
+          }
+          setArchiveAsk('')
+        }
         setBusy(function (value) {
           const next = Object.assign({}, value)
           next[task.task_id] = kind
           return next
         })
-        post(kind === 'cancel' ? '/cancel' : '/retry', { task_id: task.task_id })
+        /*
+         * 路由分发：归档是**独立路由**，不能塞进下面这个三元式。
+         * `/archive` 是巡检（不读 body、扫全表），拿它做单条归档会连带扫走
+         * 别的超期任务；`/archive-task` 才认 `task_id`。
+         */
+        const path = kind === 'archive'
+          ? '/archive-task'
+          : kind === 'cancel' ? '/cancel' : '/retry'
+        post(path, { task_id: task.task_id })
+          .then(function (result) {
+            if (kind === 'archive') {
+              /*
+               * 决策 B 的界面口径：宿主可能「归档成功但子会话没归档成功」
+               * （会话随重启消失、或启动就失败）。这时任务确实已经离开待办区，
+               * 所以不是错误提示，而是**警告**：明说归档了、也明说原因。
+               * 不能只说「已归档」——那是在替宿主把失败藏起来。
+               */
+              const reason = result && typeof result.reason === 'string' ? result.reason : ''
+              setNotice(reason
+                ? { tone: 'warn', text: fill(tr('archiveTaskKept'), { reason: reason }) }
+                : { tone: 'info', text: tr('archiveTaskDone') })
+            } else {
+              setNotice(null)
+            }
+            refresh()
+          })
+          .catch(function (error) {
+            if (error && error.name === 'AbortError') return
+            setNotice({ tone: 'error', text: tr('actionFailed') + '：' + describeError(error) })
+          })
+          .finally(function () {
+            setBusy(function (value) {
+              if (!(task.task_id in value)) return value
+              const next = Object.assign({}, value)
+              delete next[task.task_id]
+              return next
+            })
+          })
+      }, [archiveAsk, busy, post, refresh])
+
+      /*
+       * 续派（plans/08 阶段 1）：展开/收起输入框。
+       *
+       * 打开第二行时把第一行收起来，并且**清掉草稿**：草稿是「针对某一条任务的一句话」，
+       * 换一条行还留着它，很容易把给 A 的要求发给 B——这种错误的后果不是提示条，
+       * 而是一条真实的任务被塞进无关的上下文。
+       */
+      const continueToggle = useCallback(function (task) {
+        if (!task || !task.task_id) return
+        if (busy[task.task_id]) return
+        // 先算再写：两个 setter 各自只做纯赋值。**不要**在一个 setter 的更新函数里
+        // 调另一个 setter——React 要求更新函数是纯函数，嵌套写状态在并发渲染下
+        // 可能被重放/丢弃，草稿与「哪一行打开」就会不一致。
+        const same = continueAsk === task.task_id
+        setContinueDraft('')
+        setContinueAsk(same ? '' : task.task_id)
+      }, [busy, continueAsk])
+
+      /** 输入框每次变化都回写面板（`TaskCard` 是无 hook 的展示组件，自己存不了草稿）。 */
+      const continueInput = useCallback(function (task, value) {
+        if (!task || !task.task_id) return
+        // 输入框只在「这一行就是打开的那一行」时才渲染，所以这里不需要再比对
+        // `continueAsk`——比对也不会更安全（那是渲染期的事实，不是写入期的判据）。
+        setContinueDraft(String(value ?? ''))
+      }, [])
+
+      /**
+       * 提交续派：`POST /retry` + `message`。
+       *
+       * 为什么复用 `/retry` 而不是新路由：宿主侧就是这样设计的（见 `src/board.js`
+       * 里 `/retry` 分支的注释）——「往这条任务的子会话投一条消息」是同一条通道，
+       * 重试只是用了它的一种默认文本。多一条路由等于多一套准入与错误码。
+       *
+       * 成功后：清掉草稿、收起输入框、刷新快照。**不**弹成功提示条：
+       * 任务状态已经从「已完成」变回「运行中」，那本身就是结果；再叠一条提示
+       * 只是噪音。失败则必须弹（用户写的那句话还在框里，不能悄悄吞掉）。
+       */
+      const continueSubmit = useCallback(function (task) {
+        if (!task || !task.task_id) return
+        const text = String(continueAsk === task.task_id ? continueDraft : '').trim()
+        if (!text) return
+        if (busy[task.task_id]) return
+        setBusy(function (value) {
+          const next = Object.assign({}, value)
+          next[task.task_id] = 'continue'
+          return next
+        })
+        post('/retry', { task_id: task.task_id, message: text })
           .then(function () {
+            setContinueAsk('')
+            setContinueDraft('')
             setNotice(null)
             refresh()
           })
@@ -2742,7 +5852,7 @@ window.__ModuleLoader__.load({
               return next
             })
           })
-      }, [busy, post, refresh])
+      }, [busy, continueAsk, continueDraft, post, refresh])
 
       /**
        * 点行打开子会话。openSession 可能抛 not-listed（子会话已不在会话目录里），
@@ -2826,6 +5936,22 @@ window.__ModuleLoader__.load({
       }, [act, openWorker])
 
       /**
+       * 续派的三个口子**单独一组**，不塞进 `handlers`。
+       *
+       * `handlers` 的形状 `{act, open}` 是既有契约（离线冒烟里有一条断言直接比对
+       * 键集合）。往它里面加键，会让那条断言从「守住形状」变成「追着实现改」——
+       * 而形状本身仍有价值：`act` 与 `open` 是**每一行都有**的两个动作，
+       * 续派只有已结算行才有，混在一起会让「这一行有什么动作」更难看清。
+       */
+      const continueHandlers = useMemo(function () {
+        return {
+          toggle: continueToggle,
+          input: continueInput,
+          submit: continueSubmit,
+        }
+      }, [continueToggle, continueInput, continueSubmit])
+
+      /**
        * 复制退休记录的 task_id。
        *
        * 为什么不给退休行做「点开子会话」：子会话已经归档/可能已不在会话目录里，
@@ -2867,9 +5993,19 @@ window.__ModuleLoader__.load({
       const failedNow = num(counts.failed, 0)
 
       // 工作区筛选与状态 chip 取交集；之后的「效果」数字也只看这个范围。
-      const scopedTasks = workspace
-        ? allTasks.filter(function (task) { return task.workspace_id === workspace })
-        : allTasks
+      // 下钻（`drill`）按下钻类型追加条件：工作区行 → workspace_id/host_workspace_id，
+      // 批次行 → group，主会话行 → parent_session_id，状态条 → status。
+      // 总览的「已筛选 ×」提示条就是在复述这一份判据，所以它必须只有一处。
+      const scopedTasks = allTasks.filter(function (task) {
+        if (workspace && task.workspace_id !== workspace) return false
+        if (!drill) return true
+        if (drill.kind === 'workspaceId') return task.workspace_id === drill.value
+        if (drill.kind === 'hostWorkspaceId') return task.host_workspace_id === drill.value
+        if (drill.kind === 'group') return task.group === drill.value
+        if (drill.kind === 'parentSessionId') return task.parent_session_id === drill.value
+        if (drill.kind === 'status') return task.status === drill.value
+        return true
+      })
       const currentFilter = FILTERS.filter(function (item) { return item.id === filter })[0] || FILTERS[0]
 
       // 记忆治理：窗口口径与退休数都来自快照的 memory 块（plans/07 P0-1 / P0-5）。
@@ -2879,6 +6015,66 @@ window.__ModuleLoader__.load({
       const retiredDropped = memory && memory.ledger && Number.isFinite(memory.ledger.retiredDropped)
         ? Math.max(0, memory.ledger.retiredDropped)
         : 0
+      /*
+       * 窗口键的落定时机（plans/09 §三.1 默认沿用 memory.window）：
+       * - 用户点过 chip（`windowPicked`）→ 一直用用户选的，**不再**被 memory 覆盖；
+       * - 没点过 → 跟随 memory.window 算出来的键；memory 还没到手就退回 '7d'。
+       * 这段是渲染期派生而不是 effect：effect 里 setState 会多一次提交，
+       * 而「窗口」必须在**这一帧**就确定，否则首帧会按 7d 取一次 stats 再按 30d 重取。
+       */
+      const effectiveWindow = windowKey || defaultWindowKey(memory)
+
+      /**
+       * 取 `/board/stats`（plans/09 P1）。
+       *
+       * 为什么这个 effect 放在派生值之后：请求要带的是**已经落定的窗口**
+       * （`effectiveWindow`），它要等快照里的 memory 到手才算得出来。放在其他
+       * effect 旁边就得把「memory → 窗口」这段派生再抄一遍，抄的那份迟早与
+       * 渲染用的这份不一致——那正是「同一个数字在两个视图里不一样」的来源。
+       * hook 的顺序仍然无条件且固定（它在渲染体的同一位置），不违反 hook 规则。
+       *
+       * 三条设计决定：
+       * 1. **只在效果/拆解视图才取**：总览不需要全量聚合，跟着 2 秒轮询拉它纯属浪费，
+       *    而且 stats 挂了也不该影响总览（§八.10）。
+       * 2. **依赖窗口 / 维度 / 下钻 / 工作区**：换任何一个都必须重取，否则新视图会拿
+       *    旧窗口的数字算比例——那正是「同一个 86% 悄悄漂移」。
+       * 3. **失败只记在 statsState 里**，不 setNotice、不自动重试：宿主进程还跑着旧
+       *    代码时 `/board/stats` 会稳定 404，每 2 秒弹一次错误条等于把看板变成一条
+       *    消不掉的报错。用户点「重试统计」才重取（`generation` 一变就重来）。
+       */
+      useEffect(function () {
+        if (view !== 'effect' && view !== 'breakdown') return undefined
+        let disposed = false
+        const controller = new AbortController()
+        // 保留旧数据只切 loading：视图不会闪成空白，滚动位置也不会跳。
+        setStatsState(function (current) {
+          return { state: 'loading', data: current.data, error: '' }
+        })
+        const scope = { window: effectiveWindow }
+        /*
+         * 工作区参数只传一个维度：
+         * - 下钻到「实际归属」→ hostWorkspaceId（那是这条管线唯一能算的口径）；
+         * - 下钻到「派发目标」或总览下拉 → workspaceId。
+         * 两个都传等于取交集，会让「实际归属」下钻后一条都不剩。
+         */
+        if (drill && drill.kind === 'hostWorkspaceId') scope.hostWorkspaceId = drill.value
+        else if (drill && drill.kind === 'workspaceId') scope.workspaceId = drill.value
+        else if (workspace) scope.workspaceId = workspace
+        readStats(statsQuery(scope), controller.signal)
+          .then(function (payload) {
+            if (disposed || controller.signal.aborted) return
+            setStatsState({ state: 'ok', data: payload, error: '' })
+          })
+          .catch(function (error) {
+            if (disposed || controller.signal.aborted || (error && error.name === 'AbortError')) return
+            setStatsState({ state: 'fail', data: null, error: describeError(error) })
+          })
+        return function () {
+          disposed = true
+          controller.abort()
+        }
+      }, [view, effectiveWindow, dimension, drill, workspace, generation])
+
 
       const live = scopedTasks.filter(function (task) { return !task.archived_at })
       const stats = effectStats(live, now, window)
@@ -2900,6 +6096,89 @@ window.__ModuleLoader__.load({
       const shownFinished = showDone ? finished : finished.slice(0, 5)
       const archivedTasks = scopedTasks.filter(function (task) { return Boolean(task.archived_at) })
 
+      /*
+       * ── plans/09 P2：历史视图的行集合 ──
+       *
+       * 数据来源**刻意不用 `scopedTasks`**：后者已经被总览的状态 chip、工作区
+       * 下拉与下钻筛过。历史视图有自己的四组筛选，复用那份的数据会让「我在效果页
+       * 下钻到 ws-2 再切历史」时看不到 ws-1 的记录，而历史的意义恰恰是全量可查。
+       * 这里只吃两样东西：`/board` 快照（活表 + 已归档）与 `/board/retired`。
+       *
+       * 三个子视图的边界（§五.4）：
+       * - `all`     = 快照的全部任务（含已归档）；退休留痕**不在**快照里，
+       *               所以它出现在 `retired` 而不是 `all`——否则同一份账本会在
+       *               两个子视图里给出两个总数；
+       * - `archived`= 只有 `archived_at` 非空的行；
+       * - `retired` = 只有 `/board/retired` 的留痕。
+       */
+      const historyTaskRows = allTasks.map(function (task) { return historyRowOf(task, 'task') })
+      const historyRetiredRows = retired.data && Array.isArray(retired.data.entries)
+        ? retired.data.entries
+          .filter(function (entry) { return entry && typeof entry === 'object' })
+          .map(function (entry) { return historyRowOf(entry, 'retired') })
+        : []
+      const historySourceRows = histSub === 'retired'
+        ? historyRetiredRows
+        : histSub === 'archived'
+          ? historyTaskRows.filter(function (row) { return Boolean(row.archived_at) })
+          : historyTaskRows
+      /**
+       * 时间筛选复用**既有的窗口换算**（`windowDaysOf()`），不在这里另写一份
+       * 「7 天 = 多少毫秒」：两个地方各算一遍，就会在某个时区/边界上差一小时，
+       * 而历史视图里差一小时意味着「少了一条记录」。
+       */
+      const histDays = windowDaysOf(histTime)
+      const histSince = histDays > 0 ? now - histDays * 86400000 : NaN
+      const historyFiltered = filterHistoryRows(historySourceRows, {
+        status: histStatus,
+        workspace: histWorkspace,
+        since: histSince,
+        retried: histRetried,
+        background: histBackground,
+      }).filter(function (row) { return historyMatches(row, histQuery) })
+      const historySorted = sortHistoryRows(historyFiltered, histSort)
+      const historyPages = Math.max(1, Math.ceil(historySorted.length / HISTORY_PAGE_SIZE))
+      // 页码夹紧：换了筛选条件之后旧页码可能越界，这里按当前页数夹一次，
+      // 不依赖「每个 setter 都记得重置页码」这种约定（漏一个就是一张空表）。
+      const historyPage = Math.min(histPage, historyPages - 1)
+      const historyPageRows = historySorted.slice(
+        historyPage * HISTORY_PAGE_SIZE,
+        (historyPage + 1) * HISTORY_PAGE_SIZE,
+      )
+      /** 抽屉按身份重找一遍当前行；找不到就是 null（数据已经没了，抽屉自动收起）。 */
+      const drawerRow = drawerKey
+        ? historyTaskRows.concat(historyRetiredRows).filter(function (row) {
+            return row.task_id === drawerKey.task_id && row.kind === drawerKey.kind
+          })[0] || null
+        : null
+
+      /**
+       * 把历史视图的筛选改一次，并顺手把页码归零。
+       *
+       * 为什么统一走这个 setter：散在每个 onChange 里写 `setHistPage(0)` 总会漏一个，
+       * 漏掉的那个表现是「筛选后停在空页」——看起来像筛选没生效。
+       *
+       * @param {Function} setter 对应的筛选 setter
+       * @param {*} value 新值
+       */
+      const histChange = function (setter, value) {
+        setter(value)
+        setHistPage(0)
+        // 换筛选时抽屉可能指向一条已经不在列表里的记录；留着它会让「表里没有、
+        // 下面却挂着一张详情」变成自相矛盾。这里只关抽屉，不动用户的搜索词。
+        setDrawerKey(null)
+      }
+      const histClear = function () {
+        setHistQuery('')
+        setHistStatus('')
+        setHistWorkspace('')
+        setHistTime('all')
+        setHistSort('created')
+        setHistRetried(false)
+        setHistBackground(false)
+        setHistPage(0)
+      }
+
       const card = function (task, variant, dense) {
         return h(TaskCard, {
           key: task.task_id || 'row-' + variant,
@@ -2913,6 +6192,16 @@ window.__ModuleLoader__.load({
           // 宿主没给就是 0，行内退化成不带数字的说法。
           summaryCap: summaryCapOf(memory),
           busy: busy,
+          /*
+           * 行内归档的「哪一行在等确认」。只传这一个字符串而不是一个查询函数：
+           * `TaskCard` 是无 hook 的展示组件，传函数会让每次渲染都多一次调用，
+           * 也让离线冒烟里「props 就是数据」这条断言变难写。
+           */
+          archiveAsk: archiveAsk,
+          // 续派：哪一行开着输入框 + 那一行的草稿 + 三个口子（见 `continueAsk` 的注释）。
+          continueAsk: continueAsk,
+          continueDraft: continueDraft,
+          continueHandlers: continueHandlers,
           handlers: handlers,
         })
       }
@@ -2934,6 +6223,156 @@ window.__ModuleLoader__.load({
         return rows
       }
 
+      /*
+       * 总览的三个新信号（plans/09 §五.1）——只许加这三个，不许推翻 06 的三段结构：
+       *   健康角标 / 当前排队最久 / 样本口径入口。
+       */
+      const queueOldest = live
+        .filter(function (task) { return task.status === 'queued' })
+        .map(function (task) { return Date.parse(task.created_at || '') || 0 })
+        .filter(function (at) { return at > 0 })
+        .sort(function (a, b) { return a - b })[0] || 0
+      /**
+       * 健康角标的三类信号，全部能从**快照**直接算出来：
+       * - 待读超时：`input_pending_at` 已经等了超过 10 分钟（worker 还没读进去）；
+       * - 后台收尾超时：`background.since` 超过 30 分钟（回合早结束了，job 还挂着）；
+       * - 归档失败：`archive_error` 非空（归档巡检失败，session 目录里留下了东西）。
+       * 「报告未送达」只有 stats 里有（快照不投影 delivery），所以它只在这两个
+       * 分析视图里出现——不在总览里编一个快照算不出来的数（§八.6）。
+       */
+      const UNREAD_STALE_MS = 10 * 60 * 1000
+      const BACKGROUND_STALE_MS = 30 * 60 * 1000
+      const healthUnread = live.filter(function (task) {
+        if (!task.input_pending_at || task.input_read_at) return false
+        const at = Date.parse(task.input_pending_at)
+        return Number.isFinite(at) && now - at > UNREAD_STALE_MS
+      }).length
+      const healthBackground = live.filter(function (task) {
+        if (!task.background || typeof task.background !== 'object') return false
+        const at = Date.parse(task.background.since || '')
+        return Number.isFinite(at) && now - at > BACKGROUND_STALE_MS
+      }).length
+      const healthArchiveError = live.filter(function (task) { return Boolean(task.archive_error) }).length
+      const healthTotal = healthUnread + healthBackground + healthArchiveError
+
+      /*
+       * 分析视图可用性（plans/09 §八.10）。
+       *
+       * stats 请求失败（宿主进程还跑着旧代码、`/board/stats` 404）或宿主明确降级
+       * （`degraded:true`，聚合抛过异常）时，分析视图**降级回总览**而不是白屏：
+       * 用户点「效果」得到的仍然是一个能用的看板 + 一条说明原因的提示条。
+       * 这里不是「把错误藏起来」——提示条会一直挂着，直到 stats 恢复。
+       */
+      const statsPayload = statsState.data
+      const statsUsable = Boolean(statsPayload) && statsPayload.degraded !== true
+      const statsProblem = statsState.state === 'fail'
+        ? statsState.error || tr('stats.unavailable')
+        : (statsPayload && statsPayload.degraded === true ? (statsPayload.reason || tr('stats.unavailable')) : '')
+
+      const viewTabs = h(
+        'div',
+        { className: 'dsh-sa-tabs', role: 'tablist', 'aria-label': tr('view.tabs') },
+        [
+          { id: 'overview', labelKey: 'view.overview' },
+          { id: 'effect', labelKey: 'view.effect' },
+          { id: 'breakdown', labelKey: 'view.breakdown' },
+          // plans/09 P2：第四个视图。顺序固定为 总览 / 效果 / 拆解 / 历史——
+          // 「现在 → 评价 → 定位 → 证据」是一条从行动到溯源的路径，不按使用频率排。
+          { id: 'history', labelKey: 'view.history' },
+        ].map(function (item) {
+          return h(
+            'button',
+            {
+              key: item.id,
+              type: 'button',
+              role: 'tab',
+              className: 'dsh-sa-tab',
+              'aria-selected': view === item.id,
+              'data-view-tab': item.id,
+              title: tr('view.switchHint'),
+              onClick: function () { setView(item.id) },
+            },
+            tr(item.labelKey),
+          )
+        }),
+      )
+
+      /*
+       * 窗口选择器只出现在效果/拆解两个视图里。
+       *
+       * 为什么不放总览：总览的四个数字按 `memory.window` 算（plans/07 P0-1 的口径），
+       * 而 stats 的窗口是**另一个**数（用户可选 24h/7d/30d/all）。两个窗口共存于
+       * 首屏会让「最近 7 天」这句话指代不明——同一个页面上出现两个 7 天，口径就废了。
+       * 总览只保留「样本口径入口」，点进去才换窗口（§五.1「点击效果带进入效果视图」）。
+       */
+      const windowBar = h(
+        'div',
+        { className: 'dsh-sa-win', role: 'group', 'aria-label': tr('win.label') },
+        h('span', { className: 'dsh-sa-win-label' }, tr('win.label')),
+        WINDOW_PRESETS.map(function (preset) {
+          return h(
+            'button',
+            {
+              key: preset.id,
+              type: 'button',
+              className: 'dsh-sa-chip',
+              'aria-pressed': effectiveWindow === preset.id,
+              'data-window': preset.id,
+              title: tr('win.fromMemory'),
+              onClick: function () {
+                windowPicked.current = true
+                setWindowKey(preset.id)
+              },
+            },
+            windowChipLabel(preset),
+          )
+        }),
+      )
+
+      /*
+       * 下钻提示条：筛选一旦生效就必须一直可见，否则「这个数字为什么是 3」无处可查。
+       * 「清除」写两个状态：`drill` 与顶部 `workspace` 下拉——点工作区行时两者一起写，
+       * 只清一个会留下一个看不见的筛选条件（下拉说全部、提示条说已筛选）。
+       */
+      const drillLabel = drill
+        ? fill(
+            drill.kind === 'workspaceId' ? tr('drill.target')
+              : drill.kind === 'hostWorkspaceId' ? tr('drill.host')
+                : drill.kind === 'group' ? tr('drill.batch')
+                  : drill.kind === 'parentSessionId' ? tr('drill.parent')
+                    : tr('drill.status'),
+            { name: drill.name },
+          )
+        : ''
+      const drillBar = drill
+        ? h(
+            'div',
+            { className: 'dsh-sa-drill', role: 'status', 'aria-live': 'polite' },
+            h('span', { className: 'dsh-sa-drill-label' }, fill(tr('drill.active'), { label: drillLabel })),
+            h('button', {
+              type: 'button',
+              className: 'dsh-sa-btn',
+              onClick: function () {
+                setDrill(null)
+                setWorkspace('')
+                setView('overview')
+              },
+            }, tr('drill.clear')),
+            // 批次/主会话/状态只能筛总览列表：/board/stats 只认 window 与两个工作区参数。
+            // 不说清这一点，用户会以为效果卡也跟着变成 3 条了。
+            drill.kind === 'workspaceId' || drill.kind === 'hostWorkspaceId'
+              ? null
+              : h('span', { className: 'dsh-sa-dim-note' }, tr('drill.onlyList')),
+          )
+        : null
+
+      /** 分析视图顶部的窗口提示（plans/07 §九：切窗口必须说「只统计最近 N 天」）。 */
+      const windowNote = h(
+        'div',
+        { className: 'dsh-sa-scopenote', 'data-scope-note': effectiveWindow },
+        windowScopeNote(effectiveWindow),
+      )
+
       const header = h(
         'div',
         { className: 'dsh-sa-head' },
@@ -2943,6 +6382,31 @@ window.__ModuleLoader__.load({
           h(Metric, { key: 'c', label: tr('concurrency'), value: runningNow + '/' + maxWorkers }),
           h(Metric, { key: 'q', label: tr('queuedOne'), value: queuedNow }),
           h(Metric, { key: 't', label: tr('total'), value: totalNow }),
+          /*
+           * 健康角标：三个信号加起来一个数，hover 说明分别是几条。
+           * 只在 >0 时出现——「健康 0」是个没有信息量的角标，会长期占着首屏。
+           */
+          healthTotal > 0
+            ? h('span', {
+                key: 'health',
+                className: 'dsh-sa-danger',
+                'data-health': 'true',
+                title: tr('unreadTag') + ' ' + healthUnread + ' · '
+                  + tr('backgroundTag') + ' ' + healthBackground + ' · '
+                  + tr('archiveErrorPrefix') + healthArchiveError,
+              }, tr('filter.attention') + ' ' + healthTotal)
+            : null,
+          /*
+           * 当前排队最久：比「排队 n」更能说明是否饿死——n 大可能是刚排进来，
+           * 一条等了 40 分钟才是真的卡住了。没有排队任务时不显示。
+           */
+          queueOldest > 0 && queuedNow > 0
+            ? h('span', {
+                key: 'oldest',
+                className: 'dsh-sa-meta',
+                'data-oldest': 'true',
+              }, formatDuration(Math.max(0, now - queueOldest)))
+            : null,
           failedNow > 0
             ? h('span', { key: 'f', className: 'dsh-sa-danger' }, tr('failed') + ' ' + failedNow)
             : null,
@@ -2974,9 +6438,39 @@ window.__ModuleLoader__.load({
             },
             tr('stat.windowLabel') + ' ' + stats.windowLabel,
           ),
+          /*
+           * 样本口径入口（plans/09 §五.1 的第三个信号）：不在首屏继续加卡片，
+           * 只留一个「进去看口径」的带子。它同时是效果视图的入口。
+           */
+          h(
+            'button',
+            {
+              key: 'scope-entry',
+              type: 'button',
+              className: 'dsh-sa-chip',
+              'data-scope-entry': 'true',
+              title: tr('scope.entryHint'),
+              onClick: function () { setView('effect') },
+            },
+            fill(tr('scope.entry'), { window: scopeWindowText(effectiveWindow) }),
+          ),
         ),
         h(ConcurrencyBar, { running: runningNow, max: maxWorkers, queued: queuedNow, background: backgroundNow }),
-        h(
+        viewTabs,
+        /*
+         * 窗口条与窗口提示只属于效果/拆解两个**统计**视图。
+         *
+         * 历史视图有它自己的「时间」筛选（`histTime`），再同时摆一条窗口 chip
+         * 会让同一个页面上出现两个「最近 7 天」，而它们约束的是两件不同的事
+         * （一个约束 stats 的分母，一个约束列表行）。§二 的顶部窗口定义的是
+         * 「统计口径」，所以历史视图不显示它。
+         */
+        view === 'overview' || view === 'history' ? null : h('div', { className: 'dsh-sa-tabs' }, windowBar),
+        view === 'overview' || view === 'history' ? null : windowNote,
+        drillBar,
+        // 状态 chip 与工作区下拉是**总览列表**的工具，分析视图里不该出现：
+        // 在效果页点一个「已归档 chip」只会让人以为统计被筛了，其实没有（§八.7）。
+        view === 'overview' ? h(
           'div',
           { className: 'dsh-sa-chips', role: 'group', 'aria-label': tr('title') },
           FILTERS.map(function (item) {
@@ -2998,8 +6492,8 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsh-sa-chip-count' }, count),
             )
           }),
-        ),
-        h(
+        ) : null,
+        view === 'overview' ? h(
           'div',
           { className: 'dsh-sa-toolbar' },
           h(
@@ -3038,7 +6532,7 @@ window.__ModuleLoader__.load({
             },
             archiving ? tr('archiveRunning') : archiveStage === 1 ? tr('archiveConfirm') : tr('archiveNow'),
           ),
-        ),
+        ) : null,
       )
 
       const strips = []
@@ -3082,7 +6576,12 @@ window.__ModuleLoader__.load({
        * 与 truncated 的理由相同：面板上「退休 1000 / 列表 200」看起来像数据丢了，
        * 而这里偏偏是「已经承认丢过一次数据」的视图，更不能安静截断。
        */
-      const retiredOverflow = filter === 'retired'
+      /*
+       * 退休记录溢出提示只在**总览的退休 chip** 里出现在顶部提示条；
+       * 历史视图在表格上方自己有一条（`HistoryView` 的 `dropped` 参数），
+       * 两处都挂就是同一个数字在页面上说两遍。
+       */
+      const retiredOverflow = filter === 'retired' && view === 'overview'
         ? num(retired.data && retired.data.dropped, 0) || retiredDropped
         : 0
       if (retiredOverflow > 0) {
@@ -3097,6 +6596,17 @@ window.__ModuleLoader__.load({
       }
 
       let body
+      /*
+       * 分派顺序刻意是 **快照可用性 → 历史 → 分析视图 → 退休/归档/三段**：
+       *
+       * - 快照都拿不到时，分析视图也没有存在的意义（stats 更可能一起挂），先给
+       *   「看板数据暂时取不到」；
+       * - **历史放在分析视图之前**：它只依赖 `/board` 快照与 `/board/retired`，
+       *   完全不碰 `/board/stats`。stats 挂了历史照样要能用（§八.10 的降级要求，
+       *   而历史是「查证据」的地方，恰恰最不该跟着统计一起失效）；
+       * - 分析视图放在退休视图**之前**：退休 chip 是总览里的东西，用户在效果页
+       *   不该被它劫持；分析视图的口径由它自己的窗口/下钻决定（§三.1）。
+       */
       if (!data && !failure) {
         body = h(Blank, { title: tr('loading') })
       } else if (!data && failure) {
@@ -3105,6 +6615,131 @@ window.__ModuleLoader__.load({
           hint: failure,
           action: h('button', { type: 'button', className: 'dsh-sa-btn', onClick: refresh }, tr('retry')),
         })
+      } else if (view === 'history') {
+        /*
+         * 退休子视图的四条状态，逐条分开（照抄「已退休」视图的判据）：
+         * - `memory` 缺失 → 宿主没提供退休留痕这块能力，不是「没有退休记录」；
+         * - 取数失败      → 暂时取不到 + 重试，沿用现有 unreachable 模式；
+         * - 还在加载      → 加载态；
+         * - 正常          → 交给 HistoryView（它自己处理空表）。
+         * 「全部 / 已归档」两个子视图不看 `retired` 的状态：它们的数据在快照里，
+         * 不能因为另一个子视图的请求失败就连带失效。
+         */
+        const retiredBroken = histSub === 'retired'
+          ? (!memory
+              ? { title: tr('retired.unavailable'), hint: tr('retired.unavailableHint') }
+              : retired.state === 'fail'
+                ? { title: tr('retired.loadFailed').replace('{reason}', retired.error || tr('unknownError')) }
+                : (retired.state === 'loading' && !retired.data)
+                  ? { title: tr('loading') }
+                  : null)
+          : null
+        if (retiredBroken) {
+          body = h(Blank, {
+            title: retiredBroken.title,
+            hint: retiredBroken.hint,
+            action: retired.state === 'fail'
+              ? h('button', { type: 'button', className: 'dsh-sa-btn', onClick: refresh }, tr('retry'))
+              : null,
+          })
+        } else {
+          body = h(HistoryView, {
+            sub: histSub,
+            rows: historyPageRows,
+            total: historySorted.length,
+            rawTotal: historySourceRows.length,
+            page: historyPage,
+            pages: historyPages,
+            query: histQuery,
+            status: histStatus,
+            workspaceId: histWorkspace,
+            timeKey: histTime,
+            sort: histSort,
+            retried: histRetried,
+            background: histBackground,
+            workspaces: workspaces,
+            now: now,
+            truncated: data ? data.truncated : null,
+            dropped: histSub === 'retired' ? num(retired.data && retired.data.dropped, 0) : 0,
+            emptyHint: tr('hist.subHint'),
+            selected: drawerRow ? { kind: drawerRow.kind, task_id: drawerRow.task_id } : null,
+            drawerRow: drawerRow,
+            onSub: function (next) {
+              setHistSub(next)
+              setHistPage(0)
+              setDrawerKey(null)
+            },
+            onQuery: function (value) { histChange(setHistQuery, value) },
+            onStatus: function (value) { histChange(setHistStatus, value) },
+            onWorkspace: function (value) { histChange(setHistWorkspace, value) },
+            onTime: function (value) { histChange(setHistTime, value) },
+            onSort: function (value) { histChange(setHistSort, value) },
+            onRetried: function (value) { histChange(setHistRetried, value) },
+            onBackground: function (value) { histChange(setHistBackground, value) },
+            onPage: function (value) { setHistPage(Math.max(0, num(value, 0))) },
+            onClear: histClear,
+            onSelect: function (row) { setDrawerKey({ kind: row.kind, task_id: row.task_id }) },
+            onCloseDrawer: function () { setDrawerKey(null) },
+            onCopy: copyRetiredId,
+            onOpen: openWorker,
+          })
+        }
+      } else if (view === 'effect' || view === 'breakdown') {
+        /*
+         * 分析视图的四条状态，逐条分开（§八.10「不白屏、不报错循环」）：
+         * 1. stats 还没有数据（首次取数 / 正在取）→ 加载态；
+         * 2. stats 取不到（404 / 网络错误 / 宿主降级）→ **降级回总览** + 原因 + 重试；
+         * 3. 拿到了但 summary 缺失 → 由视图自己说「没有可用汇总」；
+         * 4. 正常 → 渲染。
+         *
+         * 第 2 条刻意回总览而不是留在空白页：一个打不开的效果页等于把整个看板
+         * 变白，而任务列表其实好好的。回到总览，用户至少还能干活。
+         */
+        if (!statsPayload && statsState.state !== 'fail') {
+          body = h(Blank, { title: tr('stats.loading') })
+        } else if (!statsUsable) {
+          body = h(Blank, {
+            title: tr('stats.unavailable'),
+            hint: statsProblem + ' · ' + tr('stats.unavailableHint'),
+            action: h('div', null,
+              h('button', { type: 'button', className: 'dsh-sa-btn', onClick: refresh }, tr('stats.retry')),
+              ' ',
+              h('button', {
+                type: 'button',
+                className: 'dsh-sa-btn',
+                onClick: function () { setView('overview') },
+              }, tr('stats.back'))),
+          })
+        } else if (view === 'effect') {
+          body = h(EffectView, {
+            stats: statsPayload,
+            trendMode: trendMode,
+            onTrendMode: setTrendMode,
+            onRetry: refresh,
+          })
+        } else {
+          body = h(BreakdownView, {
+            stats: statsPayload,
+            dimension: dimension,
+            now: now,
+            onDimension: setDimension,
+            onRetry: refresh,
+            onDrill: function (pick) {
+              /*
+               * 下钻 = 把这一行的键设为过滤条件并回到总览（§五.3）。
+               *
+               * 工作区行要**同时**写顶部 `workspace` 下拉：两个控件表达同一个筛选，
+               * 只写一个会出现「下拉显示全部，列表却只剩 3 条」。其余三类（批次 /
+               * 主会话 / 状态）没有对应的下拉控件，只写 `drill`。
+               */
+              if (pick.kind === 'workspaceId' || pick.kind === 'hostWorkspaceId') {
+                setWorkspace(pick.kind === 'workspaceId' ? pick.value : '')
+              }
+              setDrill(pick)
+              setView('overview')
+            },
+          })
+        }
       } else if (filter === 'retired') {
         /*
          * 退休视图先于「还没有任务」的空态判断：账本封顶之后，一个跑很久的实例
@@ -3215,6 +6850,29 @@ window.__ModuleLoader__.load({
           }))
         }
         body = parts.length ? h('div', { className: 'dsh-sa-sections' }, parts) : h(Blank, { title: tr('emptyFiltered') })
+      }
+
+      /*
+       * 样本口径行固定出现在效果/拆解视图内容之前（plans/09 §三.4「每个视图固定显示」）。
+       *
+       * 位置在内容**上方**而不是页脚：它解释的是「下面这些数字的分母是什么」，
+       * 放到最后等于让人先读结论再读前提。stats 不可用时这一行也没有意义
+       * （coverage 全是 0/—，只会制造「真的没有任务」的错觉），所以只在可用时出现。
+       *
+       * 历史视图不挂这一行：它的样本量已经在分页条上写清楚了（「筛选后 n / 共 m 条」），
+       * 而 coverage 描述的是 stats 的口径，和历史列表的行数不是同一个分母——
+       * 把两个数并排放在一起，只会让人以为其中一个算错了。
+       */
+      if ((view === 'effect' || view === 'breakdown') && statsUsable) {
+        body = h(
+          'div',
+          null,
+          h(ScopeLine, {
+            coverage: statsPayload.coverage,
+            windowId: effectiveWindow,
+          }),
+          body,
+        )
       }
 
       return h(
