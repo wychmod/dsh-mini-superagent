@@ -2025,6 +2025,22 @@ export class Dispatch {
     if (task.status === 'cancelled') {
       throw new Error(`任务 ${task.id} 已被取消；要重新做请派发一个新任务`)
     }
+    /**
+     * 归档是**只读冻结**，重试不能把它复活。
+     *
+     * 为什么必须单独挡在这里：`retry()` 有两条分支，子会话还活着的那条走
+     * `message()`（那里已有归档闸），但**会话已死**的那条直接 `reopen()` 换新
+     * 会话，根本不经过 `message()`。只在 `message()` 里挡的话，归档任务恰好子
+     * 会话已死时仍会被复活成 running，而 `archivedAt` 还留着——统计把它当历史
+     * 排除，它却在真实跑（实测 status=running、archivedAt 仍在）。
+     *
+     * 判据与 `#assertContinuable()` 的归档闸同源：归档 = 只读冻结，任何「再干
+     * 一轮」的入口都不该穿过它。
+     */
+    if (task.archivedAt) {
+      throw new Error(`任务 ${task.id} 已归档（${task.archivedAt}）：归档是只读冻结，不能再重试。`
+        + '要重做请派发一个新任务')
+    }
 
     // attempt 只在**投递成功之后**才递增：0.6.0 之前先自增再投递，
     // 投递失败时 attempt 已经消耗掉、状态还卡在 running。

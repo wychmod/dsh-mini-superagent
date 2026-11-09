@@ -23,6 +23,10 @@
   `Dispatch.continueTask()` / `#assertContinuable()`，工具入口（`dispatch_launch({continue_task_id}）`
   与看板入口（`POST /board/retry` 带 `message`）**共用一份**——看板那条以前直接调 `message()`，
   绕开了归档 / 退休 / 会话形状的全部校验。
+- **重试不能穿过归档闸**：`retry()` 在两条分支之前就拒绝已归档任务。只在 `message()` 里挡
+  会漏掉「子会话已死」那条——它直接 `reopen()` 换新会话、根本不经过 `message()`，
+  于是归档任务被复活成 `running` 而 `archivedAt` 仍在（归档与在跑并存）。
+  看板 `POST /board/retry` 对归档任务现在返回 `409`。
 
 **统计口径（Host）**
 

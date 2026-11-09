@@ -16,6 +16,9 @@
  * 5. 决策 A 的反面 → `cancel()` 对终态**仍然**拒绝（这条不是新行为，是防止
  *    有人为了让按钮能点，顺手把 `cancel()` 的闸拆掉：那会把 `interrupted`
  *    写成 `cancelled`，同时污染取消率与完成率）。
+ * 6. 归档不能被**重试**复活 → `retry()` 的两条分支（会话活着走 `message()`、
+ *    会话已死走 `reopen()` 换新会话）都在入口处被归档闸挡住，看板
+ *    `POST /retry` 对归档任务返回 409。只在 `message()` 里挡会漏掉换会话那条。
  *
  * 全部离线：假宿主 + 临时状态目录，不联网、不碰真实 `~/.dsh`。
  */
@@ -423,5 +426,50 @@ test('POST /archive 的巡检语义没有被动过（新路由是加出来的，
     assert.equal(sweep(), 1, '老的 /archive 仍然触发一次巡检')
     assert.equal(typeof result.json.scanned, 'number', '返回形状仍是巡检口径')
     assert.ok(result.json.counts, '仍然带最新计数')
+  })
+})
+
+// ---------------------------------------------------------------- 7. 归档不能被重试复活
+
+test('retry() 拒绝已归档任务：子会话还活着（走 message 分支）', async () => {
+  await withDispatch({}, async ({ d, host }) => {
+    const task = mkTask(d, 't-retry-live', 'done', {
+      archivedAt: iso(500), frozenAt: iso(500), settledAt: iso(500),
+    })
+    host.agents.set('dispatch-t-retry-live', { id: 'dispatch-t-retry-live' })
+    await assert.rejects(() => d.retry(task), /已归档/)
+    assert.equal(task.status, 'done', '被拒的重试不能动状态')
+    assert.ok(task.archivedAt, '归档标记不能被清')
+    assert.ok(task.settledAt, '结算时刻不能被清')
+    assert.equal(task.attempt, undefined, 'attempt 不能自增')
+  })
+})
+
+test('retry() 拒绝已归档任务：子会话已死（换会话分支，原来从这里漏出去）', async () => {
+  await withDispatch({}, async ({ d }) => {
+    const task = mkTask(d, 't-retry-dead', 'done', {
+      archivedAt: iso(500), frozenAt: iso(500), settledAt: iso(500),
+    })
+    // 子会话不在 agents 里、resolveAgent 返回 not-found → resumable=false
+    const before = { workerSessionId: task.workerSessionId, settledAt: task.settledAt }
+    await assert.rejects(() => d.retry(task), /已归档/)
+    assert.equal(task.status, 'done', '不能被 reopen 成 queued/running')
+    assert.ok(task.archivedAt, '归档与在跑不能并存')
+    assert.equal(task.settledAt, before.settledAt, 'settledAt 不能被清')
+    assert.equal(task.workerSessionId, before.workerSessionId, '不能换出一条新子会话')
+    assert.equal(task.attempt, undefined, 'attempt 不能自增')
+  })
+})
+
+test('POST /retry 对已归档任务 → 409（入口级闸门）', async () => {
+  await withBoard(async ({ d, handler }) => {
+    const task = mkTask(d, 't-retry-http', 'done', {
+      archivedAt: iso(500), frozenAt: iso(500), settledAt: iso(500),
+    })
+    const result = await call(handler, { url: `${BASE}/retry`, body: { task_id: task.id } })
+    assert.equal(result.status, 409)
+    assert.match(String(result.json.error), /已归档/)
+    assert.equal(task.status, 'done', 'HTTP 层被拒也不能动状态')
+    assert.ok(task.archivedAt, '归档标记不能被清')
   })
 })
