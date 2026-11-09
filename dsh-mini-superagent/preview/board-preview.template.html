@@ -43,7 +43,7 @@
 </head>
 <body>
 <div class="stage">
-  <p class="cap">真实面板组件 + 假数据，2 秒轮询一次（本页拦截了 fetch）。改的只是呈现，数据仍来自 <code>GET /dsh-mini-superagent/board</code>。</p>
+  <p class="cap">真实面板组件 + 假数据，2 秒轮询一次（本页拦截了 fetch）。任务看板读 <code>GET /dsh-mini-superagent/board</code>，分析看板读 <code>GET /dsh-mini-superagent/board/analytics</code>；顶部切换条二选一。</p>
   <div class="frame"><div id="root"><div class="fail">正在加载…（需要能访问 cdn.jsdelivr.net 取 React）</div></div></div>
 </div>
 
@@ -169,6 +169,12 @@ var board = {
   ]
 }
 
+/* 假账本里没有 parent_session_id：补上让「负责人」筛选有候选可看。
+   只加字段、不改任务看板已经用到的任何字段。 */
+board.tasks.forEach(function (task, index) {
+  if (!task.parent_session_id) task.parent_session_id = index % 3 === 0 ? 'session-billing' : 'session-lead'
+})
+
 /* ── 假统计数据：让「效果 / 拆解」两个视图在预览页里能真的画出来（plans/09 P1） ── */
 var stats = (function () {
   function dist(p50, p90, count) { return { p50: p50, p90: p90, count: count, sampleLow: count > 0 && count < 5 } }
@@ -262,8 +268,177 @@ var stats = (function () {
   }
 })()
 
+/* ── 假分析数据：按 GET /board/analytics 的查询参数现算，形状对齐 src/analytics.js ──
+   预览页的筛选必须真的改变数字，否则「切筛选没反应」会被误认成看板坏了。 */
+var COMPLETION_BASE = ['done', 'ended', 'failed', 'blocked', 'interrupted']
+var SETTLED = ['done', 'ended', 'failed', 'blocked', 'interrupted', 'cancelled']
+var STATUS_ORDER = ['running', 'queued', 'done', 'ended', 'failed', 'blocked', 'interrupted', 'cancelled']
+
+function analyticsPayload(queryString) {
+  var params = new URLSearchParams(queryString || '')
+  var win = params.get('window') || '7d'
+  var status = params.get('status') || 'all'
+  var owner = params.get('owner') || 'all'
+  var workspaceId = params.get('workspaceId') || 'all'
+  var group = params.get('group') || 'all'
+  var hours = Number(params.get('overdueHours') || 24)
+  if (!Number.isFinite(hours) || hours <= 0) hours = 24
+
+  var since = null
+  if (win !== 'all') {
+    var match = /^(\d+)([hd])$/.exec(win)
+    var amount = match ? Number(match[1]) : 7
+    var span = amount * (match && match[2] === 'h' ? 3600000 : DAY)
+    since = Date.now() - span
+  }
+  function ms(value) { var n = value ? Date.parse(value) : NaN; return Number.isFinite(n) ? n : NaN }
+  function key(value) { return new Date(value).toISOString().slice(0, 10) }
+  function ratio(a, b) { return b > 0 ? Math.round(a / b * 10000) / 10000 : null }
+  function matches(task, from, to) {
+    var created = ms(task.created_at)
+    if (from !== null && !(Number.isFinite(created) && created >= from && created < to)) return false
+    if (status !== 'all' && task.status !== status) return false
+    if (owner !== 'all' && (task.parent_session_id || '__unknown__') !== owner) return false
+    if (workspaceId !== 'all' && (task.workspace_id || '__unknown__') !== workspaceId) return false
+    if (group !== 'all' && (task.group || '') !== group) return false
+    return true
+  }
+
+  var all = board.tasks
+  var inWindow = all.filter(function (task) {
+    var created = ms(task.created_at)
+    return since === null || (Number.isFinite(created) && created >= since)
+  })
+  var matched = inWindow.filter(function (task) { return matches(task, null, Infinity) })
+  var facetsOf = function (field, titleField) {
+    var counts = {}
+    all.forEach(function (task) {
+      var id = task[field] || '__unknown__'
+      if (!counts[id]) counts[id] = { id: id, title: task[titleField] || null, count: 0 }
+      counts[id].count += 1
+    })
+    return Object.keys(counts).map(function (id) { return counts[id] })
+      .sort(function (a, b) { return b.count - a.count })
+  }
+
+  var byStatus = {}
+  matched.forEach(function (task) { byStatus[task.status] = (byStatus[task.status] || 0) + 1 })
+  var distribution = Object.keys(byStatus).map(function (s) {
+    return { status: s, count: byStatus[s], share: ratio(byStatus[s], matched.length) }
+  }).sort(function (a, b) {
+    var ai = STATUS_ORDER.indexOf(a.status), bi = STATUS_ORDER.indexOf(b.status)
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
+  })
+  var done = byStatus.done || 0
+  var base = matched.filter(function (task) { return COMPLETION_BASE.indexOf(task.status) >= 0 }).length
+  var overdue = { thresholdHours: hours, basis: 'proxy:createdAt', dueAtAvailable: false, pendingFields: ['due_at'], open: 0, settled: 0, unknown: 0, total: 0, rate: null }
+  var buckets = {}
+  var dayFacts = function (day) {
+    if (!buckets[day]) buckets[day] = { day: day, created: 0, done: 0, failed: 0, blocked: 0, interrupted: 0, cancelled: 0, ended: 0, settled: 0 }
+    return buckets[day]
+  }
+  matched.forEach(function (task) {
+    var created = ms(task.created_at)
+    if (Number.isFinite(created)) dayFacts(key(created)).created += 1
+    var settle = ms(task.settled_at || task.updated_at)
+    if (!Number.isFinite(created)) { overdue.unknown += 1; return }
+    if (SETTLED.indexOf(task.status) < 0) {
+      if (Date.now() - created > hours * 3600000) overdue.open += 1
+    } else if (!Number.isFinite(settle)) {
+      overdue.unknown += 1
+    } else {
+      if (settle - created > hours * 3600000) overdue.settled += 1
+      var entry = dayFacts(key(settle))
+      if (typeof entry[task.status] === 'number') entry[task.status] += 1
+      entry.settled += 1
+    }
+  })
+  overdue.total = overdue.open + overdue.settled
+  overdue.rate = ratio(overdue.total, matched.length)
+
+  var times = all.map(function (task) { return ms(task.created_at) }).filter(Number.isFinite)
+  var from = since === null ? key(Math.min.apply(null, times.concat([Date.now()]))) : key(since)
+  var to = key(Date.now())
+  var days = Object.keys(buckets).map(function (day) { return buckets[day] })
+    .filter(function (row) { return row.day >= from && row.day <= to })
+    .sort(function (a, b) { return a.day.localeCompare(b.day) })
+
+  function cohort(list) {
+    var d = list.filter(function (task) { return task.status === 'done' }).length
+    var b = list.filter(function (task) { return COMPLETION_BASE.indexOf(task.status) >= 0 }).length
+    return { created: list.length, done: d, base: b, completionRate: ratio(d, b) }
+  }
+  var compare = { available: false, reason: 'all-window' }
+  if (since !== null) {
+    var previous = all.filter(function (task) { return matches(task, since - (Date.now() - since), since) })
+    var current = cohort(matched), prior = cohort(previous)
+    compare = {
+      available: true,
+      previousRange: { from: iso(2 * (Date.now() - since)), until: iso(Date.now() - since) },
+      current: current, previous: prior,
+      createdDelta: current.created - prior.created,
+      doneDelta: current.done - prior.done,
+      rateDelta: current.completionRate !== null && prior.completionRate !== null
+        ? Math.round((current.completionRate - prior.completionRate) * 10000) / 10000 : null
+    }
+  }
+
+  return {
+    analyticsVersion: 1,
+    generatedAt: new Date().toISOString(),
+    ok: true,
+    scope: {
+      window: { key: win, days: since === null ? null : Math.round((Date.now() - since) / DAY * 100) / 100, since: since === null ? null : iso(Date.now() - since) },
+      status: status, statusList: status === 'all' ? [] : status.split(','),
+      owner: owner === 'all' ? null : owner, ownerField: 'parentSessionId',
+      workspaceId: workspaceId === 'all' ? null : workspaceId,
+      hostWorkspaceId: null, group: group === 'all' ? null : group,
+      overdueHours: hours, timeField: 'createdAt', warnings: []
+    },
+    facets: {
+      statuses: facetsOf('status').map(function (item) { return { id: item.id, title: null, count: item.count } })
+        .sort(function (a, b) {
+          var ai = STATUS_ORDER.indexOf(a.id), bi = STATUS_ORDER.indexOf(b.id)
+          return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
+        }),
+      owners: facetsOf('parent_session_id'),
+      workspaces: facetsOf('workspace_id', 'workspace_title'),
+      hostWorkspaces: facetsOf('host_workspace_id', 'host_workspace_title'),
+      groups: facetsOf('group')
+    },
+    coverage: {
+      sourceTasks: all.length, retiredTraces: 3, inWindow: inWindow.length, matched: matched.length,
+      excludedByFilters: inWindow.length - matched.length,
+      archived: matched.filter(function (task) { return Boolean(task.archived_at) }).length,
+      missingCreatedAt: matched.filter(function (task) { return !Number.isFinite(ms(task.created_at)) }).length,
+      missingSettledAt: 0, fallbackTimeBasis: 0, trendClamped: false,
+      sampleLow: base > 0 && base < 5, truncated: null
+    },
+    summary: {
+      total: matched.length,
+      active: matched.filter(function (task) { return SETTLED.indexOf(task.status) < 0 }).length,
+      settled: matched.filter(function (task) { return SETTLED.indexOf(task.status) >= 0 }).length,
+      archived: matched.filter(function (task) { return Boolean(task.archived_at) }).length,
+      cancelled: byStatus.cancelled || 0,
+      byStatus: byStatus, distribution: distribution,
+      completion: {
+        done: done, base: base, rate: ratio(done, base), sampleLow: base > 0 && base < 5,
+        includes: COMPLETION_BASE, excludes: ['running', 'queued', 'cancelled']
+      },
+      overdue: overdue
+    },
+    trend: { days: days, range: { from: from, to: to, days: Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / DAY) + 1 }, compare: compare },
+    warnings: ['owner-proxy', 'due-at-proxy']
+  }
+}
+
 window.fetch = function (url, options) {
   var target = String(url)
+  // 分析数据看板（另一条只读路由），判在 /board 快照之前。
+  if (target.indexOf('/board/analytics') >= 0) {
+    var qs = target.indexOf('?') >= 0 ? target.slice(target.indexOf('?') + 1) : ''
+    return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve(analyticsPayload(qs)) } })
+  }
   // 统计聚合（plans/09 P1）：形状逐字对齐 src/stats.js 的 boardStats()。
   // 预览页必须给这一份，否则「效果 / 拆解」两个视图在本地只能看到降级态，
   // 版式问题（卡片换行、表格横向裁切、条形宽度）就永远目视不到。

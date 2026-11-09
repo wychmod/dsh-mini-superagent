@@ -199,7 +199,23 @@ let retiredMode = 'ok'
  */
 let statsResponse = null
 let statsMode = 'ok'
+/**
+ * GET /board/analytics 的响应（分析数据看板）。
+ *
+ * `analyticsMode` 四档：'ok' 正常聚合 / '404' 旧版宿主没这条路由 /
+ * 'degraded' 路由在但 Host 抛错降级 / 'bad' 形状不对（客户端必须报错而不是白屏）。
+ */
+let analyticsResponse = null
+let analyticsMode = 'ok'
 const requests = []
+const analyticsRequests = () => requests.filter((item) => String(item.url).includes('/board/analytics'))
+/**
+ * GET /board 快照的请求——也就是任务看板那条 2 秒轮询。
+ *
+ * `/board/stats`、`/board/analytics`、`/board/retired` 是另外三条路由，
+ * 用 `endsWith('/board')` 正好只留下快照这一条。
+ */
+const boardSnapshotRequests = () => requests.filter((item) => String(item.url).endsWith('/board'))
 
 globalThis.fetch = async (url, options) => {
   const method = (options && options.method) || 'GET'
@@ -213,7 +229,16 @@ globalThis.fetch = async (url, options) => {
       if (statsMode === 'degraded') {
         return { ok: true, status: 200, async json() { return degradedStatsFixture() } }
       }
-      return { ok: true, status: 200, async json() { return statsResponse } }
+      return { ok: true, status: 200, async json() { return statsResponseFor(url) } }
+    }
+    // 分析看板是另一条只读路由：判在 /board 快照之前，否则会被当成一次普通快照。
+    if (String(url).includes('/board/analytics')) {
+      if (analyticsMode === '404') return { ok: false, status: 404, async json() { return { ok: false, error: 'not found' } } }
+      if (analyticsMode === 'bad') return { ok: true, status: 200, async json() { return {} } }
+      if (analyticsMode === 'degraded') {
+        return { ok: true, status: 200, async json() { return degradedAnalyticsFixture() } }
+      }
+      return { ok: true, status: 200, async json() { return JSON.parse(JSON.stringify(analyticsResponse)) } }
     }
     // 退休视图是独立路由：先于快照判断，否则会被当成一次 GET /board。
     if (String(url).endsWith('/retired')) {
@@ -479,6 +504,26 @@ function historyRetiredFixture() {
 
 /* ───────────────────── /board/stats fixture（plans/09 P1） ───────────────────── */
 
+/**
+ * 按请求里的 `window` 参数回显 `scope.window.key`。
+ *
+ * 为什么夹具要回显：真实宿主的 `boardStats()` 会在 `scope.window.key` 里写回
+ * 这份数字**实际**用的窗口，客户端的口径行正是靠它对齐数字的。夹具若写死
+ * '7d'，就验不到「口径行跟 payload 走」这条不变量（面板会拿旧窗口的标签
+ * 配新窗口的数字）。
+ */
+function statsResponseFor(url) {
+  const payload = JSON.parse(JSON.stringify(statsResponse))
+  const match = /[?&]window=([^&]+)/.exec(String(url))
+  if (match && payload && payload.scope) {
+    const key = decodeURIComponent(match[1])
+    payload.scope = Object.assign({}, payload.scope, {
+      window: Object.assign({}, payload.scope.window, { key }),
+    })
+  }
+  return payload
+}
+
 /** 一个成功聚合的最小但完整的响应，形状逐字对齐 src/stats.js 的 `boardStats()`。 */
 function statsFixture() {
   return {
@@ -676,6 +721,141 @@ function degradedStatsFixture() {
       statuses: [],
       retiredReasons: [],
     },
+  }
+}
+
+/* ───────── 分析数据看板的 fixture：形状逐字对齐 src/analytics.js ───────── */
+
+function dayKey(offsetDays) {
+  return new Date(Date.now() - offsetDays * 86400000).toISOString().slice(0, 10)
+}
+
+function analyticsFixture(overrides = {}) {
+  const base = {
+    analyticsVersion: 1,
+    generatedAt: new Date().toISOString(),
+    ok: true,
+    scope: {
+      window: { key: '7d', days: 7, since: hoursAgo(24 * 7) },
+      status: 'all', statusList: [], owner: null, ownerField: 'parentSessionId',
+      workspaceId: null, hostWorkspaceId: null, group: null,
+      overdueHours: 24, timeField: 'createdAt', warnings: [],
+    },
+    facets: {
+      statuses: [
+        { id: 'running', title: null, count: 3 }, { id: 'queued', title: null, count: 1 },
+        { id: 'done', title: null, count: 4 }, { id: 'failed', title: null, count: 2 },
+        { id: 'blocked', title: null, count: 1 }, { id: 'cancelled', title: null, count: 1 },
+      ],
+      owners: [
+        { id: 'session-lead', title: null, count: 8 },
+        { id: 'session-billing', title: null, count: 4 },
+      ],
+      workspaces: [
+        { id: 'ws-1', title: 'dsh-mini-superagent', count: 7 },
+        { id: 'ws-2', title: '结算服务', count: 5 },
+      ],
+      hostWorkspaces: [{ id: 'host-1', title: 'dsh-mini-superagent（实际）', count: 3 }],
+      groups: [{ id: 'g-7f21', title: null, count: 4 }],
+    },
+    coverage: {
+      sourceTasks: 15, retiredTraces: 3, inWindow: 12, matched: 12, excludedByFilters: 0,
+      archived: 2, missingCreatedAt: 0, missingSettledAt: 0, fallbackTimeBasis: 0,
+      trendClamped: false, sampleLow: false, truncated: null,
+    },
+    summary: {
+      total: 12, active: 4, settled: 8, archived: 2, cancelled: 1,
+      byStatus: { running: 3, queued: 1, done: 4, failed: 2, blocked: 1, cancelled: 1 },
+      distribution: [
+        { status: 'running', count: 3, share: 0.25 },
+        { status: 'queued', count: 1, share: 0.0833 },
+        { status: 'done', count: 4, share: 0.3333 },
+        { status: 'failed', count: 2, share: 0.1667 },
+        { status: 'blocked', count: 1, share: 0.0833 },
+        { status: 'cancelled', count: 1, share: 0.0833 },
+      ],
+      completion: {
+        done: 4, base: 6, rate: 0.6667, sampleLow: false,
+        includes: ['done', 'ended', 'failed', 'blocked', 'interrupted'],
+        excludes: ['running', 'queued', 'cancelled'],
+      },
+      overdue: {
+        thresholdHours: 24, basis: 'proxy:createdAt', dueAtAvailable: false,
+        pendingFields: ['due_at'], open: 1, settled: 2, unknown: 0, total: 3, rate: 0.25,
+      },
+    },
+    trend: {
+      days: [
+        { day: dayKey(5), created: 3, done: 1, failed: 0, blocked: 0, interrupted: 0, cancelled: 0, ended: 0, settled: 1 },
+        { day: dayKey(3), created: 4, done: 2, failed: 1, blocked: 0, interrupted: 0, cancelled: 0, ended: 0, settled: 3 },
+        { day: dayKey(1), created: 5, done: 1, failed: 0, blocked: 1, interrupted: 0, cancelled: 1, ended: 0, settled: 3 },
+      ],
+      range: { from: dayKey(7), to: dayKey(0), days: 8 },
+      compare: {
+        available: true,
+        previousRange: { from: hoursAgo(24 * 14), until: hoursAgo(24 * 7) },
+        current: { created: 12, done: 4, base: 6, completionRate: 0.6667 },
+        previous: { created: 9, done: 3, base: 5, completionRate: 0.6 },
+        createdDelta: 3, doneDelta: 1, rateDelta: 0.0667,
+      },
+    },
+    warnings: ['owner-proxy', 'due-at-proxy'],
+  }
+  return Object.assign({}, base, overrides)
+}
+
+/** 空账本：n=0 必须显示 em dash + 空态，而不是 0% / 0 条。 */
+function emptyAnalyticsFixture() {
+  const data = analyticsFixture()
+  data.coverage = Object.assign({}, data.coverage, { sourceTasks: 0, inWindow: 0, matched: 0, retiredTraces: 0 })
+  data.summary = Object.assign({}, data.summary, {
+    total: 0, active: 0, settled: 0, archived: 0, cancelled: 0,
+    distribution: [], byStatus: {},
+    completion: { done: 0, base: 0, rate: null, sampleLow: false, includes: [], excludes: [] },
+    overdue: { thresholdHours: 24, basis: 'proxy:createdAt', dueAtAvailable: false, pendingFields: ['due_at'], open: 0, settled: 0, unknown: 0, total: 0, rate: null },
+  })
+  data.trend = { days: [], range: { from: dayKey(7), to: dayKey(0), days: 8 }, compare: { available: false, reason: 'all-window' } }
+  return data
+}
+
+/**
+ * 跨天取消：那天 `created / done / problems` 都是 0，只有 `cancelled=1`。
+ *
+ * 这是图表判空的老对头：判空只看「新建 / 完成 / 问题」三项时，这一天会被
+ * 标成「空天补 0」——而同一份数据的表格里那一天明明写着 cancelled=1。
+ * 图表与表格对同一件事给了两个答案。
+ */
+function crossDayCancelFixture() {
+  const data = analyticsFixture()
+  const cancelDay = dayKey(1)
+  data.trend = {
+    days: [
+      { day: dayKey(2), created: 1, done: 1, failed: 0, blocked: 0, interrupted: 0, cancelled: 0, ended: 0, settled: 1 },
+      { day: cancelDay, created: 0, done: 0, failed: 0, blocked: 0, interrupted: 0, cancelled: 1, ended: 0, settled: 1 },
+    ],
+    range: { from: dayKey(3), to: dayKey(0), days: 4 },
+    compare: { available: false, reason: 'all-window' },
+  }
+  data.__cancelDay = cancelDay
+  return data
+}
+
+function degradedAnalyticsFixture() {  return {
+    analyticsVersion: 1,
+    generatedAt: new Date().toISOString(),
+    ok: false,
+    degraded: true,
+    reason: '聚合失败：ledger 损坏',
+    scope: { window: { key: '7d', days: 7, since: hoursAgo(24 * 7) } },
+    facets: { statuses: [], owners: [], workspaces: [], hostWorkspaces: [], groups: [] },
+    coverage: {
+      sourceTasks: 0, retiredTraces: 0, inWindow: 0, matched: 0, excludedByFilters: 0,
+      archived: 0, missingCreatedAt: 0, missingSettledAt: 0, fallbackTimeBasis: 0,
+      trendClamped: false, sampleLow: false, truncated: null,
+    },
+    summary: null,
+    trend: { days: [], range: null, compare: { available: false, reason: 'degraded' } },
+    warnings: ['degraded'],
   }
 }
 
@@ -1634,6 +1814,23 @@ check('默认点亮的是 memory.window 对应的 7d',
 const beforeWindow = statsRequests().length
 findAll(p1.tree, (item) => item.props && item.props['data-window'] === '30d')[0].props.onClick()
 update(p1)
+/*
+ * 口径行必须跟着**当前展示的 payload** 走，而不是跟着「即将生效的选择」走。
+ *
+ * 切窗口时新请求还在路上，面板上显示的仍是**旧 payload** 的数字。如果窗口
+ * 提示已经换成新窗口，界面上就是「新标签 + 旧数字」——两件事说的不是同一批
+ * 数据，读者会以为这批数字是 30 天口径的。
+ *
+ * 所以在响应到达之前，口径行必须还写着旧窗口。
+ */
+const noteInFlight = findAll(p1.tree, (item) => item.props && item.props['data-scope-note'])[0]
+check('切窗口后新响应到达前，口径行仍写旧窗口（不出现「新标签 + 旧数字」）',
+  Boolean(noteInFlight) && text(noteInFlight).includes('最近 7 天'),
+  noteInFlight ? text(noteInFlight).replace(/\s+/g, ' ') : 'missing')
+const scopeLineInFlight = findAll(p1.tree, (item) => item.props && item.props['data-scope'] === 'true')[0]
+check('样本口径行的窗口同样跟着旧 payload 走',
+  Boolean(scopeLineInFlight) && text(scopeLineInFlight).includes('7 天'),
+  scopeLineInFlight ? text(scopeLineInFlight).replace(/\s+/g, ' ').slice(0, 120) : 'missing')
 await tick()
 await tick()
 update(p1)
@@ -2465,6 +2662,236 @@ check('续派失败后输入框仍然开着、草稿还在',
   Boolean(findAll(contPanel.tree, (item) => item.props && item.props['data-continue-input'] === 't-done-5')[0]))
 unmount(contPanel)
 postReply = { ok: true, target: null }
+
+/* ═════════════════════ 分析数据看板（切换 / 筛选 / 状态） ═════════════════════ */
+
+console.log('\n分析数据看板')
+boardResponse = boardFixture()
+statsResponse = statsFixture()
+statsMode = 'ok'
+retiredResponse = { ok: true, count: 0, dropped: 0, entries: [] }
+retiredMode = 'ok'
+getMode = 'ok'
+postReply = { ok: true, target: null }
+analyticsResponse = analyticsFixture()
+analyticsMode = 'ok'
+
+const anPanel = mount(panelReg.component)
+await tick()
+await tick()
+update(anPanel)
+
+const surfaceTab = (root, id) => findAll(root.tree, (item) => item && item.type === 'button'
+  && item.props && item.props['data-surface-tab'] === id)[0]
+const anFind = (root, attr, value) => findAll(root.tree, (item) => item && item.props && item.props[attr] === value)
+const anMetric = (root, id) => anFind(root, 'data-an-metric', id)[0]
+const anSelect = (root, field) => findAll(root.tree, (item) => item && item.type === 'select'
+  && item.props && item.props['data-an-select'] === field)[0]
+const anLastQuery = () => analyticsRequests().at(-1).url
+const anSettle = async (root) => { await tick(); await tick(); update(root) }
+
+check('默认停在任务看板（不改动原首屏）',
+  surfaceTab(anPanel, 'tasks') && surfaceTab(anPanel, 'tasks').props['aria-selected'] === true)
+check('任务看板模式下完全不请求 /board/analytics', analyticsRequests().length === 0)
+check('顶层切换条只有两项（任务 / 分析）',
+  ['tasks', 'analytics'].every((id) => Boolean(surfaceTab(anPanel, id))))
+check('并列形态已彻底移除', !surfaceTab(anPanel, 'split')
+  && findAll(anPanel.tree, (item) => item && item.props && (item.props['data-pane'] || item.className === 'dsh-sa-split')).length === 0)
+check('原有 5 个状态 chip 仍在',
+  ['全部', '进行中', '需要处理', '已归档', '已退休'].every((label) => buttonsOf(anPanel.tree)
+    .some((item) => item.props['aria-pressed'] !== undefined && text(item).includes(label))))
+check('原有任务行操作仍在', buttonsOf(anPanel.tree).some((item) => text(item).includes('取消')))
+check('原有任务行仍在', text(anPanel.tree).includes('t-run-1'))
+
+surfaceTab(anPanel, 'analytics').props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('切到分析看板会拉 /board/analytics', analyticsRequests().length === 1)
+/*
+ * 任务看板那条 2 秒轮询在分析看板可见时必须**停掉**。
+ *
+ * 原来它不看面板：切过去之后任务快照仍然每 2 秒落一次状态，于是整个分析视图
+ * 每 2 秒重建一次（分析看板自己的轮询是 10 秒）——两套轮询互相踩，
+ * 用户盯着分析数字时整个视图在背后反复重绘。
+ *
+ * 判据用「有没有再发 /board 快照请求」：轮询停掉 = 不取数也不落状态。
+ */
+const boardReqsBefore = boardSnapshotRequests().length
+await new Promise((resolve) => setTimeout(resolve, 2200))
+update(anPanel)
+check('切到分析看板后 2 秒任务快照轮询停掉（分析视图不再每 2 秒重建）',
+  boardSnapshotRequests().length === boardReqsBefore,
+  `${boardReqsBefore} → ${boardSnapshotRequests().length}`)
+check('默认查询串带窗口与超时阈值',
+  anLastQuery().includes('window=7d') && anLastQuery().includes('overdueHours=24'), anLastQuery())
+check('分析视图根节点渲染', anFind(anPanel, 'data-an-view', 'true').length === 1)
+check('分析视图不渲染任务看板的 header', anFind(anPanel, 'data-view-tab', 'overview').length === 0)
+check('任务总量 KPI = 12', Boolean(anMetric(anPanel, 'total')) && text(anMetric(anPanel, 'total')).includes('12'))
+check('完成率 KPI = 66.7%', Boolean(anMetric(anPanel, 'rate')) && text(anMetric(anPanel, 'rate')).includes('66.7%'))
+check('超时代理 KPI = 3', Boolean(anMetric(anPanel, 'overdue')) && text(anMetric(anPanel, 'overdue')).includes('3'))
+check('未结算 KPI = 4', Boolean(anMetric(anPanel, 'active')) && text(anMetric(anPanel, 'active')).includes('4'))
+check('状态分布 6 行（点行可下钻）', anFind(anPanel, 'data-an-section', 'status').length === 1
+  && findAll(anPanel.tree, (item) => item && item.props && item.props['data-an-status']).length === 6)
+check('趋势按 range 覆盖 8 个自然日（合并后仍可核对到每天）',
+  (function () {
+    const dayNodes = findAll(anPanel.tree, (item) => item && item.props && item.props['data-an-day'])
+    const emptyDays = dayNodes
+      .filter((item) => item.props['data-an-empty-range'])
+      .reduce((sum, item) => sum + Number(item.props['data-an-empty-range']), 0)
+    const factDays = dayNodes.filter((item) => !item.props['data-an-empty-range']).length
+    return emptyDays + factDays === 8
+  })())
+check('图表把连续空天合并成一行（4 段空天，最长一段 2 天）',
+  findAll(anPanel.tree, (item) => item && item.props && item.props['data-an-empty-range']).length === 4
+  && anFind(anPanel, 'data-an-empty-range', '2').length === 1)
+check('核心指标区标题不再与大标题重复',
+  text(anFind(anPanel, 'data-an-section', 'kpi')[0]).includes('核心指标'))
+check('环比行给出「较上一等长窗口」',
+  anFind(anPanel, 'data-an-compare', 'true').length === 1 && text(anPanel.tree).includes('较上一等长窗口'))
+check('统计口径表常驻（含待接入字段）',
+  anFind(anPanel, 'data-an-defs', 'true').length === 1 && text(anPanel.tree).includes('待接入：due_at'))
+check('样本口径行说明退休留痕不并入',
+  anFind(anPanel, 'data-an-scope', 'true').length === 1 && text(anPanel.tree).includes('不并入'))
+check('负责人与逾期都标注为代理口径（待业务确认）',
+  text(anPanel.tree).includes('待业务确认'))
+
+let anBefore = analyticsRequests().length
+anSelect(anPanel, 'status').props.onChange({ target: { value: 'done' } })
+update(anPanel)
+await anSettle(anPanel)
+check('状态筛选触发重取且写进查询串',
+  analyticsRequests().length === anBefore + 1 && anLastQuery().includes('status=done'), anLastQuery())
+
+anBefore = analyticsRequests().length
+anFind(anPanel, 'data-an-window', '30d')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('时间范围切换写进查询串',
+  analyticsRequests().length === anBefore + 1 && anLastQuery().includes('window=30d'), anLastQuery())
+
+anBefore = analyticsRequests().length
+anFind(anPanel, 'data-an-custom-days', 'true')[0].props.onChange({ target: { value: '14' } })
+update(anPanel)
+anFind(anPanel, 'data-an-apply', 'true')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('自定义天数生效（14d）',
+  analyticsRequests().length === anBefore + 1 && anLastQuery().includes('window=14d'), anLastQuery())
+
+anBefore = analyticsRequests().length
+anSelect(anPanel, 'owner').props.onChange({ target: { value: 'session-lead' } })
+update(anPanel)
+await anSettle(anPanel)
+check('负责人筛选写进查询串（现有字段 parentSessionId 代理）',
+  anLastQuery().includes('owner=session-lead'), anLastQuery())
+
+anFind(anPanel, 'data-an-trend-mode', 'table')[0].props.onClick()
+update(anPanel)
+check('表格是图表的等价物', anFind(anPanel, 'data-table', 'analytics-trend').length === 1)
+anFind(anPanel, 'data-an-trend-mode', 'chart')[0].props.onClick()
+update(anPanel)
+check('切回图表形态', anFind(anPanel, 'data-table', 'analytics-trend').length === 0)
+
+/* 跨天取消：图表的「空天」判据必须与表格列同源（cancelled / ended 也算那天有事）。 */
+const cancelFixture = crossDayCancelFixture()
+const cancelDay = cancelFixture.__cancelDay
+analyticsResponse = cancelFixture
+anFind(anPanel, 'data-an-refresh', 'true')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+// 注意用「属性为真」筛，而不是按值等于 undefined 筛——后者会把所有没带这个
+// 属性的节点也匹配进来（props 里键存在但值是 undefined）。
+const emptyDayRows = findAll(anPanel.tree, (item) => item.props && item.props['data-an-empty-range'])
+  .map((row) => row.props['data-an-day'])
+const factDayRows = findAll(anPanel.tree, (item) => item.props && item.props['data-an-day']
+  && !item.props['data-an-empty-range'])
+  .map((row) => row.props['data-an-day'])
+check('跨天取消那天不算「空天」（图表判空与表格列同源）',
+  !emptyDayRows.includes(cancelDay) && factDayRows.includes(cancelDay),
+  `空天行=${JSON.stringify(emptyDayRows)} 有事的天=${JSON.stringify(factDayRows)}`)
+analyticsResponse = analyticsFixture()
+anFind(anPanel, 'data-an-refresh', 'true')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+
+anBefore = analyticsRequests().length
+anFind(anPanel, 'data-an-status', 'failed')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('点状态分布行即把状态筛选切过去',
+  analyticsRequests().length === anBefore + 1 && anLastQuery().includes('status=failed'), anLastQuery())
+
+anBefore = analyticsRequests().length
+anFind(anPanel, 'data-an-clear', 'true')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('清除筛选回到默认窗口与全部状态',
+  anLastQuery().includes('window=7d') && !anLastQuery().includes('status='), anLastQuery())
+
+/* n=0：空态；分母为 0：em dash 而不是 0%。 */
+analyticsResponse = emptyAnalyticsFixture()
+anFind(anPanel, 'data-an-refresh', 'true')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('空数据显示空态 + 清除筛选入口', anFind(anPanel, 'data-an-empty', 'true').length === 1)
+check('空数据不说「0%」',
+  Boolean(anFind(anPanel, 'data-an-empty', 'true')[0])
+  && !text(anFind(anPanel, 'data-an-empty', 'true')[0]).includes('0%'))
+
+const noBase = analyticsFixture()
+noBase.summary = Object.assign({}, noBase.summary, {
+  total: 2, active: 2, settled: 0, archived: 0, cancelled: 0,
+  distribution: [{ status: 'running', count: 1, share: 0.5 }, { status: 'queued', count: 1, share: 0.5 }],
+  completion: { done: 0, base: 0, rate: null, sampleLow: false, includes: [], excludes: [] },
+  overdue: { thresholdHours: 24, basis: 'proxy:createdAt', dueAtAvailable: false, pendingFields: [], open: 0, settled: 0, unknown: 0, total: 0, rate: null },
+})
+analyticsResponse = noBase
+anFind(anPanel, 'data-an-refresh', 'true')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('完成率分母为 0 时显示 —', Boolean(anMetric(anPanel, 'rate')) && text(anMetric(anPanel, 'rate')).includes('—'))
+
+/* 首次取数就失败：错误态 + 重试 + 回到任务看板，任务看板本身不受影响。 */
+for (const mode of ['404', 'degraded', 'bad']) {
+  analyticsMode = mode
+  const broken = mount(panelReg.component)
+  await anSettle(broken)
+  surfaceTab(broken, 'analytics').props.onClick()
+  update(broken)
+  await anSettle(broken)
+  check(`分析接口 ${mode} 时显示可解释的错误态`, anFind(broken, 'data-an-error', 'true').length === 1)
+  check(`分析接口 ${mode} 时给出「回到任务看板」`, anFind(broken, 'data-an-back', 'true').length > 0)
+  unmount(broken)
+}
+
+/* 有旧数据时失败：保留内容 + 陈旧提示，而不是白屏。 */
+analyticsMode = 'ok'
+analyticsResponse = analyticsFixture()
+anFind(anPanel, 'data-an-refresh', 'true')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+analyticsMode = '404'
+anFind(anPanel, 'data-an-refresh', 'true')[0].props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('刷新失败保留上一次成功汇总 + 陈旧提示',
+  anFind(anPanel, 'data-an-content', 'true').length === 1 && text(anPanel.tree).includes('展示的是上一次成功汇总的数据'))
+analyticsMode = 'ok'
+
+surfaceTab(anPanel, 'tasks').props.onClick()
+update(anPanel)
+check('切回任务看板且任务行可见',
+  surfaceTab(anPanel, 'tasks').props['aria-selected'] === true && text(anPanel.tree).includes('t-run-1'))
+check('切回后原有 chip 与行操作都还在',
+  buttonsOf(anPanel.tree).some((item) => item.props['aria-pressed'] !== undefined && text(item).includes('需要处理'))
+  && buttonsOf(anPanel.tree).some((item) => text(item).includes('取消')))
+
+surfaceTab(anPanel, 'analytics').props.onClick()
+update(anPanel)
+await anSettle(anPanel)
+check('再次进入分析看板，KPI 与筛选控件都在',
+  anFind(anPanel, 'data-an-metric', 'total').length === 1 && Boolean(anSelect(anPanel, 'status')))
+unmount(anPanel)
 
 /* ═════════════════════ 文案成对（zh/en） ═════════════════════ */
 

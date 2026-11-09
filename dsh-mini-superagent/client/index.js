@@ -470,6 +470,124 @@ window.__ModuleLoader__.load({
       'drawer.noSessionHint': '这条记录没有可打开的子会话（已归档或已退休），只能复制 id 去 dispatch_inspect 查',
       'drawer.retiredNote': '该任务已退休：只保留留痕（何时、为什么、最后一条摘要），报告正文不可用',
       'drawer.summary': '最后一条摘要',
+      /* ── 分析数据看板（与任务看板平级，文案成对硬编码，见 scripts/client-smoke.mjs） ── */
+      'an.surface': '看板',
+      'an.surfaceTasks': '任务看板',
+      'an.surfaceAnalytics': '分析看板',
+      'an.surfaceHint': '两块看板共用一个入口；任务看板的字段、入口与所有操作保持不变',
+      'an.title': '分析数据看板',
+      'an.kpi': '核心指标',
+      'an.kpiHint': '四张卡基于同一批筛选后的任务',
+      'an.proxyNote': '代理口径（待业务确认）：负责人=主会话 · 逾期=时长阈值',
+      'an.foot': '数字每 10 秒刷新；口径以「统计口径与数据可得性」为准',
+      'an.emptyRange': '连续 {n} 天无任务（空天补 0）',
+      'an.emptyDay': '无任务（空天补 0）',
+      'an.filters': '筛选条件',
+      'an.window': '时间范围',
+      'an.status': '状态',
+      'an.owner': '负责人',
+      'an.workspace': '工作区',
+      'an.group': '批次',
+      'an.overdueHours': '超时阈值',
+      'an.all': '全部',
+      'an.allStatus': '全部状态',
+      'an.allOwner': '全部负责人',
+      'an.allWorkspace': '全部工作区',
+      'an.allGroup': '全部批次',
+      'an.unknown': '未标注',
+      'an.customDays': '自定义天数',
+      'an.apply': '应用',
+      'an.clear': '清除筛选',
+      'an.refresh': '刷新',
+      'an.updatedAt': '汇总于',
+      'an.loading': '正在汇总分析数据…',
+      'an.loadingHint': '读取完整账本，不使用任务看板的 200 条快照',
+      'an.unavailable': '分析数据暂时取不到',
+      'an.degraded': '分析数据聚合失败，已降级返回',
+      'an.stale': '展示的是上一次成功汇总的数据',
+      'an.retry': '重试',
+      'an.backTasks': '回到任务看板',
+      'an.empty': '这个筛选下没有任务',
+      'an.emptyHint': '放宽时间范围或清除筛选条件后再看',
+      'an.emptyTrend': '这个时间范围里没有趋势数据',
+      'an.metric.total': '任务总量',
+      'an.metric.totalHint': '筛选后账本里的任务条数（含已归档）',
+      'an.metric.rate': '完成率',
+      'an.metric.rateHint': 'done ÷ 可结算样本；取消与未结算不进分母',
+      'an.metric.overdue': '超时代理',
+      'an.metric.overdueHint': '创建后超过阈值仍未结算，或端到端耗时超过阈值的条数',
+      'an.metric.active': '未结算',
+      'an.metric.activeHint': 'running + queued，此刻还在账里流动的任务',
+      'an.metric.none': '—',
+      'an.rateSub': '{done} / {base} 条可结算样本',
+      'an.overdueSub': '未结 {open} · 已结 {settled} · 未知 {unknown}',
+      'an.activeSub': '已结算 {settled} · 已归档 {archived}',
+      'an.totalSub': '账本 {source} 条 · 命中 {matched} 条',
+      'an.sampleLow': '样本少（n<5）',
+      'an.statusDist': '状态分布',
+      'an.statusDistHint': '点某一行即可把「状态」筛选切到该状态',
+      'an.trend': '趋势变化',
+      'an.trendHint': '新建按创建日、完成/异常按结算日（UTC）；空天补 0',
+      'an.chart': '图表',
+      'an.table': '表格',
+      'an.newCreated': '新建',
+      'an.done': '完成',
+      'an.problems': '异常',
+      'an.compare': '较上一等长窗口',
+      'an.compareNone': '「全部时间」没有上一窗口可比',
+      'an.compareSample': '完成率 —（无可比样本）',
+      'an.compareSampleHint': '任一窗口没有可结算样本时，不计算完成率差值',
+      'an.overdueBlock': '逾期情况（代理指标）',
+      'an.overdueBlockHint': '账本无 due_at / SLA：只统计超过阈值的时长，阈值由你设定（不是业务逾期）',
+      'an.overdueOpen': '未结算超阈值',
+      'an.overdueSettled': '已结算超阈值',
+      'an.overdueUnknown': '时间未知',
+      'an.overdueRate': '占比',
+      'an.definitions': '统计口径与数据可得性',
+      'an.definitionsHint': '展开查看每个指标的分子、分母、时间字段与待接入字段',
+      'an.def.metric': '指标',
+      'an.def.formula': '计算口径',
+      'an.def.source': '数据字段 / 可得性',
+      'an.def.total': '任务总量',
+      'an.def.totalFormula': '筛选后任务条数；窗口按 createdAt 归属，all 时连缺创建时间的行也计入',
+      'an.def.totalSource': 'dispatch.table.tasks 全量（不受 /board 200 条上限影响）；退休留痕单列不并入',
+      'an.def.rate': '完成率',
+      'an.def.rateFormula': 'done ÷ (done+ended+failed+blocked+interrupted)；n=0 显示 —，1≤n<5 标注样本少',
+      'an.def.rateSource': 'status + COMPLETION_BASE；取消、running、queued 不进分母',
+      'an.def.status': '状态分布',
+      'an.def.statusFormula': '每个 status 的条数 ÷ 任务总量（分母含归档与取消）',
+      'an.def.statusSource': 'status 字段，直接计数',
+      'an.def.overdue': '超时代理',
+      'an.def.overdueFormula': '未结算：now − createdAt > 阈值；已结算：settle − createdAt > 阈值。默认 24h，可调',
+      'an.def.overdueSource': 'createdAt / settledAt（旧数据回退 updatedAt）；待接入：due_at',
+      'an.def.trend': '趋势变化',
+      'an.def.trendFormula': '按 UTC 自然日分桶；新建按 createdAt、完成与异常按 settledAt；环比 = 当前窗口 − 上一等长窗口',
+      'an.def.trendSource': 'createdAt / settledAt；all 窗口不提供环比；范围超过 366 天会裁剪',
+      'an.def.owner': '负责人筛选',
+      'an.def.ownerFormula': '以「派发主会话」代理负责人；缺字段归到「未标注」',
+      'an.def.ownerSource': 'parentSessionId；待接入：assignee / owner（账本目前没有人员字段）',
+      'an.coverage': '样本口径',
+      'an.coverageText': '账本 {source} 条 · 窗口内 {inWindow} 条 · 命中 {matched} 条 · 退休留痕 {retired} 条（不并入）',
+      'an.warn.missingTimes': '有任务缺创建/结算时间，趋势可能低估',
+      'an.warn.fallback': '部分旧数据用 updatedAt 近似结算时刻',
+      'an.warn.clamped': '趋势范围超过 366 天，已裁剪到最近 366 天',
+      'an.warn.truncated': '账本触顶或留痕被丢弃，结果为下界',
+      'an.warn.invalidWindow': '时间范围参数无效，已退回默认窗口',
+      'an.warn.invalidOverdueHours': '超时阈值无效，已退回 24 小时',
+      'an.warn.ownerProxy': '账本没有人员字段，「负责人」按派发主会话代理（待业务确认）',
+      'an.warn.dueAtProxy': '账本没有截止时间字段，「逾期」为时长代理指标（待业务确认）',
+      'an.warn.degraded': '聚合失败，数字不可信',
+      'an.hours': '{n} 小时',
+      'an.days': '{n} 天',
+      'an.windowPreset.24h': '24 小时',
+      'an.windowPreset.7d': '7 天',
+      'an.windowPreset.30d': '30 天',
+      'an.windowPreset.all': '全部时间',
+      'an.deltaCreated': '新建 {value}',
+      'an.deltaDone': '完成 {value}',
+      'an.deltaRate': '完成率 {value}',
+      'an.trendTableHint': '表格是图表的等价物，可整块复制核对',
+      'an.day': '日期',
     }
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
@@ -853,6 +971,124 @@ window.__ModuleLoader__.load({
       'drawer.noSessionHint': 'This record has no openable worker session (archived or retired); copy the id and query it with dispatch_inspect',
       'drawer.retiredNote': 'This task was retired: only the trace remains (when, why, the last summary); report bodies are unavailable',
       'drawer.summary': 'Last summary',
+      /* Analytics dashboard (zh/en keys must stay identical, see scripts/client-smoke.mjs). */
+      'an.surface': 'Board',
+      'an.surfaceTasks': 'Tasks',
+      'an.surfaceAnalytics': 'Analytics',
+      'an.surfaceHint': 'Both boards share one entry point; the task board keeps every field, entry and action',
+      'an.title': 'Task analytics',
+      'an.kpi': 'Key metrics',
+      'an.kpiHint': 'All four cards use the same filtered task set',
+      'an.proxyNote': 'Proxies (pending confirmation): owner = parent session · overtime = duration threshold',
+      'an.foot': 'Refreshes every 10s; definitions are in "Metric definitions and data availability"',
+      'an.emptyRange': '{n} days with no tasks (filled with 0)',
+      'an.emptyDay': 'No tasks (filled with 0)',
+      'an.filters': 'Filters',
+      'an.window': 'Time range',
+      'an.status': 'Status',
+      'an.owner': 'Owner',
+      'an.workspace': 'Workspace',
+      'an.group': 'Batch',
+      'an.overdueHours': 'Overdue threshold',
+      'an.all': 'All',
+      'an.allStatus': 'All statuses',
+      'an.allOwner': 'All owners',
+      'an.allWorkspace': 'All workspaces',
+      'an.allGroup': 'All batches',
+      'an.unknown': 'Not specified',
+      'an.customDays': 'Custom days',
+      'an.apply': 'Apply',
+      'an.clear': 'Clear filters',
+      'an.refresh': 'Refresh',
+      'an.updatedAt': 'Aggregated at',
+      'an.loading': 'Aggregating analytics…',
+      'an.loadingHint': 'Reads the full ledger, not the 200-task board snapshot',
+      'an.unavailable': 'Analytics data is temporarily unavailable',
+      'an.degraded': 'Analytics aggregation failed; degraded response returned',
+      'an.stale': 'Showing the last successful aggregation',
+      'an.retry': 'Retry',
+      'an.backTasks': 'Back to task board',
+      'an.empty': 'No tasks match these filters',
+      'an.emptyHint': 'Widen the time range or clear the filters',
+      'an.emptyTrend': 'No trend data in this time range',
+      'an.metric.total': 'Total tasks',
+      'an.metric.totalHint': 'Tasks in the filtered ledger (archived included)',
+      'an.metric.rate': 'Completion rate',
+      'an.metric.rateHint': 'done ÷ countable settled; cancelled and unsettled are excluded',
+      'an.metric.overdue': 'Overtime proxy',
+      'an.metric.overdueHint': 'Unsettled past the threshold since creation, or settled past the threshold end to end',
+      'an.metric.active': 'Unsettled',
+      'an.metric.activeHint': 'running + queued, tasks still moving through the ledger',
+      'an.metric.none': '—',
+      'an.rateSub': '{done} / {base} countable settled',
+      'an.overdueSub': 'open {open} · settled {settled} · unknown {unknown}',
+      'an.activeSub': 'settled {settled} · archived {archived}',
+      'an.totalSub': 'ledger {source} · matched {matched}',
+      'an.sampleLow': 'Low sample (n<5)',
+      'an.statusDist': 'Status distribution',
+      'an.statusDistHint': 'Click a row to apply that status as a filter',
+      'an.trend': 'Trend',
+      'an.trendHint': 'Created by creation day, done/problems by settlement day (UTC); empty days = 0',
+      'an.chart': 'Chart',
+      'an.table': 'Table',
+      'an.newCreated': 'Created',
+      'an.done': 'Done',
+      'an.problems': 'Problems',
+      'an.compare': 'vs previous equal window',
+      'an.compareNone': 'No previous window exists for "all time"',
+      'an.compareSample': 'Completion — (no comparable sample)',
+      'an.compareSampleHint': 'Completion rate delta is skipped when either window has no countable sample',
+      'an.overdueBlock': 'Overtime (proxy metric)',
+      'an.overdueBlockHint': 'No due_at / SLA in the ledger: only duration past your threshold (not business overdue)',
+      'an.overdueOpen': 'Unsettled past threshold',
+      'an.overdueSettled': 'Settled past threshold',
+      'an.overdueUnknown': 'Unknown time',
+      'an.overdueRate': 'Share',
+      'an.definitions': 'Metric definitions and data availability',
+      'an.definitionsHint': 'Expand for each metric numerator, denominator, time field and missing field',
+      'an.def.metric': 'Metric',
+      'an.def.formula': 'Definition',
+      'an.def.source': 'Fields / availability',
+      'an.def.total': 'Total tasks',
+      'an.def.totalFormula': 'Count of filtered tasks; window uses createdAt; "all" also includes rows without a creation time',
+      'an.def.totalSource': 'Full dispatch.table.tasks (not capped by the 200-row /board snapshot); retired traces listed separately',
+      'an.def.rate': 'Completion rate',
+      'an.def.rateFormula': 'done ÷ (done+ended+failed+blocked+interrupted); n=0 shows —, 1≤n<5 is flagged as a low sample',
+      'an.def.rateSource': 'status + COMPLETION_BASE; cancelled, running and queued are excluded',
+      'an.def.status': 'Status distribution',
+      'an.def.statusFormula': 'Count per status ÷ total tasks (archived and cancelled included in the denominator)',
+      'an.def.statusSource': 'status field, counted directly',
+      'an.def.overdue': 'Overtime proxy',
+      'an.def.overdueFormula': 'Unsettled: now − createdAt > threshold; settled: settle − createdAt > threshold. Default 24h, adjustable',
+      'an.def.overdueSource': 'createdAt / settledAt (older rows fall back to updatedAt); missing: due_at',
+      'an.def.trend': 'Trend',
+      'an.def.trendFormula': 'UTC day buckets; created by createdAt, done/problems by settledAt; delta = current window − previous equal window',
+      'an.def.trendSource': 'createdAt / settledAt; no comparison for "all"; ranges longer than 366 days are clipped',
+      'an.def.owner': 'Owner filter',
+      'an.def.ownerFormula': 'Parent session is used as an owner proxy; missing values are grouped as "Not specified"',
+      'an.def.ownerSource': 'parentSessionId; missing: assignee / owner (the ledger has no person field today)',
+      'an.coverage': 'Sample coverage',
+      'an.coverageText': 'ledger {source} · in window {inWindow} · matched {matched} · retired traces {retired} (excluded)',
+      'an.warn.missingTimes': 'Some tasks lack creation/settlement times; the trend may be underestimated',
+      'an.warn.fallback': 'Some older rows use updatedAt as an approximate settlement time',
+      'an.warn.clamped': 'Trend range exceeds 366 days; clipped to the most recent 366 days',
+      'an.warn.truncated': 'Ledger cap reached or retired traces dropped: these numbers are a lower bound',
+      'an.warn.invalidWindow': 'Invalid time range; fell back to the default window',
+      'an.warn.invalidOverdueHours': 'Invalid overdue threshold; fell back to 24 hours',
+      'an.warn.ownerProxy': 'No person field in the ledger: "Owner" uses the parent session as a proxy (pending business confirmation)',
+      'an.warn.dueAtProxy': 'No due-date field in the ledger: "Overtime" is a duration proxy (pending business confirmation)',
+      'an.warn.degraded': 'Aggregation failed; numbers are not trustworthy',
+      'an.hours': '{n} h',
+      'an.days': '{n} days',
+      'an.windowPreset.24h': '24 hours',
+      'an.windowPreset.7d': '7 days',
+      'an.windowPreset.30d': '30 days',
+      'an.windowPreset.all': 'All time',
+      'an.deltaCreated': 'created {value}',
+      'an.deltaDone': 'done {value}',
+      'an.deltaRate': 'completion {value}',
+      'an.trendTableHint': 'The table is an exact copyable equivalent of the chart',
+      'an.day': 'Day',
     }
 
     /** 当前翻译函数；attachLocale 成功后会替换成 locale 绑定的 t()。 */
@@ -1630,6 +1866,54 @@ window.__ModuleLoader__.load({
         throw new Error(tr('badResponse'))
       }
       if (!data || !data.coverage || typeof data.coverage !== 'object') throw new Error(tr('badResponse'))
+      return data
+    }
+
+    /**
+     * 分析看板的筛选条件 → 查询串。
+     *
+     * 只发**用户真的选过**的维度：`all` 与空值不进 URL，Host 侧 normalize 后的
+     * `scope` 才能原样回显（否则「全部」会被记成一个具体筛选，口径行说不清）。
+     */
+    function analyticsQuery(filters) {
+      const params = new URLSearchParams()
+      params.set('window', filters.window || '7d')
+      if (filters.status && filters.status !== 'all') params.set('status', filters.status)
+      if (filters.owner && filters.owner !== 'all') params.set('owner', filters.owner)
+      if (filters.workspaceId && filters.workspaceId !== 'all') params.set('workspaceId', filters.workspaceId)
+      if (filters.group && filters.group !== 'all') params.set('group', filters.group)
+      params.set('overdueHours', String(filters.overdueHours || 24))
+      return '?' + params.toString()
+    }
+
+    /**
+     * 读分析看板聚合。
+     *
+     * 与 `readStats` 一样不静默造空结构：HTTP 404 / 非法 JSON 抛错，
+     * 「Host 明确降级（200 + degraded:true + summary:null）」是**合格响应**，
+     * 由渲染层单独显示「聚合失败」，两者不能画成同一个界面。
+     */
+    async function readAnalytics(query, signal) {
+      const response = await fetch(API + '/analytics' + (query || ''), {
+        method: 'GET',
+        headers: { accept: 'application/json', ...AUTH_HEADERS },
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal,
+      })
+      if (!response.ok) {
+        const error = new Error(tr('httpError') + ' HTTP ' + response.status)
+        error.status = response.status
+        throw error
+      }
+      let data
+      try { data = await response.json() }
+      catch (error) { throw new Error(tr('badResponse')) }
+      if (!data || !data.coverage || typeof data.coverage !== 'object'
+          || !data.trend || typeof data.trend !== 'object'
+          || !data.facets || !Array.isArray(data.facets.statuses)) {
+        throw new Error(tr('badResponse'))
+      }
       return data
     }
 
@@ -2760,6 +3044,193 @@ window.__ModuleLoader__.load({
 }
 @media (prefers-reduced-motion: reduce) {
   .dsh-sa-dot-pulse { animation: none; }
+}
+
+/*
+ * ── 分析数据看板（与任务看板平级，二选一切换） ──
+ *
+ * 三条约束：
+ * 1. 复用 .dsh-sa-card / .dsh-sa-dist / .dsh-sa-trend-* / .dsh-sa-table 等既有组件样式，
+ *    新看板与任务看板「看起来是同一个产品」，不另起一套配色与圆角；
+ * 2. 所有新选择器仍挂在 .dsh-sa 前缀语义下，随面板 <style> 一起卸载；
+ * 3. 折行按**容器宽度**而不是视口决定：侧边栏再窄也不会把内容挤成横向滚动。
+ */
+.dsh-sa-surfacebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px 0;
+}
+.dsh-sa-surface-label {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-surface-tabs { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.dsh-sa-an {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+}
+/* KPI 固定 2×2 / 4×1：min 230px 让 600px 宽的侧边栏排两列，不会 3+1 留空洞。 */
+.dsh-sa-an-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px;
+  padding: 0 16px;
+}
+.dsh-sa-an-kvs { padding: 0 16px 8px; }
+.dsh-sa-an-bar {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px 8px;
+}
+.dsh-sa-an-title { font-size: var(--dsw-font-s-13, 13px); font-weight: 600; }
+.dsh-sa-an-sub {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-an-filters {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+}
+.dsh-sa-an-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+}
+.dsh-sa-an-field-label { flex: none; }
+.dsh-sa-an-field .dsh-sa-select { max-width: 180px; }
+.dsh-sa-an-field .dsh-sa-input { width: 64px; flex: none; }
+/* 动作按钮永远靠右；窄容器里退回左对齐，不与筛选项抢同一行。 */
+.dsh-sa-an-actions { display: inline-flex; gap: 6px; margin-left: auto; }
+.dsh-sa-an-scope {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px 10px;
+  flex-wrap: wrap;
+  padding: 7px 16px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.06));
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-an-scope-title { font-weight: 600; color: var(--dsw-alias-label-secondary, inherit); }
+.dsh-sa-an-scope-proxy {
+  flex: 1 1 100%;
+  color: var(--dsw-alias-state-warn-primary, #b45309);
+  line-height: 1.5;
+}
+.dsh-sa-an-warn { color: var(--dsw-alias-state-warn-primary, #b45309); }
+.dsh-sa-an-section { padding: 10px 0 4px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14)); }
+.dsh-sa-an-section:first-child { border-top: 0; }
+.dsh-sa-an-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 16px 8px;
+}
+.dsh-sa-an-section-title { font-size: var(--dsw-font-xxs-12, 12px); font-weight: 600; }
+.dsh-sa-an-section-hint {
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  overflow-wrap: anywhere;
+}
+.dsh-sa-an-big { font-size: 17px; line-height: 1.3; }
+.dsh-sa-an-low {
+  padding: 0 5px;
+  border-radius: 7px;
+  background: var(--dsw-alias-state-warn-tertiary, rgba(217,119,6,.12));
+  color: var(--dsw-alias-state-warn-primary, #b45309);
+}
+.dsh-sa-an-dist[aria-pressed="true"] { background: var(--dsw-alias-accent-soft, rgba(77,107,254,.1)); }
+.dsh-sa-an-compare {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 2px 16px 8px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-an-delta {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.12));
+}
+.dsh-sa-an-delta-up { color: var(--dsw-alias-state-success-primary, #16a34a); }
+.dsh-sa-an-delta-down { color: var(--dsw-alias-state-warn-primary, #b45309); }
+/*
+ * 连续空天合成一行：8 天里 6 天全 0 时，逐日画 6 条空条只会让趋势区看起来
+ * 像坏了。图表是概览（合并空天），表格仍逐日给全，两者等价性由文字说明。
+ */
+.dsh-sa-an .dsh-sa-trend-quiet {
+  grid-template-columns: 112px minmax(0, 1fr);
+  padding: 2px 0;
+  opacity: .6;
+}
+.dsh-sa-an .dsh-sa-trend-quiet .dsh-sa-trend-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dsh-sa-an-defs { margin: 8px 16px 0; font-size: var(--dsw-font-xxxs-11, 11px); }
+.dsh-sa-an-defs summary {
+  cursor: pointer;
+  color: var(--dsw-alias-label-secondary, inherit);
+  padding: 4px 0;
+}
+.dsh-sa-an-defs-hint { color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9)); padding: 0 0 6px; }
+.dsh-sa-an-defs .dsh-sa-tablewrap { padding: 0; }
+.dsh-sa-an-defs-cell { text-align: left !important; white-space: normal !important; overflow-wrap: anywhere; }
+.dsh-sa-an-foot {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px 16px;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 640px) {
+  .dsh-sa-an-field { flex: 1 1 100%; }
+  .dsh-sa-an-field .dsh-sa-select { max-width: none; flex: 1 1 auto; }
+  .dsh-sa-an-bar, .dsh-sa-an-filters, .dsh-sa-an-scope, .dsh-sa-an-foot { padding-left: 12px; padding-right: 12px; }
+}
+/*
+ * 侧边栏面板窄 ≠ 视口窄：@media 在「宽显示器 + 400px 侧栏」下不会触发。
+ * 用容器查询按**面板自身宽度**折行，才是这次「适配不同屏幕尺寸」真正生效的那条规则。
+ */
+@container (max-width: 520px) {
+  .dsh-sa-an-field { flex: 1 1 100%; }
+  .dsh-sa-an-field .dsh-sa-select { max-width: none; flex: 1 1 auto; }
+  .dsh-sa-an-actions { margin-left: 0; }
+  .dsh-sa-an-cards { grid-template-columns: 1fr; }
+  .dsh-sa-an-cards, .dsh-sa-an-kvs, .dsh-sa-an-compare, .dsh-sa-an-foot { padding-left: 12px; padding-right: 12px; }
+  /* 状态行在窄容器里仍保持一行：名称 / 条 / 数值三段收紧，不拆成三行。 */
+  .dsh-sa-an .dsh-sa-dist { grid-template-columns: 72px minmax(48px, 1fr) auto; gap: 6px; padding: 5px 12px; }
+  .dsh-sa-an .dsh-sa-trend { padding: 0 12px; }
+  .dsh-sa-an .dsh-sa-trend-row { grid-template-columns: 1fr; gap: 2px; }
+  .dsh-sa-an-bar, .dsh-sa-an-filters, .dsh-sa-an-scope { padding-left: 12px; padding-right: 12px; }
 }
 `
 
@@ -5461,6 +5932,558 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ───────────── 分析数据看板（与任务看板平级的一块独立视图） ─────────────
+     *
+     * 架构上刻意让 **BoardPanel 持有全部 state / effect，AnalyticsView 是无 hook 的
+     * 纯展示组件**：任务看板是注册在 main 槽的根组件，它的 hook 顺序与既有离线
+     * 冒烟（scripts/client-smoke.mjs 的迷你 React）一一对应；把状态放进嵌套组件，
+     * 真机能跑，但离线断言就再也验证了「切筛选 → 数字跟着变」这件事。
+     *
+     * 数据只来自 GET /board/analytics（完整账本）。任务看板的 /board 快照、
+     * 五个 chip、行内操作、历史抽屉一行都没被复用或改写。
+     */
+
+    const AN_ALL = 'all'
+    const AN_UNKNOWN = '__unknown__'
+    const AN_POLL_MS = 10000
+    const AN_WINDOWS = [
+      { id: '24h', labelKey: 'an.windowPreset.24h' },
+      { id: '7d', labelKey: 'an.windowPreset.7d' },
+      { id: '30d', labelKey: 'an.windowPreset.30d' },
+      { id: 'all', labelKey: 'an.windowPreset.all' },
+    ]
+    const AN_OVERDUE_HOURS = [8, 24, 72, 168]
+    const AN_STATUS_TONE = {
+      done: 'ok', ended: 'ok', failed: 'fail', blocked: 'warn', interrupted: 'warn',
+    }
+    const AN_WARNING_KEY = {
+      'missing-times': 'an.warn.missingTimes',
+      'updatedAt-fallback': 'an.warn.fallback',
+      'trend-clamped': 'an.warn.clamped',
+      'ledger-truncated': 'an.warn.truncated',
+      'invalid-window': 'an.warn.invalidWindow',
+      'invalid-overdue-hours': 'an.warn.invalidOverdueHours',
+      degraded: 'an.warn.degraded',
+    }
+    /** 指标口径表：指标 / 分子分母 / 数据可得性，三列逐字来自统计口径。 */
+    const AN_DEFINITIONS = [
+      ['an.def.total', 'an.def.totalFormula', 'an.def.totalSource'],
+      ['an.def.rate', 'an.def.rateFormula', 'an.def.rateSource'],
+      ['an.def.status', 'an.def.statusFormula', 'an.def.statusSource'],
+      ['an.def.overdue', 'an.def.overdueFormula', 'an.def.overdueSource'],
+      ['an.def.trend', 'an.def.trendFormula', 'an.def.trendSource'],
+      ['an.def.owner', 'an.def.ownerFormula', 'an.def.ownerSource'],
+    ]
+
+    /** 数字：非法值给 em dash，不把「算不出来」画成 0。 */
+    function anNum(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? String(value) : tr('an.metric.none')
+    }
+
+    function anPct(value) { return percentText(value) }
+
+    function anSigned(value, suffix) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return tr('an.metric.none')
+      const rounded = Math.round(value * 10) / 10
+      return (rounded > 0 ? '+' : '') + rounded + (suffix || '')
+    }
+
+    function anStatusLabel(status) {
+      const key = 'status.' + status
+      const label = tr(key)
+      return label === key ? String(status) : label
+    }
+
+    function anWindowLabel(key) {
+      const preset = AN_WINDOWS.find(item => item.id === key)
+      if (preset) return tr(preset.labelKey)
+      const match = /^(\d+)([hd])$/.exec(String(key ?? ''))
+      if (!match) return String(key ?? tr('an.metric.none'))
+      return match[2] === 'h' ? fill(tr('an.hours'), { n: match[1] }) : fill(tr('an.days'), { n: match[1] })
+    }
+
+    /** 按 range 补齐空天（Host 只给有事实的天）；空天是明确的 0，不是数据丢失。 */
+    function anDayRows(range, days) {
+      const source = Array.isArray(days) ? days : []
+      if (!range || !range.from || !range.to) return source.slice()
+      const byDay = new Map(source.map(row => [row.day, row]))
+      const from = Date.parse(range.from + 'T00:00:00.000Z')
+      const to = Date.parse(range.to + 'T00:00:00.000Z')
+      if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return source.slice()
+      const out = []
+      for (let at = from; at <= to && out.length < 366; at += 86400000) {
+        const day = new Date(at).toISOString().slice(0, 10)
+        out.push(byDay.get(day) || {
+          day, created: 0, done: 0, failed: 0, blocked: 0, interrupted: 0, cancelled: 0, ended: 0, settled: 0,
+        })
+      }
+      return out
+    }
+
+    function anOption(value, label) {
+      return h('option', { key: String(value), value: String(value) }, label)
+    }
+
+    function anFacetLabel(item, fallback) {
+      if (!item) return fallback
+      if (item.id === AN_UNKNOWN) return tr('an.unknown')
+      return item.title || String(item.id)
+    }
+
+    /** 一张 KPI 卡：标签（hover 给口径）、大数字、分子分母/样本说明。 */
+    function AnMetric(props) {
+      return h(
+        'div',
+        {
+          className: 'dsh-sa-card' + (props.tone ? ' dsh-sa-card-' + props.tone : ''),
+          'data-an-metric': props.id,
+        },
+        h('span', { className: 'dsh-sa-card-label', title: props.hint }, props.label),
+        h('span', { className: 'dsh-sa-card-value dsh-sa-an-big' }, props.value),
+        h('span', { className: 'dsh-sa-card-sub' }, props.sub || ''),
+        props.low ? h('span', { className: 'dsh-sa-card-sub dsh-sa-an-low' }, tr('an.sampleLow')) : null,
+      )
+    }
+
+    function AnSection(props) {
+      return h(
+        'div',
+        { className: 'dsh-sa-an-section', 'data-an-section': props.id },
+        h(
+          'div',
+          { className: 'dsh-sa-an-section-head' },
+          h('span', { className: 'dsh-sa-an-section-title' }, props.title),
+          props.action || null,
+          h('span', { className: 'dsh-sa-an-section-hint' }, props.hint || ''),
+        ),
+        props.children || null,
+      )
+    }
+
+    /** 口径表：默认收起，但永远在页面上，不是一个藏进 tooltip 的链接。 */
+    function AnDefinitions() {
+      return h(
+        'details',
+        { className: 'dsh-sa-an-defs', 'data-an-defs': 'true' },
+        h('summary', null, tr('an.definitions')),
+        h('div', { className: 'dsh-sa-an-defs-hint' }, tr('an.definitionsHint')),
+        h(
+          'div',
+          { className: 'dsh-sa-tablewrap' },
+          h(
+            'table',
+            { className: 'dsh-sa-table' },
+            h('thead', null, h('tr', null,
+              h('th', { scope: 'col' }, tr('an.def.metric')),
+              h('th', { scope: 'col' }, tr('an.def.formula')),
+              h('th', { scope: 'col' }, tr('an.def.source')),
+            )),
+            h('tbody', null, AN_DEFINITIONS.map(function (row, index) {
+              return h('tr', { key: 'def-' + index }, row.map(function (key, column) {
+                return h('td', { key: column, className: 'dsh-sa-an-defs-cell', scope: column === 0 ? 'row' : undefined }, tr(key))
+              }))
+            })),
+          ),
+        ),
+      )
+    }
+
+    /** 趋势区：图表 / 表格等价双形态，颜色之外一定有文字。 */
+    function AnTrend(props) {
+      const rows = anDayRows(props.range, props.days)
+      const mode = props.mode === 'table' ? 'table' : 'chart'
+      const toggle = h(
+        'span',
+        { className: 'dsh-sa-toggle', role: 'group', 'aria-label': tr('trend.modeLabel') },
+        ['chart', 'table'].map(function (id) {
+          return h('button', {
+            key: id,
+            type: 'button',
+            className: 'dsh-sa-tab',
+            'aria-selected': mode === id,
+            'data-an-trend-mode': id,
+            onClick: function () { props.onMode(id) },
+          }, id === 'chart' ? tr('an.chart') : tr('an.table'))
+        }),
+      )
+      let body
+      if (!rows.length) {
+        body = h(Blank, { title: tr('an.emptyTrend') })
+      } else if (mode === 'table') {
+        body = h(
+          'div',
+          { className: 'dsh-sa-tablewrap' },
+          h('table', { className: 'dsh-sa-table', 'data-table': 'analytics-trend' },
+            h('thead', null, h('tr', null,
+              h('th', { scope: 'col' }, tr('an.day')),
+              h('th', { scope: 'col' }, tr('an.newCreated')),
+              h('th', { scope: 'col' }, tr('an.done')),
+              h('th', { scope: 'col' }, 'failed'),
+              h('th', { scope: 'col' }, 'blocked'),
+              h('th', { scope: 'col' }, 'interrupted'),
+              h('th', { scope: 'col' }, 'cancelled'),
+            )),
+            h('tbody', null, rows.map(function (row) {
+              return h('tr', { key: row.day },
+                h('th', { scope: 'row', className: 'dsh-sa-table-name' }, String(row.day)),
+                h('td', null, anNum(row.created)), h('td', null, anNum(row.done)),
+                h('td', null, anNum(row.failed)), h('td', null, anNum(row.blocked)),
+                h('td', null, anNum(row.interrupted)), h('td', null, anNum(row.cancelled)),
+              )
+            })),
+          ),
+          h('div', { className: 'dsh-sa-an-foot' }, tr('an.trendTableHint')),
+        )
+      } else {
+        /** 把连续的空天并成一行；表格形态仍逐日给全，图表只做概览。 */
+        const groups = []
+        for (const row of rows) {
+          const problems = num(row.failed, 0) + num(row.blocked, 0) + num(row.interrupted, 0)
+          /**
+           * 「空天」的判据必须与**表格列同源**。
+           *
+           * 原来只看 created / done / problems，于是「跨天取消」的那天
+           * （created=0、done=0、problems=0、cancelled=1）被判成「空天补 0」，
+           * 而同一份数据的表格里那一行明明写着 cancelled=1——同一件事，
+           * 图表与表格给了两个答案（实测跨天取消那天被标「空天补 0」，
+           * 同列表格却显示 cancelled=1）。
+           *
+           * 取消与结束（ended）同样是「那天发生过的事」，不能让那一天变成空天。
+           */
+          const closed = num(row.cancelled, 0) + num(row.ended, 0)
+          const empty = num(row.created, 0) === 0 && num(row.done, 0) === 0
+            && problems === 0 && closed === 0
+          const last = groups[groups.length - 1]
+          if (empty && last && last.empty) {
+            last.to = row.day
+            last.count += 1
+          } else {
+            groups.push({ empty, from: row.day, to: row.day, count: 1, row: row, problems: problems })
+          }
+        }
+        body = h('div', { className: 'dsh-sa-trend' }, groups.map(function (group) {
+          if (group.empty) {
+            const short = function (day) { return String(day).slice(5) }
+            return h(
+              'div',
+              {
+                className: 'dsh-sa-trend-row dsh-sa-trend-quiet',
+                key: 'empty-' + group.from,
+                'data-an-day': group.from,
+                'data-an-empty-range': String(group.count),
+              },
+              h('span', { className: 'dsh-sa-trend-day' },
+                group.count > 1 ? short(group.from) + '–' + short(group.to) : short(group.from)),
+              h('span', { className: 'dsh-sa-trend-text' }, group.count > 1
+                ? fill(tr('an.emptyRange'), { n: group.count })
+                : tr('an.emptyDay')),
+            )
+          }
+          const row = group.row
+          const problems = group.problems
+          const max = Math.max(1, num(row.created, 0), num(row.done, 0), problems)
+          const width = function (value) { return Math.max(0, Math.min(100, Math.round(num(value, 0) / max * 100))) + '%' }
+          return h(
+            'div',
+            { className: 'dsh-sa-trend-row', key: row.day, 'data-an-day': row.day },
+            h('span', { className: 'dsh-sa-trend-day' }, String(row.day).slice(5)),
+            h('span', { className: 'dsh-sa-trend-bars' },
+              h('span', { className: 'dsh-sa-trend-track' }, h('span', {
+                className: 'dsh-sa-trend-fill dsh-sa-trend-fill-created', style: { width: width(row.created), display: 'block' },
+              })),
+              h('span', { className: 'dsh-sa-trend-track' }, h('span', {
+                className: 'dsh-sa-trend-fill dsh-sa-trend-fill-done', style: { width: width(row.done), display: 'block' },
+              })),
+              problems > 0 ? h('span', { className: 'dsh-sa-trend-track' }, h('span', {
+                className: 'dsh-sa-trend-fill dsh-sa-trend-fill-problems', style: { width: width(problems), display: 'block' },
+              })) : null,
+            ),
+            h('span', { className: 'dsh-sa-trend-text' },
+              tr('an.newCreated') + ' ' + anNum(row.created) + ' · '
+              + tr('an.done') + ' ' + anNum(row.done) + ' · '
+              + tr('an.problems') + ' ' + anNum(problems)),
+          )
+        }))
+      }
+      return h('div', null, toggle, body)
+    }
+
+    /**
+     * 分析看板主体。所有状态由 BoardPanel 传入，本组件无 hook、无网络、无副作用。
+     */
+    function AnalyticsView(props) {
+      const filters = props.filters || {}
+      const state = props.state || { status: 'idle', data: null, error: '' }
+      const payload = state.data
+      const degraded = Boolean(payload) && (payload.degraded === true || payload.ok === false)
+      const summary = payload && !degraded && payload.summary && typeof payload.summary === 'object'
+        ? payload.summary : null
+      const coverage = payload && payload.coverage && typeof payload.coverage === 'object' ? payload.coverage : null
+      const facets = payload && payload.facets ? payload.facets : {}
+      const trend = payload && payload.trend ? payload.trend : { days: [], range: null, compare: null }
+      const errorText = state.status === 'fail'
+        ? (state.error || tr('an.unavailable'))
+        : (degraded ? (payload.reason || tr('an.degraded')) : '')
+
+      /** 一个带「全部」选项的下拉；当前值不在候选里时也补一行，避免空白选中态。 */
+      const selectOf = function (field, labelKey, allLabelKey, items, labelOf) {
+        const list = Array.isArray(items) ? items : []
+        const current = filters[field] || AN_ALL
+        const options = [anOption(AN_ALL, tr(allLabelKey))]
+        for (const item of list) options.push(anOption(item.id, labelOf(item)))
+        if (current !== AN_ALL && !list.some(item => String(item.id) === String(current))) {
+          options.push(anOption(current, current))
+        }
+        return h(
+          'label',
+          { className: 'dsh-sa-an-field' },
+          h('span', { className: 'dsh-sa-an-field-label' }, tr(labelKey)),
+          h('select', {
+            className: 'dsh-sa-select',
+            value: current,
+            'aria-label': tr(labelKey),
+            'data-an-select': field,
+            onChange: function (event) { props.onFilter(field, event.target.value) },
+          }, options),
+        )
+      }
+
+      const windowChips = h(
+        'span',
+        { className: 'dsh-sa-an-field', role: 'group', 'aria-label': tr('an.window') },
+        h('span', { className: 'dsh-sa-an-field-label' }, tr('an.window')),
+        AN_WINDOWS.map(function (preset) {
+          return h('button', {
+            key: preset.id,
+            type: 'button',
+            className: 'dsh-sa-chip',
+            'aria-pressed': filters.window === preset.id,
+            'data-an-window': preset.id,
+            onClick: function () { props.onFilter('window', preset.id) },
+          }, tr(preset.labelKey))
+        }),
+      )
+
+      const customDays = h(
+        'span',
+        { className: 'dsh-sa-an-field' },
+        h('span', { className: 'dsh-sa-an-field-label' }, tr('an.customDays')),
+        h('input', {
+          type: 'number', min: '1', max: '365', className: 'dsh-sa-input',
+          value: props.customDays || '', 'aria-label': tr('an.customDays'), 'data-an-custom-days': 'true',
+          onChange: function (event) { props.onCustomDays(event.target.value) },
+        }),
+        h('button', {
+          type: 'button', className: 'dsh-sa-btn', 'data-an-apply': 'true',
+          onClick: props.onApplyCustomDays,
+        }, tr('an.apply')),
+      )
+
+      const filterBar = h(
+        'div',
+        { className: 'dsh-sa-an-filters', role: 'group', 'aria-label': tr('an.filters') },
+        windowChips,
+        customDays,
+        selectOf('status', 'an.status', 'an.allStatus', facets.statuses, function (item) {
+          return anStatusLabel(item.id) + ' (' + anNum(item.count) + ')'
+        }),
+        selectOf('owner', 'an.owner', 'an.allOwner', facets.owners, function (item) {
+          return anFacetLabel(item, String(item.id)) + ' (' + anNum(item.count) + ')'
+        }),
+        selectOf('workspaceId', 'an.workspace', 'an.allWorkspace', facets.workspaces, function (item) {
+          return anFacetLabel(item, String(item.id)) + ' (' + anNum(item.count) + ')'
+        }),
+        selectOf('group', 'an.group', 'an.allGroup', facets.groups, function (item) {
+          return String(item.id) + ' (' + anNum(item.count) + ')'
+        }),
+        h(
+          'label',
+          { className: 'dsh-sa-an-field' },
+          h('span', { className: 'dsh-sa-an-field-label' }, tr('an.overdueHours')),
+          h('select', {
+            className: 'dsh-sa-select', value: String(filters.overdueHours || 24),
+            'aria-label': tr('an.overdueHours'), 'data-an-select': 'overdueHours',
+            onChange: function (event) { props.onFilter('overdueHours', Number(event.target.value)) },
+          }, AN_OVERDUE_HOURS.map(function (hours) {
+            return anOption(hours, fill(tr('an.hours'), { n: hours }))
+          })),
+        ),
+        h('span', { className: 'dsh-sa-an-actions' },
+          h('button', { type: 'button', className: 'dsh-sa-btn', 'data-an-clear': 'true', onClick: props.onClear }, tr('an.clear')),
+          h('button', { type: 'button', className: 'dsh-sa-btn', 'data-an-refresh': 'true', onClick: props.onRefresh }, tr('an.refresh')),
+        ),
+      )
+
+      const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings : []
+      const scopeLine = summary ? h(
+        'div',
+        { className: 'dsh-sa-an-scope', 'data-an-scope': 'true' },
+        h('span', { className: 'dsh-sa-an-scope-title' }, tr('an.coverage')),
+        h('span', null, fill(tr('an.coverageText'), {
+          source: anNum(coverage && coverage.sourceTasks),
+          inWindow: anNum(coverage && coverage.inWindow),
+          matched: anNum(coverage && coverage.matched),
+          retired: anNum(coverage && coverage.retiredTraces),
+        })),
+        h('span', null, tr('an.window') + ' ' + anWindowLabel(payload.scope && payload.scope.window && payload.scope.window.key)),
+        h('span', { className: 'dsh-sa-an-scope-proxy' }, tr('an.proxyNote')),
+        warnings.filter(function (code) { return AN_WARNING_KEY[code] }).map(function (code) {
+          return h('span', { key: code, className: 'dsh-sa-an-warn' }, tr(AN_WARNING_KEY[code]))
+        }),
+      ) : null
+
+      const strips = []
+      if (state.status === 'fail' && summary) {
+        strips.push(h('div', {
+          key: 'an-stale', className: 'dsh-sa-strip dsh-sa-strip-warn', role: 'status', 'aria-live': 'polite',
+        }, h('span', { className: 'dsh-sa-strip-text' }, tr('an.stale') + ' · ' + errorText)))
+      }
+
+      const backBtn = h('button', {
+        type: 'button', className: 'dsh-sa-btn', 'data-an-back': 'true', onClick: props.onSwitch,
+      }, tr('an.backTasks'))
+      const retryBtn = h('button', {
+        type: 'button', className: 'dsh-sa-btn', 'data-an-retry': 'true', onClick: props.onRefresh,
+      }, tr('an.retry'))
+      const clearBtn = h('button', {
+        type: 'button', className: 'dsh-sa-btn', 'data-an-clear': 'true', onClick: props.onClear,
+      }, tr('an.clear'))
+
+      let content
+      if (!payload && state.status !== 'fail') {
+        content = h(Blank, {
+          title: tr('an.loading'), hint: tr('an.loadingHint'),
+        })
+        content = h('div', { 'data-an-loading': 'true' }, content)
+      } else if (!summary) {
+        content = h('div', { 'data-an-error': 'true' }, h(Blank, {
+          title: degraded ? tr('an.degraded') : tr('an.unavailable'),
+          hint: errorText,
+          action: h('span', null, retryBtn, ' ', backBtn),
+        }))
+      } else if (summary.total === 0) {
+        content = h('div', { 'data-an-empty': 'true' }, h(Blank, {
+          title: tr('an.empty'), hint: tr('an.emptyHint'), action: clearBtn,
+        }))
+      } else {
+        const completion = summary.completion || {}
+        const overdue = summary.overdue || {}
+        const cards = h('div', { className: 'dsh-sa-an-cards' },
+          h(AnMetric, {
+            id: 'total', label: tr('an.metric.total'), hint: tr('an.metric.totalHint'),
+            value: anNum(summary.total),
+            sub: fill(tr('an.totalSub'), { source: anNum(coverage && coverage.sourceTasks), matched: anNum(coverage && coverage.matched) }),
+          }),
+          h(AnMetric, {
+            id: 'rate', label: tr('an.metric.rate'), hint: tr('an.metric.rateHint'),
+            value: anPct(completion.rate),
+            sub: fill(tr('an.rateSub'), { done: anNum(completion.done), base: anNum(completion.base) }),
+            low: Boolean(completion.sampleLow),
+            tone: completion.rate !== null && completion.rate !== undefined ? 'ok' : '',
+          }),
+          h(AnMetric, {
+            id: 'overdue', label: tr('an.metric.overdue'), hint: tr('an.metric.overdueHint'),
+            value: anNum(overdue.total),
+            sub: fill(tr('an.overdueSub'), {
+              open: anNum(overdue.open), settled: anNum(overdue.settled), unknown: anNum(overdue.unknown),
+            }),
+            tone: num(overdue.total, 0) > 0 ? 'warn' : '',
+          }),
+          h(AnMetric, {
+            id: 'active', label: tr('an.metric.active'), hint: tr('an.metric.activeHint'),
+            value: anNum(summary.active),
+            sub: fill(tr('an.activeSub'), { settled: anNum(summary.settled), archived: anNum(summary.archived) }),
+          }),
+        )
+
+        const compare = trend.compare
+        let compareLine = null
+        if (compare && compare.available) {
+          const delta = function (labelKey, value, suffix) {
+            const tone = typeof value === 'number' && Number.isFinite(value)
+              ? (value > 0 ? ' dsh-sa-an-delta-up' : value < 0 ? ' dsh-sa-an-delta-down' : '')
+              : ''
+            return h('span', { className: 'dsh-sa-an-delta' + tone },
+              fill(tr(labelKey), { value: anSigned(value, suffix) }))
+          }
+          compareLine = h('div', { className: 'dsh-sa-an-compare', 'data-an-compare': 'true' },
+            h('span', null, tr('an.compare')),
+            delta('an.deltaCreated', compare.createdDelta, ''),
+            delta('an.deltaDone', compare.doneDelta, ''),
+            compare.rateDelta === null || compare.rateDelta === undefined
+              ? h('span', { className: 'dsh-sa-an-section-hint', title: tr('an.compareSampleHint') }, tr('an.compareSample'))
+              : delta('an.deltaRate', compare.rateDelta * 100, 'pp'),
+          )
+        } else {
+          compareLine = h('div', { className: 'dsh-sa-an-compare' }, tr('an.compareNone'))
+        }
+
+        const trendBlock = h(AnSection, {
+          id: 'trend', title: tr('an.trend'), hint: tr('an.trendHint'),
+        }, compareLine, h(AnTrend, {
+          days: trend.days, range: trend.range, mode: props.trendMode, onMode: props.onTrendMode,
+        }))
+
+        const distribution = Array.isArray(summary.distribution) ? summary.distribution : []
+        const statusBlock = h(AnSection, {
+          id: 'status', title: tr('an.statusDist'), hint: tr('an.statusDistHint'),
+        }, h('div', { className: 'dsh-sa-rows' }, distribution.map(function (row) {
+          const tone = AN_STATUS_TONE[row.status]
+          return h('button', {
+            key: row.status,
+            type: 'button',
+            className: 'dsh-sa-dist dsh-sa-an-dist',
+            'aria-pressed': filters.status === row.status,
+            'data-an-status': row.status,
+            title: tr('an.statusDistHint'),
+            onClick: function () { props.onFilter('status', filters.status === row.status ? AN_ALL : row.status) },
+          },
+            h('span', { className: 'dsh-sa-dist-name' }, anStatusLabel(row.status)),
+            h('span', { className: 'dsh-sa-dist-track' }, h('span', {
+              className: 'dsh-sa-dist-fill' + (tone ? ' dsh-sa-dist-fill-' + tone : ''),
+              style: { width: Math.max(0, Math.min(100, Math.round(num(row.share, 0) * 100))) + '%', display: 'block' },
+            })),
+            h('span', { className: 'dsh-sa-dist-value' }, anNum(row.count) + ' · ' + anPct(row.share)),
+          )
+        })))
+
+        const kv = function (label, value) {
+          return h('div', { className: 'dsh-sa-kv' },
+            h('span', { className: 'dsh-sa-kv-label' }, label),
+            h('span', { className: 'dsh-sa-kv-value' }, value))
+        }
+        const overdueBlock = h(AnSection, {
+          id: 'overdue', title: tr('an.overdueBlock'), hint: tr('an.overdueBlockHint'),
+        }, h('div', { className: 'dsh-sa-an-kvs' },
+          kv(tr('an.overdueOpen'), anNum(overdue.open)),
+          kv(tr('an.overdueSettled'), anNum(overdue.settled)),
+          kv(tr('an.overdueUnknown'), anNum(overdue.unknown)),
+          kv(tr('an.overdueRate'), anPct(overdue.rate)),
+          kv(tr('an.overdueHours'), fill(tr('an.hours'), { n: anNum(overdue.thresholdHours) })),
+        ))
+
+        content = h('div', { 'data-an-content': 'true' },
+          h(AnSection, { id: 'kpi', title: tr('an.kpi'), hint: tr('an.kpiHint') }, cards),
+          trendBlock, statusBlock, overdueBlock)
+      }
+
+      return h(
+        'div',
+        { className: 'dsh-sa-an dsh-sa-view', 'data-view': 'analytics', 'data-an-view': 'true', role: 'region', 'aria-label': tr('an.title') },
+        h('div', { className: 'dsh-sa-an-bar' },
+          h('span', { className: 'dsh-sa-an-title' }, tr('an.title')),
+          h('span', { className: 'dsh-sa-an-sub' },
+            (payload && payload.generatedAt ? tr('an.updatedAt') + ' ' + formatClock(Date.parse(payload.generatedAt)) : '')),
+        ),
+        filterBar,
+        scopeLine,
+        strips.length ? strips : null,
+        content,
+        AnDefinitions(),
+        h('div', { className: 'dsh-sa-an-foot' }, tr('an.foot')),
+      )
+    }
+
     function BoardPanel() {
       const [snapshot, setSnapshot] = useState(null)
       const [fetchedAt, setFetchedAt] = useState(0)
@@ -5537,10 +6560,22 @@ window.__ModuleLoader__.load({
       /**
        * 窗口键。`null` 表示「还没定」——真正的默认值要等快照里的 memory.window 到手
        * 才能确定（plans/09 §三.1：默认沿用 memory.window，不是前端另造默认）。
-       * 一旦用户点过 chip，`windowPicked` 就为 true，之后不再被 memory 覆盖。
+       *
+       * 「用户点过 chip 之后就不再被 memory 覆盖」这条规则由 `windowKey` 本身承担：
+       * 它一旦非空，`effectiveWindow` 就不再回落到 `defaultWindowKey(memory)`。
+       * 所以不需要第二个「用户点过没有」的标记——原来那个 `windowPicked` 只写不读，
+       * 是一段会误导人的死代码（看代码的人会以为它在参与什么判断）。
        */
       const [windowKey, setWindowKey] = useState(null)
-      const windowPicked = useRef(false)
+      /**
+       * 顶层面板的镜像（'tasks' | 'analytics'），给**写在前面的** 2 秒轮询用。
+       *
+       * 为什么需要它：轮询的 effect 写在 `surface` state **之前**，而 hook 的调用
+       * 序号不能动（离线冒烟的迷你 React 按序号复用 store，把新 hook 插在中间会让
+       * 视图、筛选、抽屉的旧状态整体错位）。把 `surface` 镜像一份到 ref 里，
+       * effect 读 ref 就既拿到了最新值，又不用挪动任何 hook 的位置。
+       */
+      const surfaceRef = useRef('tasks')
       /** 拆解页的工作区维度：'target'（派发目标）或 'host'（实际归属）。 */
       const [dimension, setDimension] = useState('target')
       /** 趋势区形态：'chart' | 'table'（plans/09 §五.2 图表/表格双形态）。 */
@@ -5588,12 +6623,31 @@ window.__ModuleLoader__.load({
 
         async function load() {
           if (disposed) return
+          /**
+           * 分析看板可见时，**这一轮什么都不做**。
+           *
+           * 原来这里不看面板：切到分析看板之后，任务快照仍然每 2 秒落一次状态，
+           * 于是整个分析视图每 2 秒重建一次（而分析看板自己的轮询是 10 秒）——
+           * 两套轮询互相踩，用户盯着分析数字时整个视图在背后反复重绘。
+           *
+           * 只停「落状态」是不够的：状态不更新的话，切回任务看板时看到的会一直
+           * 是切换前那张快照。所以这里整轮停掉（连取数也不做——没人看的数据
+           * 不必去拉），由切换动作把轮询叫醒（见 `SurfaceBar` 的 onClick）。
+           */
+          if (surfaceRef.current === 'analytics') {
+            arm()
+            return
+          }
           if (controller) controller.abort()
           const current = new AbortController()
           controller = current
           try {
             const data = await readBoard(current.signal)
             if (disposed || current.signal.aborted) return
+            // 取数期间用户切到了分析看板：这一份结果**不落状态**。
+            // 否则「切过去的那一刻」仍会有一次 setSnapshot 把分析视图重建一遍，
+            // 而这一份数据此刻没有人在看（切回任务看板时会立刻重取）。
+            if (surfaceRef.current === 'analytics') return
             setSnapshot(data)
             setFetchedAt(Date.now())
             // 顺带推进 now：没有 running 任务时走表不开，归档行的相对时间靠每次取数刷新。
@@ -6017,7 +7071,7 @@ window.__ModuleLoader__.load({
         : 0
       /*
        * 窗口键的落定时机（plans/09 §三.1 默认沿用 memory.window）：
-       * - 用户点过 chip（`windowPicked`）→ 一直用用户选的，**不再**被 memory 覆盖；
+       * - 用户点过 chip（`windowKey` 非空）→ 一直用用户选的，**不再**被 memory 覆盖；
        * - 没点过 → 跟随 memory.window 算出来的键；memory 还没到手就退回 '7d'。
        * 这段是渲染期派生而不是 effect：effect 里 setState 会多一次提交，
        * 而「窗口」必须在**这一帧**就确定，否则首帧会按 7d 取一次 stats 再按 30d 重取。
@@ -6263,8 +7317,174 @@ window.__ModuleLoader__.load({
        * 用户点「效果」得到的仍然是一个能用的看板 + 一条说明原因的提示条。
        * 这里不是「把错误藏起来」——提示条会一直挂着，直到 stats 恢复。
        */
+      /*
+       * ───── 顶层看板切换：任务看板 / 分析看板（二选一） ─────
+       *
+       * 这一组 hook 全部加在 BoardPanel 的**末尾**（既有 20 多个 hook 之后）：
+       * 离线冒烟的迷你 React 按调用序号复用 store，把新 hook 插在中间会让
+       * 视图、筛选、抽屉等旧状态整体错位。放在末尾，旧 hook 的序号一个不动。
+       *
+       * 状态与取数刻意留在根组件：AnalyticsView 是纯展示组件。真机里两者都能跑，
+       * 但只有这样才能在离线冒烟里断言「切筛选 → 请求 → 数字跟着变」。
+       */
+      const [surface, setSurface] = useState('tasks')
+      /**
+       * 把当前面板镜像进 ref（给前面的 2 秒轮询读）。
+       *
+       * 直接在渲染期赋值而不是放进 effect：effect 要等这一帧提交完才跑，
+       * 那一帧里轮询读到的还是旧面板；渲染期赋值让「这一帧的面板」立刻可见。
+       * 这里写的是同一个对象（ref 在多次渲染间不变），不会有并发写的问题。
+       */
+      surfaceRef.current = surface
+      const [anFilters, setAnFilters] = useState({
+        window: '7d', status: 'all', owner: 'all', workspaceId: 'all', group: 'all', overdueHours: 24,
+      })
+      const [anCustomDays, setAnCustomDays] = useState('')
+      const [anTrendMode, setAnTrendMode] = useState('chart')
+      /** { status: 'idle'|'loading'|'ok'|'fail', data, error }；失败时保留上一次的 data。 */
+      const [anState, setAnState] = useState({ status: 'idle', data: null, error: '' })
+      const [anGeneration, setAnGeneration] = useState(0)
+      const anQuery = analyticsQuery(anFilters)
+      const anActive = surface !== 'tasks'
+
+      /* 分析数据只在分析视图可见时取；失败/降级不影响任务看板的 2 秒轮询。 */
+      useEffect(function () {
+        if (!anActive) return undefined
+        let disposed = false
+        let controller = null
+        let timer = null
+
+        function arm() {
+          if (disposed || timer) return
+          if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+          timer = setTimeout(function () { timer = null; void load() }, AN_POLL_MS)
+        }
+
+        async function load() {
+          if (disposed) return
+          if (controller) controller.abort()
+          const current = new AbortController()
+          controller = current
+          // 只切 loading，不清旧数据：筛选时不会闪成空白。
+          setAnState(function (previous) { return { status: 'loading', data: previous.data, error: '' } })
+          try {
+            const data = await readAnalytics(anQuery, current.signal)
+            if (disposed || current.signal.aborted) return
+            setAnState({ status: 'ok', data: data, error: '' })
+          } catch (error) {
+            if (disposed || current.signal.aborted || (error && error.name === 'AbortError')) return
+            setAnState(function (previous) {
+              return { status: 'fail', data: previous.data, error: describeError(error) }
+            })
+          } finally {
+            if (controller === current) controller = null
+            arm()
+          }
+        }
+
+        function onVisibility() {
+          if (typeof document === 'undefined') return
+          if (timer) { clearTimeout(timer); timer = null }
+          if (document.visibilityState !== 'visible') {
+            if (controller) controller.abort()
+            return
+          }
+          void load()
+        }
+
+        function cleanup() {
+          disposed = true
+          if (timer) { clearTimeout(timer); timer = null }
+          if (controller) controller.abort()
+          controller = null
+          if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+        }
+
+        if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
+        void load()
+        return cleanup
+      }, [anActive, anQuery, anGeneration])
+
+      const anSetFilter = function (field, value) {
+        setAnFilters(function (current) {
+          const next = Object.assign({}, current)
+          next[field] = value
+          return next
+        })
+      }
+      const anClear = function () {
+        setAnFilters({ window: '7d', status: 'all', owner: 'all', workspaceId: 'all', group: 'all', overdueHours: 24 })
+        setAnCustomDays('')
+      }
+      const anRefresh = function () { setAnGeneration(function (value) { return value + 1 }) }
+      const anApplyCustomDays = function () {
+        const raw = Number(anCustomDays)
+        if (!Number.isFinite(raw) || raw < 1) return
+        const days = Math.min(365, Math.floor(raw))
+        setAnFilters(function (current) { return Object.assign({}, current, { window: days + 'd' }) })
+      }
+      const analyticsView = h(AnalyticsView, {
+        filters: anFilters,
+        state: anState,
+        trendMode: anTrendMode,
+        customDays: anCustomDays,
+        onFilter: anSetFilter,
+        onCustomDays: setAnCustomDays,
+        onApplyCustomDays: anApplyCustomDays,
+        onClear: anClear,
+        onRefresh: anRefresh,
+        onTrendMode: setAnTrendMode,
+        onSwitch: function () { setSurface('tasks') },
+      })
+
+      const surfaceBar = h(
+        'div',
+        { className: 'dsh-sa-surfacebar' },
+        h('span', { className: 'dsh-sa-surface-label' }, tr('an.surface')),
+        h(
+          'div',
+          { className: 'dsh-sa-surface-tabs', role: 'tablist', 'aria-label': tr('an.surface') },
+          [
+            { id: 'tasks', labelKey: 'an.surfaceTasks' },
+            { id: 'analytics', labelKey: 'an.surfaceAnalytics' },
+          ].map(function (item) {
+            return h('button', {
+              key: item.id,
+              type: 'button',
+              role: 'tab',
+              className: 'dsh-sa-tab',
+              'aria-selected': surface === item.id,
+              'data-surface-tab': item.id,
+              title: tr('an.surfaceHint'),
+              onClick: function () {
+                setSurface(item.id)
+                // 切回任务看板：把 2 秒轮询立刻叫醒。
+                // 分析看板可见期间那条轮询是停着的（见它的 load()），所以这里
+                // 必须显式重启一次，否则回来看到的是切换前那张旧快照。
+                if (item.id === 'tasks') refresh()
+              },
+            }, tr(item.labelKey))
+          }),
+        ),
+      )
+
       const statsPayload = statsState.data
       const statsUsable = Boolean(statsPayload) && statsPayload.degraded !== true
+      /**
+       * **当前展示中**的那份 payload 用的窗口键。
+       *
+       * 为什么口径行不能跟着「即将生效的选择」走：切窗口 / 下钻时新请求还没回来，
+       * 面板上显示的仍是**旧 payload** 的数字，而窗口提示已经换成了新窗口——
+       * 于是界面上是「新标签 + 旧数字」，两件事说的不是同一批数据
+       * （实测切窗口时口径行用新窗口、数字还是旧的）。
+       *
+       * 所以口径一律跟着 payload 走：Host 在 `scope.window.key` 里回显了
+       * 这份数字**实际**用的窗口，那就是唯一可信的标签来源。
+       * 还没有 payload 时（第一次取数）退回当前选择——那时面板上也没有旧数字。
+       */
+      const statsWindowKey = statsPayload && statsPayload.scope && statsPayload.scope.window
+        ? String(statsPayload.scope.window.key || '')
+        : ''
       const statsProblem = statsState.state === 'fail'
         ? statsState.error || tr('stats.unavailable')
         : (statsPayload && statsPayload.degraded === true ? (statsPayload.reason || tr('stats.unavailable')) : '')
@@ -6320,7 +7540,8 @@ window.__ModuleLoader__.load({
               'data-window': preset.id,
               title: tr('win.fromMemory'),
               onClick: function () {
-                windowPicked.current = true
+                // 选定即生效：`windowKey` 一旦非空，`effectiveWindow` 就不再回落到
+                // memory 的默认值——「用户选过就不再被 memory 覆盖」由它自己承担。
                 setWindowKey(preset.id)
               },
             },
@@ -6366,11 +7587,16 @@ window.__ModuleLoader__.load({
           )
         : null
 
-      /** 分析视图顶部的窗口提示（plans/07 §九：切窗口必须说「只统计最近 N 天」）。 */
+      /**
+       * 统计视图顶部的窗口提示（plans/07 §九：切窗口必须说「只统计最近 N 天」）。
+       *
+       * 窗口取自**当前展示的 payload**（`statsWindowKey`），不是当前选择：
+       * 新请求在途时面板上还是旧数字，标签必须跟着旧数字走。
+       */
       const windowNote = h(
         'div',
-        { className: 'dsh-sa-scopenote', 'data-scope-note': effectiveWindow },
-        windowScopeNote(effectiveWindow),
+        { className: 'dsh-sa-scopenote', 'data-scope-note': statsWindowKey || effectiveWindow },
+        windowScopeNote(statsWindowKey || effectiveWindow),
       )
 
       const header = h(
@@ -6869,19 +8095,31 @@ window.__ModuleLoader__.load({
           null,
           h(ScopeLine, {
             coverage: statsPayload.coverage,
-            windowId: effectiveWindow,
+            // 窗口标签跟着这份 payload 走（新请求在途时，面板上的数字还是旧的）。
+            windowId: statsWindowKey || effectiveWindow,
           }),
           body,
         )
       }
 
+      /*
+       * 二选一的装配点。任务看板模式下 `header / strips / body` 三段的**顺序、
+       * 内容与 props 完全保持原样**，只在前面多一条顶层切换条；因此五个 chip、
+       * 工作区下拉、批次聚合、行内取消/重试/归档/续派/跳会话、历史抽屉都不受影响。
+       * 切到分析看板时任务看板不渲染，但 2 秒快照轮询照常，切回来立刻是最新数据。
+       */
       return h(
         'div',
-        { className: 'dsh-sa', role: 'region', 'aria-label': tr('title') },
+        { className: 'dsh-sa', role: 'region', 'aria-label': tr('title'), 'data-surface': surface },
         h('style', null, STYLE),
-        header,
-        strips.length ? strips : null,
-        h('div', { className: 'dsh-sa-body' }, body),
+        surfaceBar,
+        surface === 'analytics'
+          ? h('div', { className: 'dsh-sa-body' }, analyticsView)
+          : [
+            header,
+            strips.length ? strips : null,
+            h('div', { className: 'dsh-sa-body' }, body),
+          ],
       )
     }
 
