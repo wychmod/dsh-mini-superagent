@@ -101,7 +101,7 @@ Copy-Item "$env:DSH_HOME\dsh-dispatch\tasks.json" "$env:DSH_HOME\dsh-mini-supera
 
 | 工具 | 谁用 | 做什么 |
 | --- | --- | --- |
-| `dispatch_launch` | 主会话 | 派发一个任务，立即返回 `task_id` + 子会话 id。可指定 `workspace`；并发位满时进 `queued` |
+| `dispatch_launch` | 主会话 | 派发一个任务，立即返回 `task_id` + 子会话 id。可指定 `workspace`；并发位满时进 `queued`。**传 `continue_task_id` 则是续派**：不新建任务，把要求追加给已有子会话 |
 | `dispatch_launch_many` | 主会话 | 一次派发 1–16 个互相独立的任务；整批结算后收到一条汇总 |
 | `dispatch_workspaces` | 主会话 / worker | 列出工作区（id、标题、路径、会话数）与当前工作区配置，供 `workspace` 参数使用 |
 | `dispatch_list` | 主会话 | 看本会话派出的任务与状态 |
@@ -305,6 +305,21 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 解析不到且允许新建时：绝对路径直接建在该路径；名字建在 `<workspaceRoot>/<安全目录名>`。
 解析不到且 `create_workspace: false` → 报错并列出已有工作区。
 
+### 续派：`dispatch_launch({ continue_task_id })`
+
+想在**同一个任务**上补一句要求，就传 `continue_task_id`：那一刻不新建任务，要求直接追加给
+该任务的子会话（等价于一次 `dispatch_message`），任务重新变 `running`。看板上已结算的行也有
+一个「续派」按钮走同一条通道（`POST /board/retry` 带 `message`）。
+
+三个代价（规划书 §二要求写清）：**没有独立的任务记录**、**没有独立的报告链**、**没有独立的看板行**
+——「这次要求」与「上次要求」混在同一任务里。要保留任务粒度就别传它，直接新派一个。
+
+四条硬校验，任一不满足即报错并给原因，不会静默降级成新派发：目标任务存在且未退休、属于本会话、
+子会话是本插件建的（`dispatch-*`）、工作区/cwd 一致（**续派没有自己的 `workspace` 参数**，
+一律沿用目标任务的工作区），另外还要求当前没有别的活跃任务。
+细节见 [docs/tools.md](docs/tools.md) 的「续派」一节。
+
+
 同时给 `workspace` 和 `cwd` 时**工作区路径优先**，`cwd` 被忽略。完全不指定 `workspace` 时：
 先看输入框里选的「派发目标」（见下一节），没有目标才沿用调用者的工作目录。
 先用 `dispatch_workspaces` 看有哪些工作区。
@@ -384,7 +399,7 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 | `memoryWindowDays` | `7` | 派生指标的窗口：最近 N 天。只影响指标口径，不影响任务是否存在 |
 | `memoryWindowTasks` | `200` | 派生指标的窗口：最近 M 条已结算（与天数取交集） |
 | `maxReportSummaryChars` | `6000` | 单条报告 `summary` 的**入库**上限（与外发同一口径）；超长时头尾各半并记 `truncated` |
-| `maxReportDetailChars` | `4000` | 单条报告 `detail` 的入库上限 |
+| `maxReportDetailChars` | `4000` | 单条报告 `detail` 的入库上限（只进账本，不随报告回流） |
 | `maxLastTextChars` | `5000` | `task.lastText`（worker 最后一段输出）的入库上限 |
 | `inputPendingTtlMs` | `1800000` | 「已投递未读」的存活上限（30 分钟）；超时改写成 `inputUnknownAt` 而不是假装读过 |
 | `clearTargetsOnDispose` | `true` | 会话销毁时清掉它的派发目标。不清的话 `targets` 只增不减 |
@@ -392,6 +407,7 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 | `ledgerMaxDays` | `90` | 账本保留天数；非活跃且更早的任务退休。`<= 0` 不限制 |
 | `ledgerMaxRetired` | `5000` | 退休留痕列表上限；超出丢最老的并累加 `retiredDropped`（**该计数不落盘、重启归零**） |
 | `directReportStatuses` | `["blocked","failed"]` | **额外**直通主会话的报告状态。终态（`done`/`blocked`/`failed`/`cancelled`）恒直通，**配置只能扩展、不能降级** |
+| `noticeMergeWindowMs` | `1500` | 未消费通知的**合并窗口**（毫秒）：同一任务窗口内多条 `progress` 合成最后一条。`0` 关闭合并。**上限 2000**（配更大会被截断） |
 
 单个任务还可以在 `dispatch_launch` / `dispatch_launch_many` 时覆盖 `cwd` / `workspace` / `create_workspace` /
 `model` / `agent_preset` / `permission_preset`。
@@ -437,10 +453,14 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 文本没变时不动，避免白白打掉提供方的前缀缓存。实测这能解释本机会话 `session-<redacted>`
 面上叠着三份 `system/message`（turn 1 强制段、turn 2 强制段、turn 7 轻提示，三份都还在）。
 
-两段提示共用三段「机制契约」（`BACKGROUND_CONTRACT` / `HANDOFF_RULE` / `IN_FLIGHT_ALLOWED`）：
+两段提示共用四段文本（`BACKGROUND_CONTRACT` / `SPEAK_RULE` / `HANDOFF_RULE` / `IN_FLIGHT_ALLOWED`）：
 派发非阻塞、报告会自己回来、`dispatch_wait` 才是真阻塞；**派发即移交**（返回之后该任务的读代码、
 搜索、跑脚本、开浏览器、查网络、验数据都不再由主会话进行，只读调查也算）；**有任务在飞时只剩四件事可做，
 其余一律结束本轮**。这是刻意的，避免两种模式各说一套。
+
+中间那段 `SPEAK_RULE` 只管**对用户怎么说**（先认领任务、默认 2-3 行、不报 id 与英文状态、
+失败说清卡在哪），受 `test/voice-prompt.test.js` 的长度门禁约束：**≤ 8 行、≤ 500 字**，
+量的装配后的真实提示文本。提示词继续膨胀会稀释每条规则，所以加内容前先删一段重复解释。
 
 其中「派发之后默认结束本轮」写得很硬，因为它对应一次真实事故：主会话派发后连调约 10 次
 `dispatch_wait`（累计约 33 分钟原地阻塞、零产出），根因是旧文案没说清「结束本轮」就是正确动作。
@@ -520,6 +540,14 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 - **报告与简报有截断**：单任务 50 条报告；**入库**按 `maxReportSummaryChars`（6000）/ `maxReportDetailChars`（4000）截，
   `lastText` 按 `maxLastTextChars`（5000）截，被截的条目记 `truncated`；`dispatch_inspect` 只展示最近 5 条、简报 2000 字符、最后输出 3000 字符。
   注意 `clip()` 是「头尾各半 + 一句提示语」且提示语也占预算，**不是截到恰好 N 字**。
+- **回流给主会话的那份报告是四段式，且比账本短**：入库上限管账本体积，投影预算（`summary` 800 字符、
+  不含 `detail`）管回流消息长度。两者取不同数字是有意的——压缩只作用于投影，`dispatch_inspect` 读回的仍是全文。
+- **超长摘要只发「摘要 + 指针」**（P1-2）：说明行超过 800 字符时，回流的那份压到 ~240 字并附一句
+  「另有 N 字在账本里」，**账本原文一个字都不压**。常态报告（几十到几百字）原样发送，不受影响。
+- **同一任务的进度会被合并**（P1-1）：窗口 `noticeMergeWindowMs`（默认 1.5 秒）内的多条 `progress`
+  合成最后一条。**结论类永不参与**——`done` / `blocked` / `failed` / `cancelled`、批次汇总、启动失败
+  都是立刻直达。想让进度也逐条发，把 `noticeMergeWindowMs` 设成 `0`（这是 P1-1 的单独回退开关）。
+  直通类到达时会先冲掉窗口里还躺着的进度，保证「先过程、后结论」的顺序。
 - **`progress` 默认不回流**：它只入库（`admission: 'ledger'`），主会话不会被叫醒。这是有意的——
   过程信息不该进会话长期历史。想恢复旧行为，把 `progress` 加进 `directReportStatuses`（此时才轮到 `progressRelayIntervalMs` 节流）。
 - **终态报告不能被配置关掉**：`done` / `blocked` / `failed` / `cancelled` 恒直通。`directReportStatuses` 只能往里加，

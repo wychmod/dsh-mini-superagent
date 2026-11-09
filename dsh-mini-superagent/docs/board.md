@@ -56,21 +56,29 @@
   宿主不给 `memory` 时显示 `—` 而不是 `0`——`0` 会被读成「确实一条都没有」。
 - **工作区下拉**：`全部工作区` + 快照 `workspaces` 列表；选中后与状态 chip 取交集（先按 `workspace_id` 过滤，再套 chip）。
 - **立即归档**：两步确认。第一次点击进入确认态（按钮变「确认归档」），4 秒内不再点自动回落；确认后
-  `POST /board/archive`，结果用提示条显示「扫描 N，归档 N，失败 N」。
+  `POST /board/archive`，结果用提示条显示「扫描 N，归档 N，失败 N」。这是**巡检**：按保留期扫全表，
+  不是「归档某一条」。
 - **任务行**：
   - 第一行：状态点、状态文字、标题、`批次` 徽标（`group` 非空）、`第 N 次`（`attempt > 1`）、`已归档` 徽标与相对时间、走表耗时、操作按钮。
   - 第二行：工作区名（`workspace_title`，为空显示「跟随会话目录」）、`task_id`、报告数、报告摘要首行。
   - 失败任务额外一行错误原文；归档失败额外一行「归档失败：…」。
   - 悬停标题可看到 `task_id`、`cwd`、`worker_session_id`；可点行再加「点击打开子会话」。
-- **归档行**：整行 0.55 透明度、状态点转灰、无脉动、**没有取消/重试按钮**；相对时间按 `刚刚 / N 分钟前 / N 小时前 / N 天前` 显示。
+- **归档行**：整行 0.55 透明度、状态点转灰、无脉动、**没有任何操作按钮**（含「归档」自己不重复出现）；相对时间按 `刚刚 / N 分钟前 / N 小时前 / N 天前` 显示。
 - **批次聚合**：`group` 非空的行以该组在服务端底序里第一次出现的位置为锚点，把同组任务整体挪到一起（只改视觉顺序，不动底序）。
 - **跳转会话**：整行可点（`worker_session_id` 非空时），`Enter`/`Space` 同样触发；按钮会吞掉冒泡。
   成功时不提示；失败显示「打不开子会话 `<id>`：<原因>」；**已归档的行不可点**（见下节「跳转会话」）。
 - **状态点**：颜色 + 文字双通道，不只靠颜色。只有 `running` 脉动；`prefers-reduced-motion: reduce` 下动画关闭。
 - **耗时**：`queued` 显示「等待中」；`running` 在两次轮询之间每秒走表（服务端 `elapsed_ms` + 本地经过时间）；
   其余状态用服务端算好的值。不足 1 秒按 1 秒显示。
-- **按钮**：`running`/`queued` → 「取消」；`failed`/`interrupted`/`ended`/`blocked` → 「重试」；`done`/`cancelled`/已归档 没有按钮。
-  请求期间按钮置灰并显示「取消中… / 重试中…」，成功后立即重取快照。
+- **按钮**：一行可能有**两个**按钮——「主操作」+「归档」。
+  - 主操作：`running`/`queued` → 「取消」；`failed`/`interrupted`/`ended`/`blocked` → 「重试」；`done`/`cancelled`/已归档 没有主操作。
+  - 归档：`interrupted`/`failed`/`blocked`/`ended`/`done`/`cancelled`（**全部终态**）都有；`running`/`queued` 没有——
+    归档会把还在写的会话冻成只读。已归档的行不再给归档按钮。
+  - 主操作请求期间按钮置灰并显示「取消中… / 重试中…」，成功后立即重取快照。
+  - 归档同样走**两步确认**（第一次点击按钮变「再点一次确认归档」，4 秒内不再点自动回落），
+    确认后 `POST /board/archive-task`，请求期间显示「归档中…」。
+    提示条分两种：干净归档说「已归档（历史里仍可查到）」；**子会话没归档成功**说
+    「已归档，但子会话没归档成功：<原因>」——那是黄色警告，不是错误（任务确实已经离开待办区）。
 - **占位**：加载中、空列表（提示用 `dispatch_launch` 派发）、筛选后为空、取不到数据（有旧快照时显示「展示的是上一次成功取到的数据」）。
 - **提示条**：取数失败是黄色条（带「重试」按钮）；操作失败是红色条（带「关闭」），显示 Host 返回的中文原因。
 - **刷新节奏**：每 2 秒轮询一次；页面隐藏时停表并中止在途请求，切回来立刻重取；只在存在 `running` 任务时启动 1 秒走表；
@@ -89,8 +97,9 @@
 | GET | `/dsh-mini-superagent/board` | 返回整块快照（含 `memory` 块），响应头 `cache-control: no-store` |
 | GET | `/dsh-mini-superagent/board/retired` | 只读：已退休任务的留痕，`{ok, count, dropped, entries[]}` |
 | POST | `/dsh-mini-superagent/board/cancel` | body `{"task_id":"t-..."}`，取消任务 |
-| POST | `/dsh-mini-superagent/board/retry` | body `{"task_id":"t-..."}`，重试任务 |
-| POST | `/dsh-mini-superagent/board/archive` | 无 body，立即跑一次归档巡检 |
+| POST | `/dsh-mini-superagent/board/retry` | body `{"task_id":"t-..."}`，重试任务；**再带 `message` 时是续派**（见下） |
+| POST | `/dsh-mini-superagent/board/archive` | 无 body，立即跑一次归档巡检（**全量**，按保留期） |
+| POST | `/dsh-mini-superagent/board/archive-task` | body `{"task_id":"t-..."}`，归档**指定**的一条任务 |
 | POST | `/dsh-mini-superagent/board/target` | body `{"session_id":"session-...","workspace":"id/路径/标题或空串"}`，设置/清除派发目标 |
 | GET | `/dsh-mini-superagent/board/selfcheck` | 诊断：宿主侧能力、工作区、默认主会话、`client.inGraph` / `client.ready`、启动图模块列表、`memory` 口径 |
 | POST | `/dsh-mini-superagent/board/client-ready` | 浏览器半边在 `apply` 末尾自报 `{ok, registered:[...]}`，宿主记进 `client.ready` |
@@ -223,7 +232,6 @@
 | `500` | 处理器内部异常 | `看板接口内部错误`（日志里有前缀 `dsh-mini-superagent:` 的 warn） |
 
 `POST /archive` 是例外：它没有 `task_id`，成功固定 `200`：
-
 ```json
 { "ok": true, "scanned": 4, "archived": 4, "failed": 0, "counts": { "total": 7, "…": "…", "archived": 4 } }
 ```
@@ -232,6 +240,23 @@
 - `archived` / `failed`：本次成功 / 失败数；失败原因记在对应任务的 `archive_error` 上。
 - `counts`：跑完后的最新计数（含 `archived`）。
 - 不会返回 404/409；`403`（跨站）与 `500`（内部异常）规则同其它 POST。
+
+`POST /archive-task` 归档**一条**指定任务（任务行上的「归档」按钮走这里）：
+
+```json
+// 请求
+{ "task_id": "t-xxx" }
+// 成功（子会话也归档成功）
+{ "ok": true, "archived": true, "task": { "task_id": "t-xxx", "archived_at": "…", "frozen_at": "…", "…": "…" } }
+// 成功（任务归档了，但子会话没归档成功 —— 决策 B）
+{ "ok": true, "archived": true, "reason": "会话已不存在", "task": { "…": "…", "archive_error": "会话已不存在" } }
+```
+
+- `archived`：本次是否**真的**写了归档标记。已归档的任务再调一次返回 `archived: false` 且不改时间戳（**幂等**）。
+- `reason`：只在「归档了但子会话没归档成功」时出现，内容等于 `task.archive_error`；HTTP 仍是 `200`（归档动作本身成功了）。
+- **错误码**：缺 `task_id` → `400`；任务不存在 → `404`；`running` / `queued` → `409`
+  （`任务 t-xxx 还没结算（running），不能归档；要停掉它请用取消`）。
+- 与 `POST /archive` 的分工见下文「两条归档入口」。
 
 `POST /target` 也不带 `task_id`：
 
@@ -254,6 +279,41 @@
   错误文本里的候选带 `path`：**同名工作区之间 id 没有区分度**（仓库根与包根都可能叫 `dsh-mini-superagent`），
   只有路径能让人分清是哪一个。这是本版（未发布）的行为变化，旧文档写的「标题精确匹配」暗示它唯一、无歧义，那是错的。
   细节见 [workspaces.md](workspaces.md)。
+
+### 续派：`POST /retry` 带 `message`
+
+行内「续派」按钮（只出现在**已结算**的行上）走的就是这条既有路由，**没有新造路由**：
+
+```json
+// 请求
+{ "task_id": "t-xxx", "message": "把 lint 也跑一遍" }
+// 成功（任务重新变为 running）
+{ "ok": true, "task": { "task_id": "t-xxx", "status": "running", "…": "…" } }
+// 任务还在跑
+{ "ok": false, "error": "任务 t-xxx 还在 running，不能续派：等它结算后再补要求，或先取消" }   // 409
+```
+
+为什么复用 `/retry` 而不是加一条 `/continue`：「往这条任务的子会话里投一条消息，让它接着干」
+是同一条通道，`retry()` 内部走的也是 `dispatch.message()`。区别只有消息文本——重试按状态挑
+一句固定指令，续派用用户自己写的那句话。多一条路由等于多一套准入、多一组错误码，以及多一次
+「两条路径什么时候开始分叉」的维护。
+
+| 判据 | 行为 |
+| --- | --- |
+| `message` 缺省或只有空白 | 按原来的重试处理（`retry()`，`attempt` +1） |
+| `message` 有内容 + 任务**已结算** | 续派：`dispatch.message(task, continueLead() + 正文, 'queue')` |
+| `message` 有内容 + 任务 `running` / `queued` | `409`，一条消息都不投。不能把要求插进正在跑的回合 |
+| `message()` 抛错（子会话不可用） | `409`，错误文本原样透给看板 |
+| 打到 `/cancel` 时 body 里带 `message` | 忽略它，仍按取消处理（别让它悄悄变成两条副作用） |
+
+续派消息的前缀来自 `src/dispatch.js` 的 `continueLead()`，与 agent 侧的
+`dispatch_launch({ continue_task_id })` **同一份**：同一条要求从工具与看板两条入口进来，
+worker 看到的东西必须一样。语义、三个代价与四条硬校验见 [tools.md](tools.md) 的「续派」一节。
+
+界面上不弹「成功」提示条：续派成功后看板里不会多出一行，唯一可见的变化是这条任务从
+「已完成」变回「运行中」——那本身就是结果。**失败**才弹，因为用户写的那句话还在输入框里，
+不能悄悄吞掉。输入框展开时会显示一句代价提示（「续派不新建任务…列表里仍然只有这一行」），
+否则用户会以为按钮没生效。
 
 ### GET /board/retired（已退休视图）
 
@@ -296,6 +356,60 @@
   未记录原因时显示「未记录原因」，**不要**把机器串直接甩给用户。
 - 退休记录**不挂子会话**（`worker_session_id` 不返回）：会话可能已归档或已不存在，点行跳转没有意义。
   视图里只能复制 `task_id`，再用 `dispatch_inspect` 去查（`dispatch_inspect` 对退休任务仍返回留痕，带 `retired: true`）。
+
+### GET /board/stats（全量统计聚合）
+
+只读聚合，回答「这段时间干得怎么样」。准入与 `GET /board` **同档**（`readAllowed`），
+**不要求** `x-dsh-mini-superagent` 写头。契约见 [../../plans/09-board-analytics.md](../../plans/09-board-analytics.md) §六.1。
+
+为什么单独一条路由而不是塞进 `GET /board`：快照每 2 秒轮询一次、**只带 200 条任务**，
+拿它算比例分母从一开始就是错的；统计要遍历完整账本（含退休留痕），偶尔查一次就够。
+
+查询参数（都可省略）：
+
+| 参数 | 取值 | 缺省 |
+|---|---|---|
+| `window` | `24h` / `7d` / `30d` / `all` | 沿用 `memoryWindowDays`（默认 7 天） |
+| `workspaceId` | 工作区 id | 不过滤，按**派发目标** `workspace_id` 筛 |
+| `hostWorkspaceId` | 工作区 id | 不过滤，按**实际归属** `host_workspace_id` 筛 |
+
+两个工作区参数是**两个维度**：同时给是交集，不互相替代（没有派发目标的任务照样有实际归属）。
+非法 `window` 不报错，退回默认并在 `scope.window.fallbackFrom` 里记下原始输入，
+让前端能显示「筛选条件无效，已退回 N 天」而不是静默换一个窗口。
+
+成功：`200`，`cache-control: no-store`。顶层字段与规划书逐字段对齐：
+
+```text
+{ statsVersion, generatedAt,
+  scope:    { window: { key, days, since }, workspaceId, hostWorkspaceId },
+  coverage: { sourceTasks, inWindow, settled, validDurations, excludedArchived,
+              excludedRetired, missingTimes, truncated, timeBasis, fallbackCount },
+  summary:  { outcome, durations, parallel, reliability },
+  daily:    [{ day, created, done, failed, blocked, interrupted, medianDuration, saved }],
+  groups:   { workspaces: { dimension, byTarget, byHost }, batches, parentSessions,
+              statuses, retiredReasons } }
+```
+
+口径要点（每一条都能追到分子分母）：
+
+- **完成率分母是 `done + ended + failed + blocked + interrupted`，取消不进分母**；
+  取消率（`cancelRate`）单列，分母是全部已结算（含取消）。两个比例共用分母等于把
+  「用户改了主意」算成「任务没做成」。
+- **n=0 时值是 `null` 而不是 `0`**（达成率、P50/P90、并行节省…）；`1 ≤ n < 5` 时照给数值
+  但带 `sampleLow: true`。`0%` 与「没有样本」在界面上必须长得不一样。
+- **归档与退休不投票**：归档任务（`archivedAt`）与退休留痕都不进效果指标，但分别计入
+  `coverage.excludedArchived` / `coverage.excludedRetired`，不会悄悄消失。
+- **时间基准要能区分**：新数据用权威 `settledAt`，旧数据回退 `updatedAt` 时
+  `coverage.timeBasis` 报 `updatedAt-fallback`（两种混用报 `mixed`），`fallbackCount` 给条数。
+  `updatedAt` 会被报告、追问、归档刷新，拿它算精确生命周期统计会把「大概」冒充成「精确」。
+- **并行节省是粗算**：`max(0, Σ占用 - 墙钟跨度)`，`estimated` 恒为 `true`（它不是工时结算）；
+  `degraded` + `reasons` 说明「为什么更粗」（样本少 / 有回退基准 / 有夹紧跨度 / 留痕有丢失）。
+- **不装全量**：`truncated` 非 `null` 时界面必须显示「结果可能低估」，不能装作全量。
+
+统计失败（聚合抛错）时返回 `200` + 与成功结果**同构**的最小结构：
+`{ ok: false, degraded: true, reason, summary: null, daily: [], groups: {...空容器} }`。
+**不是 500**：面板每 2 秒轮询，一个 500 会让客户端进入「报错→重试→再报错」的循环，
+而任务列表其实还是好的。总览继续按快照工作，效果区显示「统计暂不可用」。
 
 ### 已退休视图（面板里的第五个 chip）
 
@@ -357,7 +471,43 @@
 - 成功记 `archived_at`，失败记 `archive_error`，下一次巡检重试；
 - 看板快照里多出 `counts.archived`，任务卡多出 `archived_at` / `archive_error`；
 - 归档只影响会话列表，任务仍在快照里、`status` 不变；
-- `POST /board/archive` 可手动触发一次巡检；面板顶部的「立即归档」就是它的两步确认版。
+- `POST /board/archive` 可手动触发一次巡检；面板顶部的「立即归档」就是它的两步确认版；
+- 任务行上的「归档」按钮走 `POST /board/archive-task`，**只归档那一条**（见下节）。
+
+#### 两条归档入口的区别（别混用）
+
+| | `POST /board/archive` | `POST /board/archive-task` |
+| --- | --- | --- |
+| 作用范围 | **全量巡检**：扫全表，只碰 `updatedAt` 早于 `archiveAfterHours` 且未归档的已结算任务 | **单条**：只处理 body 里那一个 `task_id` |
+| 是否看保留期 | 看（默认 24h） | **不看**——用户点了就归档，哪怕它是 1 秒前更新的 |
+| 请求体 | 无 | `{"task_id":"t-..."}` |
+| 响应 | `{ok, scanned, archived, failed, counts}` | `{ok, archived, reason?, task}` |
+| 谁在用 | 面板顶部「立即归档」、启动后的定时巡检（`startArchiveSweep`） | 任务行上的「归档」按钮 |
+| 未结算任务 | 直接被跳过（不算候选） | `409`，明确拒绝 |
+
+为什么不用一个接口两种语义：巡检的返回值是**批量口径**（`scanned/archived/failed`），
+被既有用例与定时器共用；给它加一个「只处理某条」的开关，会让同一个 URL 在不同 body 下
+既有两套返回形状、又有两种副作用。分两个路由之后，两件事各自能被人读懂。
+
+#### 决策 B：子会话归档失败时仍然归档任务，但必须留痕
+
+`workspaceRegistry.archiveSession()` 可能失败——最常见的是会话随宿主重启消失了，
+或者任务从启动就失败、**根本没有**活动会话。这类任务如果「归档失败就不归档」，会永远
+停在「需要处理」区，正是用户报的「只有重试会一直卡着」。
+
+所以单条归档的口径是：**先写 `archivedAt` + `frozenAt`，再按真实结果决定留不留痕**：
+
+- 子会话归档成功 → 清空 `archiveError`，返回 `{ok:true, archived:true}`；
+- 子会话归档失败 → 仍然写 `archivedAt` + `frozenAt`，把真实原因写进 `task.archiveError`，
+  返回 `{ok:true, archived:true, reason:"<原因>"}`；看板在任务行上显示「归档失败：<原因>」，
+  提示条用**警告**语气说「已归档，但子会话没归档成功：<原因>」。
+
+不许假装干净成功：`reason` 与 `archive_error` 两个字段就是这条口径的证据。
+（巡检那条路仍然是老口径：失败不归档、只记 `archiveError`、下次巡检重试。）
+
+**幂等**：`archivedAt` 是「第一次被归档的时刻」。已归档的任务再调 `archiveTask()` 会直接返回
+`{ok:true, archived:false}`，不重写时间戳、也不再碰子会话——否则看板上的「N 小时前归档」
+会被重复点击反复归零。
 
 归档规则与排障见 [workspaces.md](workspaces.md)。
 
@@ -390,10 +540,78 @@
 - `全部`、`进行中`、`需要处理` 都排除 `archived_at` 非空的任务；
 - `已归档` 只显示 `archived_at` 非空的任务；
 - 顶部「总计」= `counts.total − counts.archived`，与「全部」chip 对得上；
-- 归档行整行 0.55 透明度、灰点、无脉动、没有取消/重试按钮，显示 `已归档` 徽标与相对时间；
+- 归档行整行 0.55 透明度、灰点、无脉动、**没有任何操作按钮**，显示 `已归档` 徽标与相对时间；
 - 归档失败的任务额外显示一行「归档失败：<原因>」（来自 `archive_error`），不随归档隐藏。
 
 这样设计的原因：归档是历史，不是「完成」。混在「全部」里会让日常视图被历史淹没，也会让「总计」与列表数量对不上。
+
+## 历史视图与任务详情抽屉（plans/09 P2）
+
+面板顶部现在是 **四个视图分段**：`总览` / `效果` / `拆解` / `历史`。历史视图回答
+「某条任务到底发生了什么」，是唯一按时间倒查记录的视图。
+
+### 数据来源
+
+| 子视图 | 来源 | 是否依赖 `/board/stats` |
+| --- | --- | --- |
+| `全部` | `GET /board` 快照里的全部任务（含已归档） | 否 |
+| `已归档` | 同上的子集（`archived_at` 非空） | 否 |
+| `已退休` | `GET /board/retired` 的留痕 | 否 |
+
+**历史视图完全不碰 `/board/stats`**：统计挂了（404、宿主降级）它照常工作。
+「查证据」的地方跟着统计一起失效，是 §八.10 最不该出现的结果。
+
+`全部` 子视图**不含**退休留痕：留痕不在快照的 `tasks` 里，混进去会让同一份账本
+在两个子视图里给出两个总数。要查退休记录就切到 `已退休`。
+
+### 搜索与筛选
+
+- 搜索（大小写不敏感）：`task_id`、标题、`worker_session_id`、工作区（**两个维度都算命中**：
+  派发目标 `workspace_id` 与实际归属 `host_workspace_id`）；
+- 状态 / 工作区下拉：状态选项来自客户端唯一那份 `STATUS_META` 键集合，不另抄一份；
+- 时间：按**创建时刻**过滤，档位复用 `WINDOW_PRESETS`（24h / 7 天 / 30 天 / 全部）。
+  退休留痕没有创建时刻，改用 `retired_at`——否则「最近 7 天」里永远看不到刚退休的那批；
+  两边时间都未知的行**不会因为「不知道」被丢掉**，留在列表里显示「没有记录」；
+- 开关：`是否重试`（`attempt > 1`）、`是否有后台`（`background` 非空）。
+
+### 排序与分页
+
+- 排序四档：创建 / 结算 / 耗时 / 状态。**缺时间或耗时未知的行一律排到末尾**，
+  不会因为 `NaN` 被当成 0 而看起来像「1970 年的任务」；同值按 `task_id` 倒序，
+  保证同一份快照每次渲染顺序一致（否则 2 秒轮询会让行在视觉上跳动）；
+- 每页 **50 条**，底部固定分页条（`第 from–to / 共 n 条` + 上一页/下一页）。
+  `/board` 快照本身最多 200 条，最坏 4 页，不做虚拟滚动；
+- 快照被截断时（`truncated`）表格上方给一条「快照只含最近 N 条；更早的请用
+  `dispatch_list` / `dispatch_inspect`」，不假装列表是全量。
+
+### 表格列
+
+`任务 | 状态 | 工作区 | 创建 | 结束 | 耗时`。「结束」一列按来源打标签
+（`结算` / `退休`），未结算的行显示 `—`；**不拿创建时刻冒充结束时刻**。
+
+### 任务详情抽屉
+
+点任意一行在表格下方展开抽屉（**不是**遮罩层：面板在宿主的槽里滚动，
+`fixed` 定位会跑到视口外并盖住别家 DOM）。抽屉七块：
+
+1. **生命周期**：创建 → 开始 → 报告 → 结算 → 归档 → 退休，六步各自一格；
+   缺的一步显示「没有记录」而不是留空；
+2. **简报与目录**：简报、工作目录 `cwd`、任务目录 `task_dir`、目标工作区、实际归属；
+3. **报告与最后输出**：报告数、最后一次报告（时刻 + 状态 + 摘要首行）、最后一次输出节选；
+4. **重试与错误**：attempt、错误、归档失败、冻结时刻；
+5. **追问投递**：已读 / 待读 / 未读未知三种状态之一 + 时刻；
+6. **后台 job / subagent**：数量与起始时刻，被终止时另起一行；
+7. **prepare 结果**：准备时刻与任务目录。
+
+**快照里没有、抽屉也拿不到的字段**（浏览器半边没有 `dispatch_inspect` 工具），
+一律写明「请用 `dispatch_inspect <task_id>`」，绝不编造：
+
+- 完整简报正文（快照只投影标题）；
+- 完整报告正文、更早的报告（快照只有 `report_count` 与最后一条摘要）。
+
+「打开子会话」按钮只在 **有 `worker_session_id` 且未归档且不是退休留痕** 时出现。
+其余情况只给「复制 id」，并说明原因——归档会话会被宿主清成空白主视图，
+退休留痕连会话都不在了。退休记录另有一句「已退休：报告正文不可用」。
 
 ## 工作区分组
 
@@ -471,8 +689,13 @@
   agent 侧的工具在 0.5.0 是 9 个（多了只读的 `dispatch_workspaces`），但看板本身不提供工具。
 - 看板的「取消」等价于 agent 调 `dispatch_cancel`（状态与并发位语义一致）。
 - 看板的「重试」是给人用的：能恢复就续跑（与 `dispatch_message` 同一条投递路径），不能恢复就新开会话重投简报。
+- 看板的「续派」等价于 agent 调 `dispatch_launch({ continue_task_id })`（**也是**一条 `dispatch_message`，
+  不新建任务）。区别只在文案：工具侧会先做四条硬校验（归属 / 会话形状 / 工作区 / 别的活跃任务），
+  看板侧只做「必须已结算」这一条——面板上的行本来就是用户眼皮底下的那一条，归属与工作区不会错。
+- 看板的「归档」等价于 `POST /archive-task`（单条），不是 `POST /archive`（巡检、扫全表）。
 - 看板的「派发目标」是输入框选择器的数据源；`dispatch_launch` 没显式给 `workspace` 时读它。
-- 主会话要续跑一个任务，仍然用 `dispatch_message`；不要因为看板有按钮就以为多了一个工具。
+- 主会话要续跑一个任务，仍然用 `dispatch_message`（或 `dispatch_launch({ continue_task_id })`）；
+  不要因为看板有按钮就以为多了一个工具。
 
 ---
 

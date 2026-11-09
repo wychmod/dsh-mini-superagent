@@ -33,6 +33,10 @@
           - 60000
         # 同一任务的 progress 报告最短回流间隔（毫秒）；0 = 不节流。被挡下的仍然入库。
         progressRelayIntervalMs: 60000
+        # 未消费通知的合并窗口（毫秒）：同一任务窗口内的多条 progress 合成最后一条。
+        # 0 = 关闭合并（progress 逐条立即发）。上限 2000，配更大按 2000 算。
+        # 结论类（done/blocked/failed/cancelled）、批次汇总、启动失败永不参与合并。
+        noticeMergeWindowMs: 1500
         # 子会话默认 preset；留空用部署默认。指向一个收紧的 preset 可以让 worker 的前台命令更早转后台。
         workerAgentPreset: ''
 
