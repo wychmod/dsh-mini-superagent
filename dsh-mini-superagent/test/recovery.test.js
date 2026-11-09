@@ -13,8 +13,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { SOURCE_KIND } from '../src/constants.js'
+import { SOURCE_KIND, TIME_BASIS } from '../src/constants.js'
 import { Dispatch, isTransient } from '../src/dispatch.js'
+import { boardStats, settleTimeOf } from '../src/stats.js'
 import { writeState } from '../src/store.js'
 
 // ---------------------------------------------------------------- 夹具
@@ -124,6 +125,88 @@ test('重启后：没启动过的排队任务重新入队，跑过的标 interru
     assert.deepEqual(d.table.queue, ['t-q'], '重排的任务必须在队列里，否则 pump 永远看不到它')
     assert.equal(d.table.get('t-r').status, 'interrupted', '跑过的任务不能假装还活着')
     assert.equal(d.table.get('t-d').status, 'done', '已结算的不该被改写')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * 恢复标 `interrupted` 必须**写权威结算时刻**（plans/09 P0）。
+ *
+ * 钉的缺陷：`restore()` 这条路径曾经裸写 `task.status = 'interrupted'` +
+ * `task.updatedAt = now()`，绕过了 `TaskTable.transition()`。`interrupted` 在
+ * `SETTLED` 里是终态，于是这条**刚恢复的新任务**没有 `settledAt`，
+ * `stats.js` 的 `settleTimeOf()` 只能回退 `updatedAt` 并把它计进
+ * `coverage.fallbackCount` / `timeBasis: 'updatedAt-fallback'`——「旧数据欠账」
+ * 的计数被自己的新数据污染，那个数字从此失去诊断意义。
+ */
+test('重启恢复标 interrupted 的任务会写 settledAt，时间基准不是 updatedAt-fallback', async () => {
+  const host = makeHost()
+  const dir = await mkdtemp(join(tmpdir(), 'mas-rc-settled-'))
+  const base = new Date().toISOString()
+  await writeState(join(dir, 'tasks.json'), {
+    targets: {},
+    tasks: [
+      // running 且已启动：新进程里那个 worker 可能做了一半，恢复时必须标 interrupted
+      { ...workerTask({ id: 't-r', workerSessionId: 'dispatch-t-r', status: 'running', startedAt: base }), createdAt: base, updatedAt: base },
+      // queued 但带着上一轮的 startedAt（retry 的 reopen 不清它）：走 force 分支
+      {
+        ...workerTask({ id: 't-qs', workerSessionId: 'dispatch-t-qs', status: 'queued', startedAt: base }),
+        createdAt: base, updatedAt: base,
+      },
+    ],
+  }, base)
+
+  const d = new Dispatch(host.ctx, {
+    stateDir: dir, provisionDefaultWorkspace: false, archiveSweepMinutes: 0, archiveAfterHours: 0,
+  })
+  try {
+    await d.restore()
+
+    for (const id of ['t-r', 't-qs']) {
+      const task = d.table.get(id)
+      assert.equal(task.status, 'interrupted', `${id} 必须被标成 interrupted`)
+      assert.ok(task.settledAt, `${id} 进了终态就必须有权威结算时刻，否则会被当成旧数据欠账`)
+      assert.ok(Number.isFinite(Date.parse(task.settledAt)), `${id} 的 settledAt 必须是可解析的时间`)
+      // 不比对 `settledAt === updatedAt`：两者由两次 now() 写入，跨毫秒时差 1ms 是正常的。
+      assert.ok(Math.abs(Date.parse(task.settledAt) - Date.parse(task.updatedAt)) < 1000,
+        `${id} 的 settledAt 与 updatedAt 应当在同一时刻附近`)
+      assert.equal(settleTimeOf(task).basis, TIME_BASIS.SETTLED,
+        `${id} 的时间基准必须是 settledAt，不能回退成 updatedAt-fallback`)
+    }
+
+    // 整体口径：这两条新恢复的任务不该把 coverage 的回退计数顶起来。
+    const stats = boardStats(d, { window: 'all' })
+    assert.equal(stats.coverage.fallbackCount, 0, '新恢复的任务不是旧数据，回退条数必须是 0')
+    assert.equal(stats.coverage.timeBasis, TIME_BASIS.SETTLED)
+    assert.equal(stats.coverage.settled, 2, '两条恢复的任务都要进已结算计数')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * 「queued 且从没启动过」重排之后**不能**有 `settledAt`：它没有被结算，
+ * 只回到了队列。留下一个结算时刻会把一条在排队的任务算进已结算口径。
+ */
+test('重启重排的排队任务不写 settledAt', async () => {
+  const host = makeHost()
+  const dir = await mkdtemp(join(tmpdir(), 'mas-rc-req-'))
+  const base = new Date().toISOString()
+  await writeState(join(dir, 'tasks.json'), {
+    targets: {},
+    tasks: [{ ...workerTask({ id: 't-q', workerSessionId: 'dispatch-t-q', status: 'queued' }), createdAt: base, updatedAt: base }],
+  }, base)
+
+  const d = new Dispatch(host.ctx, {
+    stateDir: dir, provisionDefaultWorkspace: false, archiveSweepMinutes: 0, archiveAfterHours: 0,
+  })
+  try {
+    await d.restore()
+    const task = d.table.get('t-q')
+    assert.equal(task.status, 'queued')
+    assert.equal(task.settledAt, undefined, '重新入队的任务还没结算，不能带结算时刻')
+    assert.deepEqual(d.table.queue, ['t-q'])
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -282,6 +365,9 @@ test('progress 默认只入库不回流（P0-2 准入分级）', async () => {
 test('progress 配进 directReportStatuses 后按间隔节流，被挡下的仍然入库', async () => {
   await withDispatch({
     progressRelayIntervalMs: 60000,
+    // 这条用例守的是**节流**：`noticeMergeWindowMs: 0` 关掉 P1-1 的合并窗口，
+    // 否则第一条 progress 会先进窗口（默认 1.5 秒），测的就不是节流了。
+    noticeMergeWindowMs: 0,
     directReportStatuses: ['blocked', 'failed', 'progress'],
   }, async ({ d, host }) => {
     const delivered = []
@@ -306,6 +392,8 @@ test('progress 配进 directReportStatuses 后按间隔节流，被挡下的仍�
 test('progressRelayIntervalMs=0 且 progress 直通时不节流', async () => {
   await withDispatch({
     progressRelayIntervalMs: 0,
+    // 同上：关掉 P1-1 的合并窗口，单独看「不节流 = 每条都发」。
+    noticeMergeWindowMs: 0,
     directReportStatuses: ['blocked', 'failed', 'progress'],
   }, async ({ d, host }) => {
     const delivered = []

@@ -9,16 +9,19 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  ADMISSION, AUTO, DEFAULTS, LOG_PREFIX, MAX_REPORTS, MODE_ALWAYS, MODE_OFF, NAME, NONE,
+  ADMISSION, AUTO, DEFAULTS, HEADLINE_LEDGER_MAX, LOG_PREFIX, MAX_REPORTS, MERGEABLE_REPORT_STATUSES,
+  MODE_ALWAYS, MODE_OFF, NAME, NONE, NOTICE_MERGE_MAX_MS, PROJECTION, REPORT_SECTIONS, REPORT_VIEW,
   RETIRED_REASONS, SETTLED, SOURCE_KIND, STATE_DIR, TERMINAL_REPORT, VERSION,
-  WORKER_WORKSPACE_CWD, newTaskId, nextMessageId, normalizeWorkerWorkspace, now,
+  WORKER_PREFIX, WORKER_WORKSPACE_CWD, isWorkerSessionId, newTaskId, newThreadId, nextMessageId,
+  normalizeWorkerWorkspace, now,
 } from './constants.js'
 import { FORCED_HINT, ROUTER_LOCKED, SOFT_HINT, workerPrompt } from './prompt.js'
 import { prepareEnv, runPrepare, taskDirectory } from './prepare.js'
 import { SessionGateway } from './sessions.js'
 import { readState, writeState } from './store.js'
-import { TaskTable, clip, lastAssistantText, oneLine } from './tasks.js'
+import { TaskTable, canTransition, clip, lastAssistantText, oneLine } from './tasks.js'
 import { TOOL_NAMES } from './tools.js'
+import { batchText, failureText, idleText, reportText } from './voice.js'
 import { WorkspaceGateway, dayKey, rankWorkspaces } from './workspaces.js'
 
 /**
@@ -35,6 +38,48 @@ const TRANSIENT = new RegExp([
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR',
   'socket hang up', 'fetch failed', 'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b',
 ].join('|'), 'i')
+
+/**
+ * 续派时追加给 worker 的那条消息的**开头**（plans/08 阶段 1 · 模型 A）。
+ *
+ * 为什么必须有这一段，而不是直接把调用方的文本塞进去：模型 A 的代价就是
+ * 「这次要求与上次要求混在同一个任务里」（plans/08 §二）。worker 看到的是**同一条**
+ * 会话历史，它无从分辨新消息是一条补充要求、还是「上一轮没做对，重做一遍」。
+ * 这两种理解会导向完全不同的动作：前者只做增量，后者会把已经通过的验收全部推翻。
+ * 一行前缀把歧义消掉，代价是每次续派多几十个字。
+ *
+ * 措辞里「不要重做」必须有：worker 的默认读法常常是「重新执行这个任务」，
+ * 而续派的语义恰恰是「增量」。
+ */
+const CONTINUE_LEAD = '【续派】主会话在**同一个任务**上追加了一条新要求（没有新建任务，会话与历史都是上一轮的）。'
+  + '只处理这条新要求；已经完成并通过验收的部分不要重做，除非这条要求与它冲突。'
+  + '完成后照常用 dispatch_report 汇报。'
+
+/**
+ * 续派消息的前缀（**导出**给看板用）。
+ *
+ * 为什么不能各写一份字面量：同一条要求从 `dispatch_launch({continue_task_id})` 与
+ * 看板「续派」按钮进来，worker 看到的东西必须一样。两份字面量今天一样、明天就会
+ * 有人改一处忘另一处，而症状是「同一句话在工具里有效、在看板里被理解成另一件事」——
+ * 这种偏差没有报错、只有行为差异，最难查。
+ *
+ * @returns {string}
+ */
+export function continueLead() { return CONTINUE_LEAD }
+
+/**
+ * 两个目录是不是同一个（续派的一致性校验用）。
+ *
+ * 为什么不直接比字符串：Windows 上 `D:\Idea\X` 与 `d:\idea\x` 是同一目录，
+ * 宿主 realpath 之后还可能改写盘符大小写；比字符串会把同一个目录判成两个，
+ * 于是「明明没换工作区」的续派被拒。不做 realpath：那是 async 且会抛错，
+ * 而这里只需要判断「调用方是不是在指另一个目录」，粗粒度比较足够。
+ */
+function sameDir(left, right) {
+  const norm = value => String(value ?? '').trim().replace(/[\\/]+$/, '').toLowerCase().replace(/\//g, '\\')
+  const a = norm(left)
+  return !!a && a === norm(right)
+}
 
 /** @param {unknown} error */
 export function isTransient(error) {
@@ -125,6 +170,33 @@ export class Dispatch {
      * 而「报告会自己回来」正是本插件的核心承诺。
      */
     this.admissionCounts = { direct: 0, ledger: 0 }
+    /**
+     * 合并窗口的待发通知（P1-1）：任务 id → `{ task, text, wake, timer, since }`。
+     *
+     * 为什么按 `task.id` 而不是按会话：合并的前提是「后一条**取代**前一条」。
+     * 跨任务合并会把两条不同任务的进度压成一条，用户看到的「哪条在做什么」直接
+     * 丢了——那比两条消息更糟。同一任务的多条进度说的才是同一件事。
+     *
+     * 只装 `mergeableOf()` 判为真的通知；终态、失败、批次汇总根本不进这里
+     * （见 `notify()`）。这是 §九「直通类永不参与合并」在数据结构上的落点：
+     * 不进队列的东西不可能被延迟。
+     */
+    this.pendingNotices = new Map()
+    /**
+     * 合并发生次数与省下的投递数（P1-1 的可观测读数，供自检对账）。
+     *
+     * `collapsed` 是「被合并掉的条数」而不是「窗口数」：一次窗口里来了 3 条，
+     * 只发 1 条，省下 2 条。这个数直接回答「合并到底减了多少消息」。
+     */
+    this.mergeStats = { windows: 0, collapsed: 0 }
+    /**
+     * 投递形态计数（P1-2）：`{ full, digest, ledger }`。
+     *
+     * 与 `admissionCounts` 分开：准入回答「该不该进会话」，投影回答「进了多长」。
+     * 两件事混成一个计数之后，「progress 没进会话」与「progress 进了但被压短」
+     * 就再也分不出来——而这恰好是 P1-2 想让人看见的差别。
+     */
+    this.projectionCounts = { full: 0, digest: 0, ledger: 0 }
     const stateRoot = this.config.stateDir
       || join(process.env.DSH_HOME || join(homedir(), '.dsh'), STATE_DIR)
     this.stateFile = join(stateRoot, 'tasks.json')
@@ -418,10 +490,21 @@ export class Dispatch {
   /**
    * 派发一个任务：登记 → 排队 → 由 pump 按并发位启动。
    * 立即返回，不等子会话干活。
+   *
+   * **续派（plans/08 阶段 1 · 模型 A）**：传了 `input.continueTaskId` 时不再新建任务，
+   * 而是把这条要求转发成对**已有任务**的 `dispatch_message`（见 `continueLaunch()`）。
+   * 不传时本函数的行为与 0.8.x **逐字相同**——这是回滚保证：只要有任何一个调用方
+   * 没带这个参数，它就走的是完全没有改过的那条路径。
+   *
    * @param {object} agent 调用者（主会话）
-   * @param {{title: string, brief: string, cwd?: string, workspace?: string, createWorkspace?: boolean, model?: string, agentPreset?: string, permissionPreset?: string, group?: string}} input
+   * @param {{title: string, brief: string, cwd?: string, workspace?: string, createWorkspace?: boolean, model?: string, agentPreset?: string, permissionPreset?: string, group?: string, continueTaskId?: string}} input
    */
   async launch(agent, input) {
+    // 续派要在**任何**登记动作之前分流：走过去就会被建出一条新任务，
+    // 而模型 A 的全部意义就是「不新建任务」。
+    if (input.continueTaskId !== undefined && input.continueTaskId !== null && input.continueTaskId !== '') {
+      return this.continueLaunch(agent, input)
+    }
     const used = this.quotaUsed(agent.id)
     if (used >= this.config.maxTasksPerSession) {
       throw new Error(`本会话还有 ${used} 个未收尾的任务，达到上限 ${this.config.maxTasksPerSession}；`
@@ -528,7 +611,16 @@ export class Dispatch {
       title,
       brief,
       parentSessionId: agent.id,
-      workerSessionId: `dispatch-${id}`,
+      workerSessionId: `${WORKER_PREFIX}${id}`,
+      /**
+       * 线程标识（plans/08 阶段 0）：今天一任务 = 一线程，所以由任务 id 派生。
+       *
+       * 不做成「复用会话时才有的可选字段」：那样每条读取路径都要判空，而判空的
+       * 分支永远没人测。恒定有值、恒定 1:1，阶段 2 只需要改**赋值那一处**
+       * （同线程的第二个任务复制第一个的 threadId），读取方（归档、统计、看板）
+       * 一行都不用动。
+       */
+      threadId: newThreadId(id),
       status: 'queued',
       attempt: 1,
       createdAt: now(),
@@ -554,6 +646,119 @@ export class Dispatch {
     this.refreshHint(agent)
     this.schedulePersist()
     void this.pump()
+    return task
+  }
+
+  /**
+   * 续派（plans/08 阶段 1 · **模型 A**）：把一条新要求追加给**已有任务**的子会话。
+   *
+   * 语义就是「对目标任务的 `dispatch_message`」：不新建任务、不新建会话、不换模型，
+   * 只把一条文本投进那条会话的收件箱，然后任务重新回到 `running`。转发路径刻意
+   * 复用 `message()` 而不是自己投递——投递顺序（先投递、成功后才跃迁状态）、
+   * 「已取消的任务不能复活」、「回收站标记、后台巡检作废」这些不变式都在那里，
+   * 另写一条会立刻分叉（这正是 `docs/tools.md` 说「对已结算任务发消息等价于续跑」的同一段代码）。
+   *
+   * **四条硬校验（plans/08 §四，缺一即拒绝并说明原因）**——顺序是刻意的：
+   * 先查「有没有这条任务」（调用方最可能的错就是 id 打错），再查归属，再查会话形状，
+   * 再查工作区，最后才判「有没有别的活跃任务」。把便宜的判据放前面，报错就指向真正的病因。
+   *
+   * 为什么第 4 条要用「整张表」而不是 `workerState()`：`workerState(sessionId)` 只看
+   * **这一条会话**上的任务，而这一条要判的是「**别的**任务正在占着并发位/正在跑」。
+   * 两条判据不同源：同会话多任务在模型 A 下不存在（一任务一会话），所以按会话判
+   * 会永远返回 `settled`，形同没判。缺的就是「整表活跃任务」这一层，见 §四.4 的注。
+   *
+   * @param {object} agent 调用者（主会话）
+   * @param {{title?: string, brief?: string, cwd?: string, workspace?: string, createWorkspace?: boolean, model?: string, agentPreset?: string, permissionPreset?: string, group?: string, continueTaskId: string}} input
+   * @returns {Promise<object>} 目标任务本身（**不是**新任务）
+   */
+  async continueLaunch(agent, input) {
+    const taskId = String(input.continueTaskId ?? '').trim()
+    if (!taskId) throw new Error('continue_task_id 需要一个任务 id；不知道 id 时先用 dispatch_list 查')
+
+    // ① 目标任务存在。用 resolveTask() 而不是 table.get()：退休任务要能被**明确拒绝**
+    //    （「它已经不在了」），而不是笼统地说「没有任务」——后者会让人以为 id 打错了。
+    const task = this.resolveTask(taskId)
+    if (!task) {
+      throw new Error(`没有任务 ${taskId}：无法续派。先用 dispatch_list 查现有任务，`
+        + '或去掉 continue_task_id 新派一个任务')
+    }
+    if (this.isRetired(task)) {
+      throw new Error(`任务 ${taskId} 已退休（记录已移出活表，原因：${task.retiredReason}）：`
+        + '它的正文与报告都不在了，续派没有上下文可用。请新派一个任务')
+    }
+
+    // ② 归属：续派是把要求投进**别人的** worker 会话，跨会话必须拒绝。
+    if (task.parentSessionId !== agent.id) {
+      throw new Error(`任务 ${taskId} 不属于本会话（它是 ${task.parentSessionId} 派出的）：不能续派别人的任务`)
+    }
+
+    // ③ worker 会话存在且是本插件建的（`dispatch-*` 形状）。形状判据挡的是
+    //    「手填一个真实会话 id」——那条会话不是我们派的，往里塞要求等于盗用它的上下文。
+    if (!isWorkerSessionId(task.workerSessionId)) {
+      throw new Error(`任务 ${taskId} 的子会话 id「${task.workerSessionId ?? '(空)'}」不是本插件建的`
+        + `（应以「${WORKER_PREFIX}」开头）：不能往里续派`)
+    }
+
+    // ④ 工作区 / cwd 一致。`continue_task_id` **没有自己的 workspace 参数**，
+    //    所以这里判的是「调用方这次给的东西与目标任务是否冲突」：
+    //    给了 cwd 就必须是同一个目录，给了 workspace 就必须解析到同一个工作区。
+    //    不做 realpath 比较（见 `sameDir` 的注释）。
+    if (typeof input.cwd === 'string' && input.cwd.trim() && !sameDir(input.cwd, task.cwd)) {
+      throw new Error(`续派的工作目录与任务 ${taskId} 不一致：这次给的是「${input.cwd.trim()}」，`
+        + `该任务的工作目录是「${task.cwd ?? '(未设置)'}」。续派沿用目标任务的工作区——`
+        + '要在别的目录干活，请去掉 continue_task_id 新派一个任务')
+    }
+    if (typeof input.workspace === 'string' && input.workspace.trim()) {
+      const asked = await this.workspaces.resolve(input.workspace)
+      if (!asked) {
+        throw new Error(`续派指定的工作区「${input.workspace}」解析不到。续派沿用目标任务的工作区，`
+          + `该任务是「${task.workspaceTitle ?? '(未指定，跟随会话目录)'}」`)
+      }
+      if (task.workspaceId && asked.id !== task.workspaceId) {
+        throw new Error(`续派的工作区与任务 ${taskId} 不一致：这次是「${asked.title}」，`
+          + `该任务在「${task.workspaceTitle ?? task.workspaceId}」。续派沿用目标任务的工作区——`
+          + '要在别的工作区干活，请去掉 continue_task_id 新派一个任务')
+      }
+    }
+
+    // ⑤ 当前没有别的活跃任务。判据是**整张表**里除目标之外还有没有 queued/running：
+    //    模型 A 不新建任务，所以续派本身不占新并发位；但「一边续派一边还有活没跑完」
+    //    会让主会话误以为这条是排队的，而它其实是插进一条正在跑的会话里的第二条要求。
+    const busy = [...this.table.tasks.values()]
+      .filter(other => other !== task && (other.status === 'running' || other.status === 'queued'))
+    if (busy.length) {
+      const listed = busy.slice(0, 5).map(other => `${other.id}（${other.status}）`).join('、')
+      throw new Error(`现在还有 ${busy.length} 个活跃任务，不能续派：${listed}`
+        + (busy.length > 5 ? ' 等' : '')
+        + '。等它们结算后再续派，或先 dispatch_cancel 掉不需要的那些')
+    }
+
+    /**
+     * 读回执与「上一轮的结论」要不要在这里补：**都不补**。
+     *
+     * - 读回执（`inputPendingAt` / `inputReadAt`）由 `message()` 自己维护，
+     *   在这里再写一遍会和它抢同一个字段。
+     * - 上一轮结论**不抄进消息**：那是模型 A 的一个已声明的代价（「这次要求与上次要求
+     *   混在同一任务里」），worker 自己的会话历史里就有上一轮的完整输出；主会话再抄一段
+     *   摘要进去，等于让同一份事实在会话里出现两遍，而两遍一旦不一致就无法判断谁是对的。
+     *   要交接摘要的是模型 B（阶段 2），那里才有独立的「新任务」需要它。
+     *
+     * 唯一补的是**调用方这次写的要求**：`title`/`brief` 是 `dispatch_launch` 的必填参数，
+     * 续派时它们承载的就是「这次要做什么」。两个都给时都带上——title 作为一行小标题，
+     * brief 作为正文；只给其中一个就用那一个，两个都空直接报错（否则 worker 收到一条
+     * 只有前缀、没有任何要求的消息）。
+     */
+    const title = oneLine(input.title, 120)
+    const brief = String(input.brief ?? '').trim()
+    if (!title && !brief) {
+      throw new Error('continue_task_id 需要 title 或 brief 说明这次要做什么；'
+        + '否则 worker 只会收到一条没有要求的续派消息')
+    }
+    const body = [title ? `这次的要求：${title}` : '', brief].filter(Boolean).join('\n\n')
+
+    // 转发：这就是模型 A 的全部实现——一条 message。
+    await this.message(task, `${CONTINUE_LEAD}\n\n${body}`, 'queue')
+    this.log(`${LOG_PREFIX} 任务 %s 续派：要求已投递给子会话 %s`, task.id, task.workerSessionId)
     return task
   }
 
@@ -731,27 +936,27 @@ export class Dispatch {
     for (const item of members) item.groupClosed = true
     this.schedulePersist()
 
-    const tally = {}
-    for (const item of members) tally[item.status] = (tally[item.status] ?? 0) + 1
-    const summary = Object.entries(tally).map(([status, count]) => `${status} ${count}`).join(' / ')
-    const lines = members.map(item => {
-      const last = item.reports.at(-1)
-      const reason = item.error
-        ?? last?.summary
-        ?? item.lastText
-        ?? ''
-      const head = `- ${item.title} · ${item.status}${(item.attempt ?? 1) > 1 ? ` · 第 ${item.attempt} 次` : ''}`
-      return reason ? `${head}：${oneLine(reason, 120)}` : head
-    })
-
     try {
       // 批次汇总是「一次派发 N 个任务」的结算信号，属于必须直通的一类（P0-2）：
       // 批次成员自己只入库，如果汇总也不回流，整批就会彻底静默。
+      //
+      // 文案按 plans/10 §四.3 改成「结果分组」：旧形状 `done 3 / failed 1` +
+      // 每条一行状态清单，要求用户自己数、自己归类，而且「failed 1」不点名——
+      // 用户看不出是哪一条没成，等于没报。新形状先给批次短标签与比例，
+      // 再按「成了 / 没成」分组，没成的逐条点名并带原因。
       this.admissionCounts[ADMISSION.DIRECT] += 1
+      // 汇总前先冲掉**每个成员**窗口里还躺着的进度。
+      //
+      // 为什么不能只靠 `notify()`：汇总用的是 `group` 键，而成员的进度用的是各自
+      // 的 `task.id`——键不同，`notify()` 里那句「先冲本任务」找不到它们。
+      // 不冲的结果是「整批汇总」先到、成员进度 1.5 秒后才到，用户先读结论再读过程。
+      // 逐条冲刷是安全的：这些进度本来就已在各自窗口里等着发，只是提前了不到 2 秒。
+      for (const item of members) {
+        if (this.pendingNotices.has(item.id)) await this.flushNotice(item.id)
+      }
       await this.relay(
         { parentSessionId: task.parentSessionId, id: group, workerSessionId: '' },
-        `[dispatch] 批次 ${group} 全部结束（${members.length} 个任务：${summary}）\n${lines.join('\n')}\n`
-        + '需要明细用 dispatch_inspect 按 task_id 查。',
+        batchText(members, { group }),
         true,
       )
     } catch (error) {
@@ -904,6 +1109,12 @@ export class Dispatch {
    * P0-2 准入分级：`admissionOf()` 决定这条报告是 `direct`（回流）还是
    * `ledger`（只入库）。默认只有结论类与需要人处理的状态直通，`progress`
    * 只入账本——「进度」是过程信息，不该进会话长期历史。
+   *
+   * plans/10 §四.1 的 `headline`：worker 可以给一句**给用户看的结论**。
+   * 它跟 `summary` 一起入库，但角色不同——`summary` 是技术摘要（做了什么、
+   * 改了哪些文件），`headline` 是一句话结论。缺了**不在库里补**（补在投影层，
+   * 见 `voice.js` 的 `headlineOf`）：「worker 没写」与「系统替他编了一句」
+   * 是两件不同的事实，账本必须分得开；混成一个字段就再也分不出来了。
    */
   async report(agent, input) {
     const task = this.table.byWorker(agent.id)
@@ -952,20 +1163,172 @@ export class Dispatch {
     const shouldRelay = admission === ADMISSION.DIRECT
       && (selfRelay || status === 'progress')
       && !throttled
+    // P1-2：投递形态单独记账。`ledger` 也要记数——否则「没进会话」这件事在
+    // 自检里看不见，只能靠人去数 admission，而两个口径迟早会漂。
+    // 投影**只算一次**（`projectReport()` 单点决定），返回值里的 `projection`
+    // 与计数读的是同一个值：两处各判一次会让「自检说 digest、实际发全文」漂开。
+    let projection = PROJECTION.LEDGER
+    let relayed = false
+    let merged = false
     if (shouldRelay) {
       if (status === 'progress') task.progressRelayAt = entry.at
-      await this.relay(task, this.reportText(task, entry), status !== 'progress')
+      const projected = this.projectReport(task, entry)
+      projection = projected.projection
+      // P1-1：可合并的通知进窗口，其余立即投（`notify()` 内部按 `mergeableOf()` 分流）。
+      const outcome = await this.notify(task, projected.text, status !== 'progress', {
+        status,
+        admission,
+      })
+      relayed = outcome === 'delivered' || outcome === 'recorded' || outcome === 'delivered-degraded'
+      merged = outcome === 'merged'
     }
+    this.projectionCounts[projection] += 1
     return {
       recorded: true,
       task_id: task.id,
       status: task.status,
       admission,
+      projection,
       ...(entry.truncated ? { truncated: entry.truncated } : {}),
       grouped: !selfRelay,
       ...(throttled ? { throttled: true } : {}),
-      ...(shouldRelay ? {} : { relayed: false }),
+      ...(merged ? { merged: true } : {}),
+      ...(relayed || merged ? {} : { relayed: false }),
     }
+  }
+
+  /**
+   * 一条通知该不该进合并窗口（P1-1）。**这是 §九 那条硬约束的唯一定义处。**
+   *
+   * 判据只有两条，任意一条说不就**立即投递**（不进队列，也就不可能被延迟）：
+   * 1. 窗口开着（`mergeWindowMs() > 0`）；
+   * 2. 状态属于 `MERGEABLE_REPORT_STATUSES`（只有 `progress`）。终态
+   *    `done`/`blocked`/`failed`/`cancelled` 天然不在里面——结论与「需要人处理」
+   *    晚 1.5 秒，用户就会以为它卡住了。批次汇总、启动失败、回合兜底也不经过
+   *    `report()`（它们直接调 `relay()`），结构上进不来。
+   *
+   * 为什么**不**按配置的直通列表再排一次：`progress` 的默认准入是 `ledger`，
+   * 它根本不会被投递，也就无所谓合并；用户把 `progress` 加进 `directReportStatuses`
+   * 是唯一让它进会话的途径。若判据里再排除「配置点名的状态」，合并功能就只在
+   * 它唯一能生效的配置下被关掉——那等于这个功能不存在。
+   * P1-1 的**单独回退开关**因此就是 `noticeMergeWindowMs: 0`（§九 每批能单独回退）。
+   *
+   * @param {{status?: string}} meta
+   * @returns {boolean}
+   */
+  mergeableOf(meta) {
+    if (this.mergeWindowMs() <= 0) return false
+    return MERGEABLE_REPORT_STATUSES.has(String(meta?.status ?? ''))
+  }
+
+  /**
+   * 当前生效的合并窗口（毫秒）。`0` = 关闭合并。
+   *
+   * 硬上限 `NOTICE_MERGE_MAX_MS`（2 秒）从这里夹：配置写了 10 秒也只按 2 秒算。
+   * §九 的「合并窗口上限 2 秒」是**上限**而不是默认值，所以截断比报警更合适
+   * ——配错的人要的是「合并」，不是「让通知晚 10 秒」。
+   */
+  mergeWindowMs() {
+    const raw = Number(this.config.noticeMergeWindowMs)
+    if (!Number.isFinite(raw) || raw <= 0) return 0
+    return Math.min(raw, NOTICE_MERGE_MAX_MS)
+  }
+
+  /**
+   * 投递一条通知：可合并的进窗口，其余立刻发。
+   *
+   * 窗口的语义是**「后一条覆盖前一条」**（与上游 `Effects.enqueue` 的同名 key
+   * 覆盖一致）：同一任务在窗口内又来一条时，替换掉待发的那条、重置计时器，
+   * 于是窗口内不管来多少条，最后只发**最新**的一条。这不是节流——节流会丢
+   * 当前态，合并只丢中间态。
+   *
+   * 为什么计时器从**最后一条**重新起算而不是固定窗口：固定窗口下，窗口末尾
+   * 1ms 来的那条仍然要等满窗口才发；从最后一条起算能保证「安静 1.5 秒后就发」，
+   * 上限仍是 `NOTICE_MERGE_MAX_MS`（因为每个新条目的等待时间都不超过它）。
+   *
+   * @param {object} task
+   * @param {string} text 已经投影过的文本
+   * @param {boolean} wake
+   * @param {{status?: string, admission?: string, wake?: boolean}} [meta]
+   * @returns {Promise<string>} `merged` 表示进了窗口（还没真的发出去）
+   */
+  async notify(task, text, wake, meta = {}) {
+    if (!this.mergeableOf(meta)) {
+      // 直通类先把这个任务窗口里躺着的进度冲掉，再发自己。
+      //
+      // 为什么顺序有意义：不冲的话，`progress`（还在等窗口）会让位给后到的
+      // `done`，主会话看到的是「先结论、后进度」——因果颠倒，读起来像系统错乱。
+      // 冲刷在 `relay()` 之前 await，保证「过程 → 结论」的顺序不被打乱。
+      // 顺带还修掉一个隐患：不冲的话那条进度要等到窗口到点才发，而那时任务
+      // 可能已经结算、甚至已被退休，投递会落到一条「已经结束」的任务上。
+      if (this.pendingNotices.has(task.id)) await this.flushNotice(task.id)
+      return this.relay(task, text, wake)
+    }
+    const key = task.id
+    const existing = this.pendingNotices.get(key)
+    if (existing) {
+      // 覆盖：文本换成最新的，计时器重起，并把「省下几条」记进统计。
+      if (existing.timer) clearTimeout(existing.timer)
+      this.mergeStats.collapsed += 1
+      existing.text = text
+      existing.wake = wake
+      existing.at = now()
+      existing.timer = this.#scheduleNoticeFlush(key)
+      return 'merged'
+    }
+    this.pendingNotices.set(key, {
+      task,
+      text,
+      wake,
+      at: now(),
+      timer: this.#scheduleNoticeFlush(key),
+    })
+    return 'merged'
+  }
+
+  /**
+   * 给某个任务挂一个「窗口到点就发」的定时器。
+   *
+   * `unref()`：一个纯投递定时器不该拖住进程退出。插件卸载时 `dispose()` 会统一
+   * 清掉它们（见 `dispose()` 里的 pendingNotices 段），所以不会有「卸载后还在投」。
+   */
+  #scheduleNoticeFlush(key) {
+    const timer = setTimeout(() => { void this.flushNotice(key) }, this.mergeWindowMs())
+    timer.unref?.()
+    return timer
+  }
+
+  /**
+   * 把某个任务累积的待发通知真正发出去（窗口到点、或被 `dispose()` 冲刷时调用）。
+   *
+   * 幂等：条目先删再发，重复调用第二次时已经没有条目，直接返回。
+   *
+   * @param {string} key 任务 id
+   * @returns {Promise<string|undefined>} 投递结果；没有待发条目时 undefined
+   */
+  async flushNotice(key) {
+    const entry = this.pendingNotices.get(key)
+    if (!entry) return undefined
+    // 先摘掉再 await：投递期间又来一条新通知时，它应当开一个新的窗口，
+    // 而不是把自己追加进一条已经在飞的投递里（那样它会随这次投递一起消失）。
+    this.pendingNotices.delete(key)
+    if (entry.timer) clearTimeout(entry.timer)
+    this.mergeStats.windows += 1
+    return this.relay(entry.task, entry.text, entry.wake)
+  }
+
+  /**
+   * 立即冲刷全部待发通知（插件卸载 / 测试收尾用）。
+   *
+   * 为什么卸载必须冲刷：窗口里躺着的是「已经决定要告诉用户」的内容，
+   * 让它们随进程消失等于静默丢消息——那比晚 1.5 秒糟得多。
+   *
+   * @returns {Promise<number>} 被冲刷的条数
+   */
+  async flushNotices() {
+    const keys = [...this.pendingNotices.keys()]
+    for (const key of keys) await this.flushNotice(key)
+    return keys.length
   }
 
   /**
@@ -981,15 +1344,21 @@ export class Dispatch {
     const limitDetail = Math.max(0, Number(this.config.maxReportDetailChars) || 0)
     const rawSummary = String(input.summary ?? '').trim()
     const rawDetail = input.detail ? String(input.detail) : undefined
+    // `headline` 不是必填：给了才入库，且**原样保留 worker 的措辞**（只 clip 长度）。
+    // 这里不做「缺了就补兜底句」——兜底是投影层的事，见 voice.js 的 headlineOf()。
+    const rawHeadline = String(input.headline ?? '').replace(/\s+/g, ' ').trim()
     const summary = clip(rawSummary, limitSummary)
     const detail = rawDetail === undefined ? undefined : clip(rawDetail, limitDetail)
-    /** @type {{summary?: number, detail?: number}} */
+    const headline = rawHeadline ? clip(rawHeadline, HEADLINE_LEDGER_MAX) : undefined
+    /** @type {{summary?: number, detail?: number, headline?: number}} */
     const truncated = {}
     if (summary.length < rawSummary.length) truncated.summary = rawSummary.length
     if (detail !== undefined && detail.length < rawDetail.length) truncated.detail = rawDetail.length
+    if (headline !== undefined && headline.length < rawHeadline.length) truncated.headline = rawHeadline.length
     return {
       at: now(),
       status,
+      ...(headline ? { headline } : {}),
       summary,
       detail,
       // 只在真被截时出现：一个恒存在的空对象会让「是否截过」变成永远 true。
@@ -1034,19 +1403,137 @@ export class Dispatch {
   }
 
   /**
-   * 报告文本：给主会话模型看的紧凑结构化消息。
+   * 报告文本：给主会话模型看的**四段式**消息（plans/10 §四.2）。
    *
-   * 这里的截断上限与外发**同一个配置**，但入库时已经截过一次（见 `#admitEntry`），
+   * 形状（第一行必须是任务短标签，id 只在最后的「细节」行）：
+   *
+   * ```text
+   * 【任务】auth 令牌刷新
+   * 【结果】登录超时修好了，补了 3 个回归测试
+   * 【说明】替换了 refresh 调用点 6 处；新增 3 条用例；测试全绿。
+   * 【细节】dispatch_inspect t-1a9f-1
+   * ```
+   *
+   * 为什么改掉旧形状 `[dispatch] 任务 <id> · <标题> · 报告 <status>`：
+   * 主会话会把这段话转述给用户，而首行里 3 个成分对用户都没用——id 对不上，
+   * 「报告 done」得翻译一次，标题还得和 id 抢注意力。首行放短标签之后，
+   * 主会话第一句就能是「auth 令牌刷新那条：做好了」。
+   *
+   * 为什么正文里**只保留 `summary`**：`detail` 是长详情，按设计只进账本
+   * （`dispatch_inspect` 读得到）。把它塞进回流消息，等于把「给模型看的那份」
+   * 又变成大段日志——压缩只作用于投影，而投影就是这里。
+   *
+   * 截断上限与外发**同一个配置**，但入库时已经截过一次（见 `#admitEntry`），
    * 所以正常情况下这里是幂等的（长度没变，`clip` 原样返回）。保留这层是给
    * 两件事兜底：一是历史库里的老条目（升级前入库的超长报告），二是调用方
    * 绕过 `report()` 直接构造条目（`maybeSummarize` 之类）。
    */
   reportText(task, entry) {
-    const head = `[dispatch] 任务 ${task.id} · ${task.title} · 报告 ${entry.status}`
-    const summaryLimit = Math.max(0, Number(this.config.maxReportSummaryChars) || 6000)
-    const detailLimit = Math.max(0, Number(this.config.maxReportDetailChars) || 4000)
-    const tail = entry.detail ? `\n详情：\n${clip(entry.detail, detailLimit)}` : ''
-    return `${head}\n摘要：\n${clip(entry.summary, summaryLimit)}${tail}\n（子会话 ${task.workerSessionId}）`
+    return reportText(task, entry, { peers: this.#labelPeers(task) })
+  }
+
+  /**
+   * 把一条**已经生成好**的报告文本压成「摘要 + 指针」（P1-2）。
+   *
+   * 为什么在投影层二次处理，而不是去改 `voice.reportText()`：四段式是 10-P0 定下
+   * 的文案契约（首行短标签、id 只在细节行、需要你段带行动指向），
+   * `test/voice-contract.test.js` 逐条钉着它。它是对的——错的是**整段进会话**。
+   * 所以压的是「这一份投递」，不是「那一份文案」：文案层保持单一形状，
+   * 投影层决定发多长，将来调预算不用碰契约。
+   *
+   * 压法是**按行取舍**而不是重排：`【任务】` 与 `【细节】`（指针）必留，
+   * `【结果】` 必留（那是用户唯一一定要读到的一句），`【需要你】` 有就必留
+   * （行动指向不能省），只有 `【说明】` 按预算裁。这样压完仍然是一份合法的
+   * 四段式投影，`voiceViolations()` 照常通过。
+   *
+   * 什么时候**不压**：文本本来就在预算内（实测典型报告 34–120 字，远小于
+   * `REPORT_VIEW.SUMMARY`），压它等于凭空制造信息损失。只有超过预算才切。
+   *
+   * @param {string} text `reportText()` 的产物
+   * @returns {string} 可以投进会话的那一份
+   */
+  projectText(text) {
+    const value = String(text ?? '')
+    const budget = Math.max(0, Number(REPORT_VIEW.SUMMARY) || 0)
+    if (value.length <= budget) return value
+    const rows = value.split('\n')
+    const note = rows.find(row => row.startsWith(REPORT_SECTIONS.NOTE))
+    // 没有说明行就没有可压的东西，原样发：硬砍结果行或需要行是在删事实。
+    if (!note) return value
+    const body = note.slice(REPORT_SECTIONS.NOTE.length)
+    const limit = Math.max(0, Number(REPORT_VIEW.DIGEST) || 0)
+    if (body.length <= limit) return value
+    // **不用 `clip()`**：它会在中间插一段「…（已截断 N 字符）…」并且**带换行**，
+    // 那会把单行的【说明】段撑成三段，四段式的「一行一段」直接破掉
+    //（`voiceViolations()` 与全部文案契约测试都是按行找段名的）。
+    // 投影这里是「取开头 + 一句指针」，本来也不需要头尾各半：读者要的是
+    // 「这段开始讲什么」，剩下的交给 `dispatch_inspect`。
+    const room = Math.max(0, limit - 1)
+    const keep = room > 0 ? `${body.slice(0, room)}…` : '…'
+    // 余量说清「差了多少字」，而不是含糊的「已省略」：主会话据此判断要不要去查。
+    const rest = `（另有 ${body.length - Math.max(0, room)} 字在账本里，用「细节」行的 dispatch_inspect 查）`
+    return rows
+      .map(row => (row === note ? `${REPORT_SECTIONS.NOTE}${keep}${rest}` : row))
+      .join('\n')
+  }
+
+  /**
+   * 把一条报告压成「摘要 + 指针」的**唯一入口**（P1-2）。
+   *
+   * 为什么要有这一层、而不是让调用方自己判断该不该压：`projectText()` 单独看是
+   * 「超过 800 字才压」，而 `projectionOf()` 认为「带 detail 的就该是 digest」。
+   * 两个判据各在一处，就会出现「自检说这条是 digest、实际投出去的是全文」——
+   * 那正是 §七 第 6 条（自检与账本一致）最想避免的口径分裂。
+   * 所以判据只留在一处（`projectionOf()`），压不压由它决定，`projectText()` 只负责怎么压。
+   *
+   * 带 detail 但摘要很短时，压了也不会变短（`body.length <= DIGEST` 时原样返回），
+   * 那属于「没有可压的东西」，不是口径不一致。
+   *
+   * @param {object} task
+   * @param {object} entry 账本条目
+   * @returns {{text: string, projection: 'full'|'digest'}}
+   */
+  projectReport(task, entry) {
+    const text = this.reportText(task, entry)
+    const projection = this.projectionOf(entry)
+    return {
+      text: projection === PROJECTION.DIGEST ? this.projectText(text) : text,
+      projection,
+    }
+  }
+
+  /**
+   * 这一条报告该以哪种形态投进会话（P1-2）。
+   *
+   * 判据按「谁更需要完整」排序，先命中的先算：
+   * - 有 `detail`：账本里已经有一份长正文，会话里再放摘要全文就是重复搬运——
+   *   摘要本身很短时也不影响，因为 `projectText()` 对预算内的文本是恒等的；
+   * - 其余按长度：超过投影预算就压，没超就原样。
+   *
+   * @param {{summary?: string, detail?: string}} entry
+   * @returns {'full'|'digest'}
+   */
+  projectionOf(entry) {
+    const summary = String(entry?.summary ?? '').trim()
+    if (String(entry?.detail ?? '').trim()) return PROJECTION.DIGEST
+    return summary.length > Math.max(0, Number(REPORT_VIEW.SUMMARY) || 0)
+      ? PROJECTION.DIGEST
+      : PROJECTION.FULL
+  }
+
+  /**
+   * 造短标签时要参考的「可能撞名」的任务集合。
+   *
+   * 为什么用**同一主会话**的范围：用户看到的是同一个主会话回流来的报告，
+   * 撞名也只会发生在这里面。全库扫描会把毫不相干的同名任务也算进来，
+   * 于是每条标签都平白多一个后缀。
+   *
+   * 隐私边界：只取 `id/title/workspaceTitle`，且只在撞名时用到它们。
+   */
+  #labelPeers(task) {
+    const parentId = task?.parentSessionId
+    if (!parentId) return []
+    return this.table.ofSession(parentId)
   }
 
   /**
@@ -1141,9 +1628,20 @@ export class Dispatch {
     return 'failed'
   }
 
-  /** 任务启动失败时也要让主会话知道，而不是只留在任务表里。 */
+  /**
+   * 任务启动失败时也要让主会话知道，而不是只留在任务表里。
+   *
+   * 文案按 plans/10 §四.4：`<任务短标签>：没能开始——<原因>`。
+   * 旧文案 `[dispatch] 任务 <id> · <标题> 启动失败：<error>` 三样都有，但
+   * 「启动失败」是工程词，「没能开始」才是用户能判断的事；而且 id 占据了首句。
+   * 末尾带一句「要我重试吗？」是**行动指向**：这条消息的全部用途就是让用户
+   * 决定下一步，没有这一句就只是通知。
+   */
   async relayFailure(task) {
-    await this.relay(task, `[dispatch] 任务 ${task.id} · ${task.title} 启动失败：${task.error ?? '未知错误'}`, true)
+    // 走 `notify()` 而不是 `relay()`：这条是结论（「没能开始」），必须先冲掉该任务
+    // 窗口里还躺着的进度，否则用户会先看到「结论」、后看到「过程」。
+    // `mergeableOf('failed')` 恒 false，所以它自己绝不会被合并。
+    await this.notify(task, failureText(task, { peers: this.#labelPeers(task) }), true, { status: 'failed' })
   }
 
   /**
@@ -1227,10 +1725,18 @@ export class Dispatch {
     // `task.lastText`（已按 maxLastTextChars 截过），也可能来自 watchBackground
     // 的旧值。统一按配置再夹一次，避免改了配置后这条路径还按老数字走。
     const body = text ? clip(text, this.#maxLastTextChars()) : '（worker 本轮没有输出文本）'
-    const note = extra.note ? `\n${extra.note}` : ''
-    await this.relay(task,
-      `[dispatch] 任务 ${task.id} · ${task.title} · 一轮执行结束（worker 未显式报告）\n最后一条消息：\n${body}\n${note}`
-      + '\n用 dispatch_inspect 看细节，或用 dispatch_message 继续指派；任务已释放并发位。', true)
+    // 文案按 plans/10 §四.4：先说哪条，再说「它跑完了但没给结论」。
+    // 旧文案 `一轮执行结束（worker 未显式报告）` 是机制描述，用户读不出
+    // 「这条路走不通了、要不要追问」这层意思。
+    //
+    // 走 `notify()`：这是一条结论，必须先冲掉该任务窗口里还躺着的进度。
+    // 用 `relay()` 会把它插到待发进度前面——用户先看到「它跑完了」再看到
+    // 「第三步在跑」，因果颠倒。`mergeableOf('ended')` 恒 false，它自己不会被合并。
+    await this.notify(task, idleText(task, {
+      peers: this.#labelPeers(task),
+      body,
+      note: extra.note,
+    }), true, { status: 'ended' })
   }
 
   /**
@@ -1487,7 +1993,7 @@ export class Dispatch {
 
     // 会话不在了：换一个 worker 会话，把原始简报重投一遍。
     task.attempt = nextAttempt
-    task.workerSessionId = `dispatch-${task.id}-a${task.attempt}`
+    task.workerSessionId = `${WORKER_PREFIX}${task.id}-a${task.attempt}`
     task.turnStartedAt = undefined
     task.lastText = ''
     // reopen 会自己把任务放进队列（且不会重复入队）——0.6.0 之前这里是
@@ -1891,7 +2397,23 @@ export class Dispatch {
       let requeued = 0
       for (const item of state.tasks) {
         if (!item?.id || !item?.workerSessionId) continue
-        const task = { ...item, reports: Array.isArray(item.reports) ? item.reports : [] }
+        const task = {
+          ...item,
+          reports: Array.isArray(item.reports) ? item.reports : [],
+          /**
+           * 老数据没有 `threadId`（0.8.x 落盘的 tasks.json）：按**派生规则**补出来，
+           * 与「新版本当时就会写下的那个」逐字相同（见 `newThreadId`）。
+           *
+           * 为什么不「没有就当不同线程」：那会让升级前派的、升级后又在同一条线
+           * 上派的任务被算成两条线程，线程预算与线程级归档（阶段 2/3）从一开始
+           * 就漏账；而这种漏账只在特定升级时刻出现，事后极难解释。
+           *
+           * 为什么不报错/不标记：缺这个键是**完全正常的历史形状**，它不是数据损坏。
+           * 读不回就警告、就迁移、就拒启动，都是拿一个纯展示字段换插件起不来的风险。
+           * 补出来的值只活在内存里，下次 persist 自然落盘——不做一次性迁移脚本。
+           */
+          threadId: typeof item.threadId === 'string' && item.threadId ? item.threadId : newThreadId(item.id),
+        }
         if (!SETTLED.has(task.status)) {
           /**
            * 「排队中、且从没启动过」是唯一能安全重排的状态：`startedAt` 是空的，
@@ -1908,8 +2430,28 @@ export class Dispatch {
             requeued += 1
             continue
           }
-          task.status = 'interrupted'
-          task.updatedAt = now()
+          /**
+           * 这里必须走正规入口，不能裸写 `task.status`（plans/09 P0）。
+           *
+           * 裸写的代价有两层：`interrupted` 在 `SETTLED` 里是终态，裸写不会写
+           * `settledAt`，于是 `stats.js` 的 `settleTimeOf()` 只能回退 `updatedAt`
+           * 并把它计进 `coverage.fallbackCount` / `timeBasis: 'updatedAt-fallback'`
+           * ——一条**刚恢复的新任务**被标成「旧数据欠账」，回退计数就此失去诊断意义。
+           *
+           * `force` 按实际判据决定，不是一律加上：`running → interrupted` 是
+           * `TRANSITIONS.running` 里的合法边，不需要 force；但 `queued` 带着上一轮的
+           * `startedAt`（`retry()` 的 `reopen()` 只清 `settledAt`、不清 `startedAt`）
+           * 也会落到这里，而 `queued → interrupted` **不在**跃迁表里。对这种任务用
+           * 普通 transition 会被静默拒绝（只加 `rejectedTransitions` 计数），任务永远
+           * 卡在 `queued`、既不在队列里也不再被 pump 推进——比裸写更糟。所以用
+           * `canTransition` 的返回值决定，而不是靠猜。
+           *
+           * 队列/唤醒安全：此刻任务是从 state 里重建出来的对象、**还没进** `table`，
+           * 队列里也不可能有它（队列只装本进程登记过的 id），`transition` 里那两句
+           * 队列维护对它都是空操作；`waiters` 不归 `transition` 管（只有 `settle`
+           * 唤醒），但重启恢复发生在启动阶段、还没有任何调用方在等，无需唤醒。
+           */
+          this.table.transition(task, 'interrupted', { force: !canTransition(task.status, 'interrupted') })
         }
         this.table.tasks.set(task.id, task)
       }
@@ -2050,9 +2592,15 @@ export class Dispatch {
       workspaceTitle: task.workspaceTitle ?? null,
       reportCount: Array.isArray(task.reports) ? task.reports.length : 0,
       summary: oneLine(last?.summary ?? task.lastText ?? '', 200),
+      // 线程标识跟着留痕走：退休是「移出活表、原因可查」，而「它属于哪条线程」
+      // 恰恰是事后回答「这条工作线怎么结束的」唯一还剩下的线索。缺了它，
+      // 线程级统计会把这条任务算成一条孤儿线程（阶段 2/3 的线程视图直接用这个字段）。
+      threadId: task.threadId,
     }
-    this.table.tasks.delete(task.id)
-    this.table.dequeue(task.id)
+    // 走 `table.remove()` 而不是裸删：删除与**解绑活跃任务**必须是同一个动作
+    // （见 TaskTable.remove 的注释）。裸删会留下指向不存在任务的绑定键，
+    // 虽然查询会自愈，但「删掉的任务仍是这条会话的活跃任务」本身就是错的。
+    this.table.remove(task.id)
     this.retired.set(task.id, record)
     this.#trimRetired()
     return record
@@ -2128,6 +2676,33 @@ export class Dispatch {
       },
       pending: { inputs: pendingInputs, unknown: unknownInputs },
       retired: { count: this.retired.size, latestAt: latestRetiredAt ?? null },
+      /**
+       * P1 新增的两块已读数：合并窗口与投递形态。
+       *
+       * 为什么放在 `memory` 里而不是另开顶层键：§六 P1-3 要求自检的 memory 块能回答
+       * 「注入预算」与「当前窗口」，而这两件恰好是 P1 新增的注入侧治理——
+       * 分开放会让「上下文占用」这个话题要翻两个地方才能拼出来。
+       *
+       * `mergeWindowMs` 是**生效值**（已被 2 秒硬上限夹过），不是配置原值：
+       * 自检要回答「现在实际多久合并一次」，回显配置会把配错的值伪装成生效值。
+       */
+      merge: {
+        windowMs: this.mergeWindowMs(),
+        pending: this.pendingNotices.size,
+        windows: this.mergeStats.windows,
+        collapsed: this.mergeStats.collapsed,
+        mergeableStatuses: [...MERGEABLE_REPORT_STATUSES],
+      },
+      projection: {
+        full: this.projectionCounts.full,
+        digest: this.projectionCounts.digest,
+        ledger: this.projectionCounts.ledger,
+        budget: {
+          // 投进会话的正文预算（P1-2）；超过它才切「摘要 + 指针」。
+          view: Math.max(0, Number(REPORT_VIEW.SUMMARY) || 0),
+          digest: Math.max(0, Number(REPORT_VIEW.DIGEST) || 0),
+        },
+      },
     }
   }
 
@@ -2359,6 +2934,84 @@ export class Dispatch {
   }
 
   /**
+   * 单独归档**一个**任务（看板行上的「归档」按钮走这里）。
+   *
+   * 与 `archiveStale()` 的分工：那个是**巡检**——按 `archiveAfterHours` 扫全表、
+   * 只碰超期的、没有「指定这一条」的入口；这里是**手动**——用户点哪条就归档哪条，
+   * 不等保留期、不看 `updatedAt`。两者写下的字段完全一致（`archivedAt` +
+   * `frozenAt`），所以下游（`boardTask` / `memoryStats` / 退休排序）不需要知道
+   * 这次归档是从哪条路来的。
+   *
+   * 为什么另起一个方法而不是给 `archiveStale()` 加参数：巡检的返回值是
+   * `{scanned, archived, failed}` 这种**批量**口径，被 `POST /board/archive`
+   * 与启动定时器共用，还钉着既有断言；塞一个「只处理某条」的开关进去，会让
+   * 「一次巡检」与「一次单点归档」共用一份返回形状，谁都读不懂哪个字段有用。
+   *
+   * 三条语义决定：
+   * - **未结算一律拒绝**。running/queued 的子会话还在写，归档它等于让一个还在
+   *   产出的会话变成只读，任务状态却还是 running——这是数据损坏，不是清理。
+   * - **决策 B：子会话归档失败也要落 `archivedAt` + `frozenAt`**，真实原因写进
+   *   `archiveError`。用户点归档的意图是「这条别再挡在我面前了」，而会话可能
+   *   随重启消失了、也可能是启动就失败的（这类任务**必然**没有活动会话）。
+   *   如果失败就不归档，这些任务会永远卡在待办区——那正是用户报的缺陷本身。
+   *   但必须留痕：返回值带 `reason`、任务上带 `archiveError`，绝不假装干净成功。
+   * - **幂等**。已归档的再点一次不报错、不重写时间戳：`archivedAt` 是「第一次
+   *   被归档的时刻」，被重复点击刷新会让看板上的「几小时前归档」反复归零。
+   *
+   * @param {string} taskId 任务 id（内部 id，即看板的 `task_id`）
+   * @returns {Promise<{ ok: true, archived: boolean, reason?: string, task: object }>}
+   *   `archived` 表示**本次调用**是否真的写了归档标记（已归档过再调为 false）；
+   *   `reason` 只在「归档了但子会话没归档成功」时出现，内容就是 `archiveError`。
+   * @throws 任务不存在 / 未结算时抛人类可读错误（路由据此回 404 / 409）
+   */
+  async archiveTask(taskId) {
+    const id = String(taskId ?? '').trim()
+    if (!id) throw new Error('需要 task_id')
+    const task = this.table.get(id)
+    if (!task) throw new Error(`没有任务 ${id}`)
+    // 未结算的任务还在写。归档 = 只读冻结，冻一个还在跑的会话没有正确语义。
+    if (!SETTLED.has(task.status)) {
+      throw new Error(`任务 ${id} 还没结算（${task.status}），不能归档；要停掉它请用取消`)
+    }
+    // 幂等：已归档就原样返回，**不**刷新 archivedAt / frozenAt。
+    if (task.archivedAt) {
+      return {
+        ok: true,
+        archived: false,
+        ...(task.archiveError ? { reason: task.archiveError } : {}),
+        task,
+      }
+    }
+
+    const result = await this.workspaces.archiveSession(task.workerSessionId)
+    const at = now()
+    task.archivedAt = at
+    // 与 `archiveStale()` 同一条不变量：归档一定同时写冻结时刻。
+    // 两个时刻刻意分开记（当前实现同值），因为冻结的语义是「只读开始」，
+    // 将来允许「先冻结、后归档」时这个字段不用改含义。
+    task.frozenAt = at
+    if (result.ok) {
+      task.archiveError = undefined
+      this.log(`${LOG_PREFIX} 已归档子会话 %s（任务 %s，手动）`, task.workerSessionId, task.id)
+    } else {
+      // 决策 B：会话没了也要放行归档，但把原因留在任务上，看板会渲染成
+      // 「归档失败：<原因>」——用户看到的是「已归档 + 一句实话」，不是假成功。
+      task.archiveError = result.error
+      this.warn(`${LOG_PREFIX} 任务 %s 已归档，但子会话 %s 归档失败: %s`,
+        task.id, task.workerSessionId, result.error)
+    }
+    this.schedulePersist()
+    // 归档会改变退休排序（已归档的更该先走），与巡检收尾同一处理。
+    this.enforceLedgerCap()
+    return {
+      ok: true,
+      archived: true,
+      ...(result.ok ? {} : { reason: String(result.error ?? '未知原因') }),
+      task,
+    }
+  }
+
+  /**
    * 插件卸载：收回注册的提示段、冲刷状态。运行中的子会话交给 DSH 自身管理。
    *
    * 注意 `disposed = true` 会让 `schedulePersist` 直接返回，所以这里
@@ -2367,6 +3020,11 @@ export class Dispatch {
    */
   async dispose() {
     this.disposed = true
+    // P1-1：窗口里躺着的是「已经决定要告诉用户」的内容，随进程消失等于静默丢消息。
+    // 必须在 `disposed = true` 之后、persist 之前冲掉：`relay()` 不看 disposed
+    //（它只看主会话在不在），所以这里冲得出去；而接着的 persist 能把 delivery
+    // 结果一起落盘。
+    try { await this.flushNotices() } catch (error) { this.warn('%s 卸载时冲刷合并通知失败: %s', LOG_PREFIX, String(error)) }
     if (this.persistTimer) clearTimeout(this.persistTimer)
     this.persistTimer = undefined
     if (this.sweepTimer) clearTimeout(this.sweepTimer)

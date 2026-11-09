@@ -537,9 +537,9 @@ test('退休记录不回落进快照的 tasks 列表', () => {
 
 // ---------------------------------------------------------------- HTTP 路由
 
-/** 假宿主：handler 需要 table.get / cancel / retry。 */
-function fakeHost(tasks, { cancelThrows = false } = {}) {
-  const calls = { cancel: [], retry: [] }
+/** 假宿主：handler 需要 table.get / cancel / retry / message。 */
+function fakeHost(tasks, { cancelThrows = false, messageThrows = false } = {}) {
+  const calls = { cancel: [], retry: [], message: [] }
   const agents = new Map([['s1', { id: 's1' }], ['s2', { id: 's2' }]])
   const dispatch = {
     config: { leadSessionId: 'mas-lead' },
@@ -557,6 +557,12 @@ function fakeHost(tasks, { cancelThrows = false } = {}) {
     async retry(task) {
       calls.retry.push(task.id)
       task.attempt = (task.attempt ?? 1) + 1
+      return task
+    },
+    /** 续派走 `message()`：handler 不新建路由，只把用户的文本转发给它。 */
+    async message(task, text, mode) {
+      if (messageThrows) throw new Error('子会话不可用')
+      calls.message.push({ id: task.id, text, mode })
       return task
     },
     workspaces: { list: () => [{ id: 'w-1', title: '项目 A', path: 'C:\\a' }] },
@@ -763,4 +769,76 @@ test('快照带每个会话的派发目标', async () => {
   dispatch.targets.set('s1', { workspace_id: 'w-1', title: '项目 A', path: 'C:\\a' })
   const result = await call(handler, {})
   assert.deepEqual(result.json.targets, { s1: { workspace_id: 'w-1', title: '项目 A', path: 'C:\\a' } })
+})
+
+// ---------------------------------------------------------------- 续派（plans/08 阶段 1）
+
+/*
+ * 看板的「续派」按钮**不新造 HTTP 路由**：它复用 `/retry` 这条既有写入通道，
+ * 只是多给一个可选的 `message`。用户填的那句话就是 `dispatch.message()` 的正文，
+ * 而 `retry()` 内部走的也是同一个方法——两条入口同源，语义不会分叉。
+ *
+ * 这几条用例钉的是三件事：带 `message` 时走 message 而不走 retry；任务还在跑时
+ * **拒绝**（409，不能把要求插进正在跑的回合）；message 抛错时也回 409 并带原因。
+ */
+
+test('POST /retry 带 message → 走续派（message）而不是 retry', async () => {
+  const { handler, calls } = fakeHost([makeTask('a', { status: 'done' })])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/retry`,
+    body: { task_id: 'a', message: '把 lint 也跑一遍' },
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.json.ok, true)
+  assert.deepEqual(calls.retry, [], '带 message 时不该再走 retry（那会换指令语义）')
+  assert.equal(calls.message.length, 1)
+  assert.equal(calls.message[0].id, 'a')
+  assert.match(calls.message[0].text, /把 lint 也跑一遍/, '用户写的话必须原样进会话')
+  assert.match(calls.message[0].text, /【续派】/, '前缀必须与 dispatch_launch 的那份同源')
+  assert.equal(calls.message[0].mode, 'queue')
+})
+
+test('POST /retry 带 message 时任务未结算 → 409，且什么都不投递', async () => {
+  const { handler, calls } = fakeHost([makeTask('a', { status: 'running' })])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/retry`,
+    body: { task_id: 'a', message: '插一句' },
+  })
+  assert.equal(result.status, 409)
+  assert.match(result.json.error, /还在 running，不能续派/, '必须说清「还在跑」与「不能续派」两件事')
+  assert.deepEqual(calls.message, [], '拒绝时一条消息都不该投出去')
+  assert.deepEqual(calls.retry, [])
+})
+
+test('POST /retry 不带 message（或只有空白）仍是原来的重试', async () => {
+  const { handler, calls } = fakeHost([makeTask('a', { status: 'failed' })])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/retry`,
+    body: { task_id: 'a', message: '   ' },
+  })
+  assert.equal(result.status, 200)
+  assert.deepEqual(calls.retry, ['a'], '空白 message 按「没给」处理，走重试')
+  assert.deepEqual(calls.message, [])
+  assert.equal(result.json.task.attempt, 2)
+})
+
+test('POST /retry 续派时 message() 抛错 → 409 并带上原因', async () => {
+  const { handler } = fakeHost([makeTask('a', { status: 'done' })], { messageThrows: true })
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/retry`,
+    body: { task_id: 'a', message: '补一句' },
+  })
+  assert.equal(result.status, 409)
+  assert.match(result.json.error, /子会话不可用/, '投递失败的原因要原样透给看板')
+})
+
+test('POST /cancel 带 message 时仍按取消处理（message 只对 /retry 有意义）', async () => {
+  const { handler, calls } = fakeHost([makeTask('a', { status: 'running' })])
+  const result = await call(handler, {
+    method: 'POST', url: `${BASE}/cancel`,
+    body: { task_id: 'a', message: '顺手带了一句' },
+  })
+  assert.equal(result.status, 200)
+  assert.deepEqual(calls.cancel, [['a', '看板取消']])
+  assert.deepEqual(calls.message, [], '取消口不读 message，别让它悄悄变成两条副作用')
 })

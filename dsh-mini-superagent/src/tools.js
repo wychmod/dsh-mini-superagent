@@ -85,24 +85,39 @@ export function toolDefinitions(dispatch) {
         + '完成或被阻塞时会用 dispatch_report 汇报，报告会作为消息回流到本会话（本会话空闲时会被唤醒）。'
         + '并发位满时任务进入 queued，有空位自动开始。适合可以并行、彼此独立的工作。'
         + '**派发即移交**：返回之后，该任务的任何执行环节（读代码、搜索、跑脚本、开浏览器、查网络、验数据）'
-        + '都不再由本会话进行；派完之后默认动作是结束本轮，不要去重做一遍，也不要原地等结果。',
+        + '都不再由本会话进行；派完之后默认动作是结束本轮，不要去重做一遍，也不要原地等结果。'
+        + '\n\n**续派（continue_task_id）**：想在**同一个任务**上补一句要求时传它——那一刻本工具不新建任务，'
+        + '而是把 title/brief 当作「这次的要求」追加给该任务的子会话（等价于 dispatch_message），'
+        + '任务重新变为 running。三个代价必须知道：'
+        + '①**没有独立的任务记录**（列表/看板里仍只有原来那一条，看起来像它又跑了一轮）；'
+        + '②**没有独立的报告链**（这次的汇报会记进原任务，与上一轮的结论混在一起）；'
+        + '③**没有独立的看板行**，「这次要求」与「上次要求」混在同一任务里，事后无法分开审计。'
+        + '要保留任务粒度就**别传**它，直接新派一个任务。'
+        + '四条硬校验（任一不满足即报错并说明原因，不会静默降级成新派发）：'
+        + '目标任务存在且未退休；属于本会话；其子会话是本插件建的（`dispatch-*`）；'
+        + '工作区/cwd 与目标任务一致（**续派没有自己的 workspace 参数，一律沿用目标任务的工作区**）；'
+        + '且当前没有别的活跃任务（running/queued）。',
       parameters: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: '任务短标题（不超过 120 字），用于列表与子会话标题。' },
-          brief: { type: 'string', description: '完整任务简报：目标、约束、验收标准、相关文件路径、已知事实。子会话看不到本会话的历史，必须自包含。' },
-          cwd: { type: 'string', description: '可选。子会话工作目录的绝对路径。**优先级高于输入框里记住的派发目标**：只给 cwd（比如会话目标是「自动」）时，这一轮就按 cwd 干活，不再自动挑工作区、也不落【派发】日期目录——显式参数永远压过记住的设置。与 workspace 同时给时 workspace 胜（会话归到那个工作区），但 cwd 仍是子会话真实的工作目录（会切过去）。省略则用 workspace 的路径，再省略则继承本会话的工作目录。' },
-          workspace: { type: 'string', description: '可选。派发到哪个工作区：工作区 id、绝对路径、或工作区标题都可以。子会话会在这个目录里干活；省略则沿用本会话的工作目录（或输入框里记住的目标）。**同名工作区有多个时不会猜**：会报错并列出候选的路径，改用 id 或绝对路径重试。先用 dispatch_workspaces 看有哪些。' },
+          title: { type: 'string', description: '任务短标题（不超过 120 字），用于列表与子会话标题。传了 continue_task_id 时它表示「这次要做什么」的一句话小标题。' },
+          brief: { type: 'string', description: '完整任务简报：目标、约束、验收标准、相关文件路径、已知事实。子会话看不到本会话的历史，必须自包含。传了 continue_task_id 时它就是追加给子会话的新要求正文。' },
+          cwd: { type: 'string', description: '可选。子会话工作目录的绝对路径。**优先级高于输入框里记住的派发目标**：只给 cwd（比如会话目标是「自动」）时，这一轮就按 cwd 干活，不再自动挑工作区、也不落【派发】日期目录——显式参数永远压过记住的设置。与 workspace 同时给时 workspace 胜（会话归到那个工作区），但 cwd 仍是子会话真实的工作目录（会切过去）。省略则用 workspace 的路径，再省略则继承本会话的工作目录。传了 continue_task_id 时**只能给同一个目录**，否则报错（续派沿用目标任务的工作区）。' },
+          workspace: { type: 'string', description: '可选。派发到哪个工作区：工作区 id、绝对路径、或工作区标题都可以。子会话会在这个目录里干活；省略则沿用本会话的工作目录（或输入框里记住的目标）。**同名工作区有多个时不会猜**：会报错并列出候选的路径，改用 id 或绝对路径重试。先用 dispatch_workspaces 看有哪些。传了 continue_task_id 时**只能给同一个工作区**，否则报错。' },
           create_workspace: { type: 'boolean', description: '可选，默认 true。workspace 解析不到时是否自动新建：给的是绝对路径就在该路径建，给的是名字就在工作区根下建。注意：名字有歧义（多个工作区同名）时**不论这个开关是什么都不会新建**，那样只会造出重复目录。' },
-          model: { type: 'string', description: '可选。子会话使用的模型：`model` 或 `provider/model`；省略则用部署默认。宿主不支持切换模型时这次派发会失败并说明原因（不会静默改用默认模型）。' },
+          model: { type: 'string', description: '可选。子会话使用的模型：`model` 或 `provider/model`；省略则用部署默认。宿主不支持切换模型时这次派发会失败并说明原因（不会静默改用默认模型）。传了 continue_task_id 时该参数被忽略——复用会话沿用原模型。' },
           agent_preset: { type: 'string', description: '可选。子会话使用的 agent preset id；省略则用部署默认 preset。' },
           permission_preset: { type: 'string', description: '可选。子会话的权限预设（如 danger-full-access）；省略则继承插件配置或 DSH 默认。' },
+          continue_task_id: { type: 'string', description: '可选。续派：把这个任务 id 的**已有**子会话接着用，只追加一条新要求（不新建任务）。不给 = 新派一个任务（默认行为，与旧版完全一致）。详见工具描述里的三个代价与四条校验。' },
         },
         required: ['title', 'brief'],
         additionalProperties: false,
       },
       async execute(args, exec) {
         const agent = requireCaller(exec)
+        // 续派：转发已经在 `launch()` 里做（那里是唯一的派发入口，两个工具都过它）。
+        // 这里只负责把 snake_case 的参数名翻成内部字段名——把「参数名 → 内部名」的
+        // 映射留在工具边界，`dispatch.js` 就只认一套拼写。
         const task = await dispatch.launch(agent, {
           title: args.title,
           brief: args.brief,
@@ -112,8 +127,18 @@ export function toolDefinitions(dispatch) {
           model: args.model,
           agentPreset: args.agent_preset,
           permissionPreset: args.permission_preset,
+          continueTaskId: args.continue_task_id,
         })
-        return { task: dispatch.card(task), note: '已入队/启动；接下来默认结束本轮，不要在本轮等它完成，报告会自己回来。' }
+        // 续派的返回值 note 必须**换一句话**：说「已入队」会让人以为多了一条任务，
+        // 而它的语义恰恰是「没有新任务，只有一条新要求进了旧的那个」。
+        const resumed = args.continue_task_id !== undefined && args.continue_task_id !== null && args.continue_task_id !== ''
+        return {
+          task: dispatch.card(task),
+          ...(resumed ? { continued: true } : {}),
+          note: resumed
+            ? '已续派：没有新建任务，这条要求追加给了原任务的子会话，它处理完会再次汇报。'
+            : '已入队/启动；接下来默认结束本轮，不要在本轮等它完成，报告会自己回来。',
+        }
       },
     },
     {
@@ -325,13 +350,22 @@ export function toolDefinitions(dispatch) {
     {
       name: 'dispatch_report',
       description: '（仅被派发的 worker 使用）向派发你的主会话汇报：done 完成、blocked 被阻塞、failed 失败、progress 阶段性进展。'
-        + '主会话会收到这条报告并据此继续。主会话不要调用本工具。',
+        + '主会话会收到这条报告并据此继续。主会话不要调用本工具。'
+        + '**说人话**：用 headline 写一句给用户看的结论（默认不要省略）——'
+        + '`summary` 是技术摘要，用户不一定读；主会话会优先转述 headline。',
       parameters: {
         type: 'object',
         properties: {
           status: { type: 'string', enum: ['done', 'blocked', 'failed', 'progress'], description: '报告类型。' },
-          summary: { type: 'string', description: '3-6 行摘要：做了什么、结果如何、需要主会话做什么（如有）。' },
-          detail: { type: 'string', description: '可选的长详情：改动清单、验证命令与输出、遗留问题。' },
+          headline: {
+            type: 'string',
+            description: '可选但**强烈建议**：一句话给用户看的结论，≤40 字。不含任务 id、不含英文状态词'
+              + '（done/failed/blocked）、不重复任务名（外层「任务」行已经标了是哪条）。'
+              + '写「登录超时修好了，补了 3 个回归测试」这种，不要写「已完成开发工作」。'
+              + '省略时系统会用「标题 + 状态」生成兜底句——兜底句只说得出成没成，说不出做成了什么。',
+          },
+          summary: { type: 'string', description: '3-6 行技术摘要：做了什么、结果如何、需要主会话做什么（如有）。' },
+          detail: { type: 'string', description: '可选的长详情：改动清单、验证命令与输出、遗留问题。只进账本与 dispatch_inspect，不随报告回流。' },
         },
         required: ['status', 'summary'],
         additionalProperties: false,

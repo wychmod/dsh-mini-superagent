@@ -190,6 +190,15 @@ function reconcile(d, memory) {
     ['retired.latestAt', memory?.retired?.latestAt, latestRetiredAt],
     ['window.days', memory?.window?.days, Number(d.config.memoryWindowDays)],
     ['window.tasks', memory?.window?.tasks, Number(d.config.memoryWindowTasks)],
+    // P1-1 / P1-2 的已读数也必须对账：新增的计数器最容易与真实行为漂开，
+    // 而它们正是「合并到底省了几条」「投影到底压了几条」的唯一证据。
+    ['merge.windowMs', memory?.merge?.windowMs, d.mergeWindowMs()],
+    ['merge.pending', memory?.merge?.pending, d.pendingNotices.size],
+    ['merge.windows', memory?.merge?.windows, d.mergeStats.windows],
+    ['merge.collapsed', memory?.merge?.collapsed, d.mergeStats.collapsed],
+    ['projection.full', memory?.projection?.full, d.projectionCounts.full],
+    ['projection.digest', memory?.projection?.digest, d.projectionCounts.digest],
+    ['projection.ledger', memory?.projection?.ledger, d.projectionCounts.ledger],
   ]
 
   const problems = []
@@ -246,6 +255,10 @@ test('验收1 消息条数：一次派发 + 一次收尾，主会话只多 1 条
 test('验收2 不重复：同一任务 60 秒内第二条 progress 不回流（未消费通知 ≤ 1 条）', async () => {
   await withDispatch({
     progressRelayIntervalMs: 60_000,
+    // P1-1 之后多了一个降噪层：合并窗口会把窗口内的多条合成一条。这条用例守的是
+    // **节流**（60 秒内第二条不回流），所以必须把合并窗口关掉——否则「只投了 1 条」
+    // 可能来自合并而不是节流，断言就不再指向它声称的那条机制。
+    noticeMergeWindowMs: 0,
     directReportStatuses: ['blocked', 'failed', 'progress'],
   }, async ({ d, host }) => {
     host.agents.set('lead', makeAgent('lead', 'running'))

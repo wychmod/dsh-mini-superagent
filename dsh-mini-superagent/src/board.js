@@ -7,10 +7,13 @@
  * 路由（prefix 注册，挂在 /dsh-mini-superagent/board 下）：
  *   GET  /dsh-mini-superagent/board           -> BoardSnapshot
  *   GET  /dsh-mini-superagent/board/retired   -> 已退休任务（只读，见 plans/07 P0-5）
+ *   GET  /dsh-mini-superagent/board/stats     -> 全量聚合（只读，见 plans/09 P0）
  *   POST /dsh-mini-superagent/board/cancel    {"task_id"} -> {ok, task}
  *   POST /dsh-mini-superagent/board/retry     {"task_id"} -> {ok, task}
  */
 import { BOARD_ALLOWED_HOSTS, BOARD_HEADER, LOG_PREFIX, SETTLED, VERSION } from './constants.js'
+import { continueLead } from './dispatch.js'
+import { boardStats, degradedStats } from './stats.js'
 
 /** 路由前缀；客户端 client/index.js 里有一份同样的常量，改一处要改两处。 */
 const BASE = '/dsh-mini-superagent/board'
@@ -40,18 +43,24 @@ const WEIGHT = { running: 0, queued: 1 }
  * 26 小时前就 done 的任务一直显示「26 时 0 分」并继续增长，看起来像还在跑
  * （看板对 running 还会本地叠加走表，所以这个基准必须是能停住的时刻）。
  *
- * 结算时间取 `updatedAt`：tasks.settle / transition 都会把它写成 now()，
- * 而 archivedAt 要等归档巡检才补，用它会让刚结算的任务显示不出耗时。
+ * 结算时间优先取权威的 `settledAt`（plans/09 P0），旧数据回退 `updatedAt`。
+ * 为什么要有权威字段：`updatedAt` 会被报告、追问、归档巡检、后台巡检刷新，
+ * 于是「done 在这一刻」这个事实在事后还会变——耗时与按天趋势跟着一起变。
+ * 回退是**兼容**而不是等价：真实的结算时刻没人记过，只能用最后更新时刻近似。
+ *
+ * 顺带说明：`settle()` 与 `transition()` 都会写 `updatedAt`，而 `archivedAt`
+ * 要等归档巡检才补，所以两者都不能单独当结算时间用。
  * 结算时刻不可能早于开始时刻，但仍做一次夹紧，避免时钟回拨变成负数。
  *
- * 已结算却没有可解析的 `updatedAt`（只可能来自损坏或历史数据）时返回 0
- * 表示「不知道」，**不能**退回 Date.now() —— 那等于把「耗时一直增长」这个
- * 缺陷在退化数据上又请回来了，而这正是本次要消灭的行为。
+ * 已结算却没有可解析的时间（只可能来自损坏或历史数据）时返回 0 表示「不知道」，
+ * **不能**退回 Date.now() —— 那等于把「耗时一直增长」这个缺陷在退化数据上又请回来。
  */
 function elapsedOf(task, started) {
   if (!Number.isFinite(started)) return 0
   if (!SETTLED.has(task.status)) return Math.max(0, Date.now() - started)
-  const settled = task.updatedAt ? Date.parse(task.updatedAt) : NaN
+  const settled = task.settledAt
+    ? Date.parse(task.settledAt)
+    : (task.updatedAt ? Date.parse(task.updatedAt) : NaN)
   if (!Number.isFinite(settled)) return 0
   return Math.max(0, settled - started)
 }
@@ -103,6 +112,22 @@ export function boardTask(task) {
     updated_at: task.updatedAt,
     started_at: task.startedAt,
     turn_started_at: task.turnStartedAt,
+    /**
+     * 权威结算时刻与它的**时间基准**（plans/09 P0）。
+     *
+     * 两个字段必须一起给：旧数据（0.8.x 及更早落盘的）没有 `settledAt`，这里
+     * 回退成 `updated_at`，但 `time_basis` 会写成 `updatedAt-fallback`。只给时间
+     * 不给基准，客户端会把「最后更新时刻」当成「结算时刻」渲染，而前者会被报告、
+     * 追问、归档刷新——同一个数字在两次轮询之间会变，谁也查不出为什么。
+     *
+     * 未结算的任务不输出这两个键（它们没有结算时刻），与 frozen_at 等可选字段同风格。
+     */
+    ...(SETTLED.has(task.status)
+      ? {
+          settled_at: task.settledAt ?? task.updatedAt ?? null,
+          time_basis: task.settledAt ? 'settledAt' : 'updatedAt-fallback',
+        }
+      : {}),
     elapsed_ms: elapsedOf(task, started),
     report_count: reports.length,
     last_report: last ? { at: last.at, status: last.status, summary: last.summary } : null,
@@ -474,10 +499,86 @@ export function createBoardHandler(ctx, dispatch) {
         return send(res, 200, retiredSnapshot(dispatch))
       }
 
+      /**
+       * 全量统计聚合（plans/09 P0）。
+       *
+       * 与 GET /board 同档准入（`readAllowed`），不要求写头：它只读、不含任务正文。
+       *
+       * 两件事必须写清楚：
+       * 1. **不受 200 条快照上限影响**。它遍历 `dispatch.table.tasks` 全量 + 退休留痕，
+       *    而不是 `/board` 那份截断过的列表——「总计 500 / 列表 200」时若拿列表算比例，
+       *    分母从一开始就是错的（§八.2）。
+       * 2. **失败降级而不是 500**（§八.10）。看板每 2 秒轮询，一个 500 会让客户端
+       *    进入「报错→重试→再报错」的循环，而任务列表其实还是好的。所以聚合抛错时
+       *    返回与成功结果同构的最小结构 + `degraded: true`，总览继续按快照工作。
+       *
+       * 查询参数：`window`（`24h` / `7d` / `30d` / `all`，缺省沿用 `memoryWindowDays`）、
+       * `workspaceId`（派发目标）、`hostWorkspaceId`（实际归属）。两个工作区参数
+       * 是**两个维度**，同时给就是交集，不互相替代。
+       */
+      if (req.method === 'GET' && pathname === `${BASE}/stats`) {
+        if (!readAllowed(req)) return send(res, 403, { ok: false, error: '看板只对本机或同源页面开放' })
+        let query
+        try { query = new URL(req.url ?? '', 'http://localhost').searchParams }
+        catch { query = new URLSearchParams() }
+        const scope = {
+          window: query.get('window') ?? undefined,
+          workspaceId: query.get('workspaceId') ?? undefined,
+          hostWorkspaceId: query.get('hostWorkspaceId') ?? undefined,
+        }
+        try {
+          return send(res, 200, boardStats(dispatch, scope))
+        } catch (error) {
+          // 降级要记日志：不记的话「效果卡一直显示暂不可用」永远查不到原因。
+          ctx.logger?.warn?.('%s 看板统计聚合失败，已降级返回: %s', LOG_PREFIX, String(error))
+          return send(res, 200, degradedStats(scope, error))
+        }
+      }
+
       if (req.method === 'POST' && pathname === `${BASE}/archive`) {
         if (!writeAllowed(req)) return send(res, 403, { ok: false, error: '看板写操作需要同源页面或带 `x-dsh-mini-superagent` 头的本机调用' })
         const result = await dispatch.archiveStale()
         return send(res, 200, { ok: true, ...result, counts: boardSnapshot(dispatch, await resolveMemory(dispatch)).counts })
+      }
+
+      /**
+       * 归档**单条**任务（看板行内的「归档」按钮）。
+       *
+       * 为什么不复用上面的 `POST /archive`：那条是**巡检**入口——不读 body、
+       * 按 `archiveAfterHours` 扫全表、回 `{scanned, archived, failed}`，而且
+       * 既有用例（`test/board.test.js` 的「POST /archive 触发一次归档巡检」、
+       * `test/p0-regression.test.js` 的两条准入用例）钉死了这套语义。给巡检
+       * 加一个「只处理某条」的分支，等于让同一个 URL 在不同 body 下有两套返回
+       * 形状与两种副作用，谁调谁都要先读实现。两条路各管一件事：
+       *   `/archive`      → 批量巡检（「立即归档」按钮、启动定时器）
+       *   `/archive-task` → 单条归档（任务行上的按钮，用户明确指了哪一条）
+       *
+       * 错误码分工（与 `/cancel` `/retry` 同风格，但「未结算」必须是 409 而不是
+       * 静默成功）：缺 `task_id` → 400；任务不存在 → 404；还在跑 → 409。
+       */
+      if (req.method === 'POST' && pathname === `${BASE}/archive-task`) {
+        if (!writeAllowed(req)) return send(res, 403, { ok: false, error: '看板写操作需要同源页面或带 `x-dsh-mini-superagent` 头的本机调用' })
+        let body
+        try { body = await readJson(req) }
+        catch (error) { return send(res, 400, { ok: false, error: String(error?.message ?? error) }) }
+        const taskId = String(body?.task_id ?? '').trim()
+        if (!taskId) return send(res, 400, { ok: false, error: '需要 task_id' })
+        // 先在这里查一次：这样 404 与 409 的区分不依赖 archiveTask 的错误文案，
+        // 文案以后改字也不会把状态码一起改坏。
+        if (!dispatch.table.get(taskId)) {
+          return send(res, 404, { ok: false, error: `没有任务 ${taskId}` })
+        }
+        try {
+          const result = await dispatch.archiveTask(taskId)
+          return send(res, 200, {
+            ok: true,
+            archived: result.archived,
+            ...(result.reason ? { reason: result.reason } : {}),
+            task: boardTask(result.task),
+          })
+        } catch (error) {
+          return send(res, 409, { ok: false, error: String(error?.message ?? error) })
+        }
       }
 
       if (req.method === 'POST' && pathname === `${BASE}/target`) {
@@ -510,9 +611,40 @@ export function createBoardHandler(ctx, dispatch) {
         const task = dispatch.table.get(String(body?.task_id ?? ''))
         if (!task) return send(res, 404, { ok: false, error: `没有任务 ${body?.task_id ?? ''}` })
 
+        /**
+         * `/retry` 兼作**续派**投递口（plans/08 阶段 1）。
+         *
+         * 为什么**不新造一条 HTTP 路由**：看板上「续派」与「重试」要的是同一条通道
+         * ——「往这条任务的子会话里投一条消息，让它接着干」，区别只有两处：
+         * 重试会先按状态挑指令（已完成 → 再执行一次；未完成 → 从中断处继续），
+         * 续派则由用户自己写那句话。既然 `dispatch.message()` 就是这条通道
+         * （`retry()` 内部也走它），这里只需让 `/retry` 接受一个可选的 `message`：
+         * 给了就走用户在填的那句话，没给就是原来的重试。多一条路由等于多一套准入、
+         * 多一组错误码、多一次「两条路径的语义什么时候开始分叉」的维护。
+         *
+         * 为什么**必须限定已结算的任务**：`message()` 会把任务拉回 `running`，
+         * 对一条正在跑的任务发续派 = 插进它当前回合的收件箱，那是 `dispatch_message`
+         * 里 `mode: 'steer'` 才该有的语义。看板上的按钮不该顺手做这件事，
+         * 所以未结算 → 409，让用户先等它跑完（或先取消）。
+         */
+        const continueText = typeof body?.message === 'string' ? body.message.trim() : ''
         try {
-          if (pathname === `${BASE}/cancel`) await dispatch.cancel(task, '看板取消')
-          else await dispatch.retry(task)
+          if (pathname === `${BASE}/cancel`) {
+            await dispatch.cancel(task, '看板取消')
+          } else if (continueText) {
+            if (!SETTLED.has(task.status)) {
+              return send(res, 409, {
+                ok: false,
+                error: `任务 ${task.id} 还在 ${task.status}，不能续派：等它结算后再补要求，或先取消`,
+              })
+            }
+            // 用户写的那句话直接进会话；前缀与派发工具的那份同源（`dispatch.continueLaunch`
+            // 也用它），所以两条入口投出去的东西形状一致——否则同一条要求在工具与看板
+            // 两条路上会被 worker 读成两件不同的事。
+            await dispatch.message(task, `${continueLead()}\n\n${continueText}`, 'queue')
+          } else {
+            await dispatch.retry(task)
+          }
           return send(res, 200, { ok: true, task: boardTask(task) })
         } catch (error) {
           return send(res, 409, { ok: false, error: String(error?.message ?? error) })
