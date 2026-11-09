@@ -300,6 +300,20 @@ export class TaskTable {
     // 读一次、写两处，这个相等就成了结构上的必然，而不是碰巧。
     const at = now()
     task.updatedAt = at
+    /**
+     * 离开终态 = 「结算时刻」这件事**不再成立**。
+     *
+     * 为什么在这里统一清，而不是留给 `reopen()`：终态没有普通出边，所以任何
+     * 「让一条已结算的任务重新活起来」的动作都只能走 `transition(force)`——
+     * 续派（`dispatch.message`）就是其中一条。只在 `reopen()` 里清的话，
+     * 续派复活的任务会**留着上一轮的 settledAt**：`#markSettled` 是幂等的，
+     * 第二次结算看到旧值就不写，于是这条任务的二次结算沿用第一轮时刻，
+     * 按天趋势、完成时刻、占用时长全算到旧日期（实测续派后再结算仍是第一轮时刻）。
+     *
+     * 清在「状态写入口」这一层，`reopen()` 与 `message()` 就共用同一条不变量，
+     * 以后再有人加一条复活路径也不会漏。
+     */
+    if (!SETTLED.has(status)) task.settledAt = undefined
     // 终态也要在这里落 settledAt（plans/09 P0）。`settle()` 是常规入口，
     // 但 `transition()` 是**唯一**的状态写入口，`force: true` 的重开/强改
     // 都从这里过；只在 settle 里写会漏掉「经 force 直接进终态」的路径，
@@ -321,7 +335,7 @@ export class TaskTable {
    * 而「结算时刻」是一次性事实——第二次写会让一个 3 小时前就 done 的任务
    * 显示成刚刚完成，并行节省与按天趋势跟着一起错。
    *
-   * `reopen()` 会把它清空：任务重新活跃之后，下一次结算是一个**新的**时刻。
+   * `transition()` 离开终态时会把它清空：任务重新活跃之后，下一次结算是一个**新的**时刻。
    *
    * @param {object} task
    * @param {string} [at] 调用方已经读到的时刻。传了就复用，不再读表——
@@ -396,13 +410,14 @@ export class TaskTable {
    * 重开必须清掉 `settledAt`：任务重新活跃之后，「结算时刻」不再存在。
    * 不清的代价很具体——第二次结算时 `#markSettled` 看到旧值就什么都不写，
    * 看板会把这条任务算在**上一次**结算的那一天里，并行节省也按旧的收尾时刻算。
+   *
+   * 清的动作由 `transition()` 统一做（进入非终态即失效），这里不再重复写一遍：
+   * 两处各写一次就多一个可能漏改的地方，而漏改的后果是「静默沿用旧时刻」。
    * @returns {boolean} 是否重开成功（已在 queued/running 时返回 false）
    */
   reopen(task) {
     if (!SETTLED.has(task.status)) return false
-    const reopened = this.transition(task, 'queued', { force: true })
-    if (reopened) task.settledAt = undefined
-    return reopened
+    return this.transition(task, 'queued', { force: true })
   }
 
   /** 从队列里移除一个任务 id（取消时用，幂等）。 */

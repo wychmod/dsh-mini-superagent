@@ -682,24 +682,11 @@ export class Dispatch {
       throw new Error(`没有任务 ${taskId}：无法续派。先用 dispatch_list 查现有任务，`
         + '或去掉 continue_task_id 新派一个任务')
     }
-    if (this.isRetired(task)) {
-      throw new Error(`任务 ${taskId} 已退休（记录已移出活表，原因：${task.retiredReason}）：`
-        + '它的正文与报告都不在了，续派没有上下文可用。请新派一个任务')
-    }
+    // ① 退休 / 归档 / 归属 / 会话形状：四条共用一条校验（见 `#assertContinuable`）。
+    //    看板入口也走同一条，所以两个入口的准入口径不会再分叉。
+    this.#assertContinuable(task, agent.id)
 
-    // ② 归属：续派是把要求投进**别人的** worker 会话，跨会话必须拒绝。
-    if (task.parentSessionId !== agent.id) {
-      throw new Error(`任务 ${taskId} 不属于本会话（它是 ${task.parentSessionId} 派出的）：不能续派别人的任务`)
-    }
-
-    // ③ worker 会话存在且是本插件建的（`dispatch-*` 形状）。形状判据挡的是
-    //    「手填一个真实会话 id」——那条会话不是我们派的，往里塞要求等于盗用它的上下文。
-    if (!isWorkerSessionId(task.workerSessionId)) {
-      throw new Error(`任务 ${taskId} 的子会话 id「${task.workerSessionId ?? '(空)'}」不是本插件建的`
-        + `（应以「${WORKER_PREFIX}」开头）：不能往里续派`)
-    }
-
-    // ④ 工作区 / cwd 一致。`continue_task_id` **没有自己的 workspace 参数**，
+    // ② 工作区 / cwd 一致。`continue_task_id` **没有自己的 workspace 参数**，
     //    所以这里判的是「调用方这次给的东西与目标任务是否冲突」：
     //    给了 cwd 就必须是同一个目录，给了 workspace 就必须解析到同一个工作区。
     //    不做 realpath 比较（见 `sameDir` 的注释）。
@@ -721,7 +708,7 @@ export class Dispatch {
       }
     }
 
-    // ⑤ 当前没有别的活跃任务。判据是**整张表**里除目标之外还有没有 queued/running：
+    // ③ 当前没有别的活跃任务。判据是**整张表**里除目标之外还有没有 queued/running：
     //    模型 A 不新建任务，所以续派本身不占新并发位；但「一边续派一边还有活没跑完」
     //    会让主会话误以为这条是排队的，而它其实是插进一条正在跑的会话里的第二条要求。
     const busy = [...this.table.tasks.values()]
@@ -757,6 +744,66 @@ export class Dispatch {
     const body = [title ? `这次的要求：${title}` : '', brief].filter(Boolean).join('\n\n')
 
     // 转发：这就是模型 A 的全部实现——一条 message。
+    // 投递本身走 `continueTask()`，看板入口也走它，所以「续派」这件事只有一份实现。
+    await this.continueTask(task, body)
+    return task
+  }
+
+  /**
+   * 续派前的**共同前置校验**（工具入口与看板入口共用一条）。
+   *
+   * 为什么必须共用：续派有两个入口——`dispatch_launch({continue_task_id})`
+   * 与看板上的「续派」按钮。0.8.x 之前看板那条直接调 `dispatch.message()`，
+   * 于是绕开了这里的每一条校验：可以对**别人的**任务续派、可以对**已归档**的
+   * 任务续派、可以往一个不是本插件建的会话里塞要求。工具入口拒绝、看板入口放行，
+   * 这不是「两条路径的细节差异」，是同一个动作有两套准入。
+   *
+   * 四条判据的顺序也是刻意的：先说「它已经不在了」（退休 / 归档），再说
+   * 「它不是你的」（归属），最后说「那个会话不能塞」（形状）。
+   * 读错误的人按这个顺序就知道该做什么。
+   *
+   * @param {object} task 目标任务
+   * @param {string|null} agentId 调用方主会话 id；看板入口没有调用方，传 null（跳过归属校验）
+   */
+  #assertContinuable(task, agentId) {
+    const id = task?.id ?? '(未知)'
+    // ① 退休留痕：记录已移出活表，正文与报告都不在了，续派没有上下文可用。
+    if (this.isRetired(task)) {
+      throw new Error(`任务 ${id} 已退休（记录已移出活表，原因：${task.retiredReason}）：`
+        + '它的正文与报告都不在了，续派没有上下文可用。请新派一个任务')
+    }
+    // ② 归档 = 只读冻结。归档的任务统计里已排除它，让它复活会造出
+    //    「归档与在跑并存」：历史被算成当下，而它其实正在改同一个工作目录。
+    if (task?.archivedAt) {
+      throw new Error(`任务 ${id} 已归档（${task.archivedAt}）：归档是只读冻结，不能再往里续派。`
+        + '请新派一个任务')
+    }
+    // ③ 归属：续派是把要求投进**别人的** worker 会话，跨会话必须拒绝。
+    if (agentId && task?.parentSessionId !== agentId) {
+      throw new Error(`任务 ${id} 不属于本会话（它是 ${task.parentSessionId} 派出的）：不能续派别人的任务`)
+    }
+    // ④ worker 会话存在且是本插件建的（`dispatch-*` 形状）。形状判据挡的是
+    //    「手填一个真实会话 id」——那条会话不是我们派的，往里塞要求等于盗用它的上下文。
+    if (!isWorkerSessionId(task?.workerSessionId)) {
+      throw new Error(`任务 ${id} 的子会话 id「${task?.workerSessionId ?? '(空)'}」不是本插件建的`
+        + `（应以「${WORKER_PREFIX}」开头）：不能往里续派`)
+    }
+  }
+
+  /**
+   * 续派：把一句话投进任务的子会话，让它接着干。
+   *
+   * 这是**唯一**的续派投递口（工具入口与看板入口都走它），这样两个入口的
+   * 准入、话术与副作用就只有一份实现。
+   *
+   * @param {object} task 目标任务（已结算）
+   * @param {string} text 用户写的这次要求
+   * @param {{ agentId?: string|null }} [options] 调用方主会话 id（看板入口没有）
+   */
+  async continueTask(task, text, options = {}) {
+    const body = String(text ?? '').trim()
+    if (!body) throw new Error('续派需要一句话内容；否则 worker 只会收到一条没有要求的续派消息')
+    this.#assertContinuable(task, options.agentId ?? null)
     await this.message(task, `${CONTINUE_LEAD}\n\n${body}`, 'queue')
     this.log(`${LOG_PREFIX} 任务 %s 续派：要求已投递给子会话 %s`, task.id, task.workerSessionId)
     return task
@@ -1868,6 +1915,13 @@ export class Dispatch {
    */
   async message(task, text, mode) {
     if (task.status === 'cancelled') throw new Error(`任务 ${task.id} 已取消；请重新 dispatch_launch 一个新任务`)
+    // 归档是**只读冻结**：统计里已排除它，看板上也没有任何操作按钮。
+    // 让它重新活起来会造出「归档与在跑并存」的任务——历史被算成当下，
+    // 而它其实正在改同一个工作目录。这一条挡在**投递之前**，不留半条投递。
+    if (task.archivedAt) {
+      throw new Error(`任务 ${task.id} 已归档（${task.archivedAt}）：归档是只读冻结，不能再往里投递要求。`
+        + '请新派一个任务')
+    }
 
     const agent = this.ctx.agents.get(task.workerSessionId)
     if (!agent) {
@@ -1881,6 +1935,23 @@ export class Dispatch {
       mode: mode === 'steer' ? 'steer' : 'queue',
       wake: true,
     })
+
+    /**
+     * 投递期间任务可能已经被取消（`dispatch_cancel` 与 `dispatch_message` 并发）。
+     *
+     * 取消是用户的明确动作，优先级高于这次投递：此时**不能**把任务拉回 running，
+     * 否则「取消」会被静默撤销——用户看到取消成功，任务却又在跑（实测取消后又变回 running）。
+     *
+     * 消息已经进了子会话的收件箱，这一点改不回去了；能守住的是「任务不再继续」：
+     * 状态留在 cancelled，结算时刻留着，统计口径也不会把它算成在跑。
+     *
+     * 这一段到 `transition()` 之间**没有 await**，所以「复查 → 改状态」是原子的：
+     * 不会有第三个状态插进这两步之间。
+     */
+    if (task.status === 'cancelled') {
+      throw new Error(`任务 ${task.id} 在投递途中已被取消：消息已进子会话收件箱，但任务不再继续`
+        + '（取消优先，任务保持已取消）')
+    }
 
     // 投递成功只代表「进了收件箱」，不代表 worker 读到了——先记一个「待读」标记，
     // 等 onSessionEvent 看到对应的 user/message 事件才清掉。看板据此区分
@@ -1898,10 +1969,21 @@ export class Dispatch {
       task.turnStartedAt = now()
       task.updatedAt = task.turnStartedAt
     } else {
+      // force 复活会经 `transition()` 清掉上一轮的 settledAt（离开终态 = 结算时刻失效），
+      // 于是第二次结算写的是**新的**时刻，而不是沿用第一轮。
       this.table.transition(task, 'running', { force: true })
       task.turnStartedAt = now()
       task.updatedAt = task.turnStartedAt
     }
+    /**
+     * 新回合开始 = 上一回合的「已给过终态报告」标记作废。
+     *
+     * 不清的后果很具体：第一轮报了 done（标记置位）→ 续派 → 第二轮 worker
+     * 没给结论就结束 → `finishIdleTurn()` 读到残留的 true，把任务判成 done
+     * 并**跳过兜底通知**。用户看到的只是第一轮的报告，第二轮静默消失
+     * （实测第二轮零报告被判 done 且完全不发通知）。
+     */
+    task.reportedSinceTurn = false
     this.schedulePersist()
     return task
   }
