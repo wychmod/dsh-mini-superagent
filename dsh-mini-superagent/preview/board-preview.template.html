@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>任务看板 · 改版预览</title>
+<title>派发工作台 · 改版预览</title>
 <style>
   :root {
     color-scheme: light;
@@ -43,7 +43,7 @@
 </head>
 <body>
 <div class="stage">
-  <p class="cap">真实面板组件 + 假数据，2 秒轮询一次（本页拦截了 fetch）。任务看板读 <code>GET /dsh-mini-superagent/board</code>，分析看板读 <code>GET /dsh-mini-superagent/board/analytics</code>；顶部切换条二选一。</p>
+  <p class="cap">真实面板组件 + 假数据，2 秒轮询一次（本页拦截了 fetch）。派发工作台读 <code>GET /dsh-mini-superagent/board</code>，分析看板读 <code>GET /dsh-mini-superagent/board/analytics</code>；顶部切换条二选一。</p>
   <div class="frame"><div id="root"><div class="fail">正在加载…（需要能访问 cdn.jsdelivr.net 取 React）</div></div></div>
 </div>
 
@@ -170,7 +170,7 @@ var board = {
 }
 
 /* 假账本里没有 parent_session_id：补上让「负责人」筛选有候选可看。
-   只加字段、不改任务看板已经用到的任何字段。 */
+   只加字段、不改派发工作台已经用到的任何字段。 */
 board.tasks.forEach(function (task, index) {
   if (!task.parent_session_id) task.parent_session_id = index % 3 === 0 ? 'session-billing' : 'session-lead'
 })

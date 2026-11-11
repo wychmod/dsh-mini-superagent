@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>任务看板 · 改版预览</title>
+<title>派发工作台 · 改版预览</title>
 <style>
   :root {
     color-scheme: light;
@@ -44,7 +44,7 @@
 </head>
 <body>
 <div class="stage">
-  <p class="cap">真实面板组件 + 假数据，2 秒轮询一次（本页拦截了 fetch）。任务看板读 <code>GET /dsh-mini-superagent/board</code>，分析看板读 <code>GET /dsh-mini-superagent/board/analytics</code>；顶部切换条二选一。</p>
+  <p class="cap">真实面板组件 + 假数据，2 秒轮询一次（本页拦截了 fetch）。派发工作台读 <code>GET /dsh-mini-superagent/board</code>，分析看板读 <code>GET /dsh-mini-superagent/board/analytics</code>；顶部切换条二选一。</p>
   <div class="frame"><div id="root"><div class="fail">正在加载…（需要能访问 cdn.jsdelivr.net 取 React）</div></div></div>
 </div>
 
@@ -171,7 +171,7 @@ var board = {
 }
 
 /* 假账本里没有 parent_session_id：补上让「负责人」筛选有候选可看。
-   只加字段、不改任务看板已经用到的任何字段。 */
+   只加字段、不改派发工作台已经用到的任何字段。 */
 board.tasks.forEach(function (task, index) {
   if (!task.parent_session_id) task.parent_session_id = index % 3 === 0 ? 'session-billing' : 'session-lead'
 })
@@ -464,7 +464,7 @@ window.fetch = function (url, options) {
 
 <script>
 /**
- * dsh-mini-superagent — Client 半边：常驻侧边栏图标 + 主面板「任务看板」
+ * dsh-mini-superagent — Client 半边：常驻侧边栏图标 + 主面板「派发工作台」
  *
  * 形态：plain ModuleLoader 包，无构建、无编译、无 CDN；React 从 require('react') 拿。
  * 只做两件事：向 sidebar.panellist 注册一个图标，向 main 注册一个面板。
@@ -525,7 +525,7 @@ window.__ModuleLoader__.load({
 
     /** 内置中文文案（locale 不可用时的兜底，也是默认界面语言）。 */
     const TEXT = {
-      title: '任务看板',
+      title: '派发工作台',
       concurrency: '并发',
       queuedOne: '排队',
       total: '总计',
@@ -549,6 +549,7 @@ window.__ModuleLoader__.load({
       updatedAt: '更新于',
       empty: '还没有任务。让主会话用 dispatch_launch 派发一个。',
       emptyFiltered: '这个筛选下没有任务。',
+      emptyArchivedHint: '还有 {n} 条历史已归档，可在「已归档」查看。',
       loading: '正在读取看板…',
       unreachable: '看板数据暂时取不到',
       stale: '展示的是上一次成功取到的数据',
@@ -935,11 +936,11 @@ window.__ModuleLoader__.load({
       'drawer.noSessionHint': '这条记录没有可打开的子会话（已归档或已退休），只能复制 id 去 dispatch_inspect 查',
       'drawer.retiredNote': '该任务已退休：只保留留痕（何时、为什么、最后一条摘要），报告正文不可用',
       'drawer.summary': '最后一条摘要',
-      /* ── 分析数据看板（与任务看板平级，文案成对硬编码，见 scripts/client-smoke.mjs） ── */
+      /* ── 分析数据看板（与派发工作台平级，文案成对硬编码，见 scripts/client-smoke.mjs） ── */
       'an.surface': '看板',
-      'an.surfaceTasks': '任务看板',
+      'an.surfaceTasks': '派发工作台',
       'an.surfaceAnalytics': '分析看板',
-      'an.surfaceHint': '两块看板共用一个入口；任务看板的字段、入口与所有操作保持不变',
+      'an.surfaceHint': '两块看板共用一个入口；派发工作台的字段、入口与所有操作保持不变',
       'an.title': '分析数据看板',
       'an.kpi': '核心指标',
       'an.kpiHint': '四张卡基于同一批筛选后的任务',
@@ -966,12 +967,12 @@ window.__ModuleLoader__.load({
       'an.refresh': '刷新',
       'an.updatedAt': '汇总于',
       'an.loading': '正在汇总分析数据…',
-      'an.loadingHint': '读取完整账本，不使用任务看板的 200 条快照',
+      'an.loadingHint': '读取完整账本，不使用派发工作台的 200 条快照',
       'an.unavailable': '分析数据暂时取不到',
       'an.degraded': '分析数据聚合失败，已降级返回',
       'an.stale': '展示的是上一次成功汇总的数据',
       'an.retry': '重试',
-      'an.backTasks': '回到任务看板',
+      'an.backTasks': '回到派发工作台',
       'an.empty': '这个筛选下没有任务',
       'an.emptyHint': '放宽时间范围或清除筛选条件后再看',
       'an.emptyTrend': '这个时间范围里没有趋势数据',
@@ -1057,7 +1058,7 @@ window.__ModuleLoader__.load({
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
     const TEXT_EN = {
-      title: 'Task Board',
+      title: 'Dispatch Workbench',
       concurrency: 'Running',
       queuedOne: 'Queued',
       total: 'Total',
@@ -1081,6 +1082,7 @@ window.__ModuleLoader__.load({
       updatedAt: 'updated',
       empty: 'No tasks yet. Ask the main session to dispatch one with dispatch_launch.',
       emptyFiltered: 'No tasks in this filter.',
+      emptyArchivedHint: '{n} older tasks are archived — switch to "Archived" to view them.',
       loading: 'Loading board…',
       unreachable: 'Board data is temporarily unavailable',
       stale: 'Showing the last successful snapshot',
@@ -1438,9 +1440,9 @@ window.__ModuleLoader__.load({
       'drawer.summary': 'Last summary',
       /* Analytics dashboard (zh/en keys must stay identical, see scripts/client-smoke.mjs). */
       'an.surface': 'Board',
-      'an.surfaceTasks': 'Tasks',
+      'an.surfaceTasks': 'Dispatch Workbench',
       'an.surfaceAnalytics': 'Analytics',
-      'an.surfaceHint': 'Both boards share one entry point; the task board keeps every field, entry and action',
+      'an.surfaceHint': 'Both boards share one entry point; the dispatch workbench keeps every field, entry and action',
       'an.title': 'Task analytics',
       'an.kpi': 'Key metrics',
       'an.kpiHint': 'All four cards use the same filtered task set',
@@ -1472,7 +1474,7 @@ window.__ModuleLoader__.load({
       'an.degraded': 'Analytics aggregation failed; degraded response returned',
       'an.stale': 'Showing the last successful aggregation',
       'an.retry': 'Retry',
-      'an.backTasks': 'Back to task board',
+      'an.backTasks': 'Back to Dispatch Workbench',
       'an.empty': 'No tasks match these filters',
       'an.emptyHint': 'Widen the time range or clear the filters',
       'an.emptyTrend': 'No trend data in this time range',
@@ -3512,11 +3514,11 @@ window.__ModuleLoader__.load({
 }
 
 /*
- * ── 分析数据看板（与任务看板平级，二选一切换） ──
+ * ── 分析数据看板（与派发工作台平级，二选一切换） ──
  *
  * 三条约束：
  * 1. 复用 .dsh-sa-card / .dsh-sa-dist / .dsh-sa-trend-* / .dsh-sa-table 等既有组件样式，
- *    新看板与任务看板「看起来是同一个产品」，不另起一套配色与圆角；
+ *    新看板与派发工作台「看起来是同一个产品」，不另起一套配色与圆角；
  * 2. 所有新选择器仍挂在 .dsh-sa 前缀语义下，随面板 <style> 一起卸载；
  * 3. 折行按**容器宽度**而不是视口决定：侧边栏再窄也不会把内容挤成横向滚动。
  */
@@ -6397,14 +6399,14 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /* ───────────── 分析数据看板（与任务看板平级的一块独立视图） ─────────────
+    /* ───────────── 分析数据看板（与派发工作台平级的一块独立视图） ─────────────
      *
      * 架构上刻意让 **BoardPanel 持有全部 state / effect，AnalyticsView 是无 hook 的
-     * 纯展示组件**：任务看板是注册在 main 槽的根组件，它的 hook 顺序与既有离线
+     * 纯展示组件**：派发工作台是注册在 main 槽的根组件，它的 hook 顺序与既有离线
      * 冒烟（scripts/client-smoke.mjs 的迷你 React）一一对应；把状态放进嵌套组件，
      * 真机能跑，但离线断言就再也验证了「切筛选 → 数字跟着变」这件事。
      *
-     * 数据只来自 GET /board/analytics（完整账本）。任务看板的 /board 快照、
+     * 数据只来自 GET /board/analytics（完整账本）。派发工作台的 /board 快照、
      * 五个 chip、行内操作、历史抽屉一行都没被复用或改写。
      */
 
@@ -7095,7 +7097,7 @@ window.__ModuleLoader__.load({
            * 于是整个分析视图每 2 秒重建一次（而分析看板自己的轮询是 10 秒）——
            * 两套轮询互相踩，用户盯着分析数字时整个视图在背后反复重绘。
            *
-           * 只停「落状态」是不够的：状态不更新的话，切回任务看板时看到的会一直
+           * 只停「落状态」是不够的：状态不更新的话，切回派发工作台时看到的会一直
            * 是切换前那张快照。所以这里整轮停掉（连取数也不做——没人看的数据
            * 不必去拉），由切换动作把轮询叫醒（见 `SurfaceBar` 的 onClick）。
            */
@@ -7111,7 +7113,7 @@ window.__ModuleLoader__.load({
             if (disposed || current.signal.aborted) return
             // 取数期间用户切到了分析看板：这一份结果**不落状态**。
             // 否则「切过去的那一刻」仍会有一次 setSnapshot 把分析视图重建一遍，
-            // 而这一份数据此刻没有人在看（切回任务看板时会立刻重取）。
+            // 而这一份数据此刻没有人在看（切回派发工作台时会立刻重取）。
             if (surfaceRef.current === 'analytics') return
             setSnapshot(data)
             setFetchedAt(Date.now())
@@ -7783,7 +7785,7 @@ window.__ModuleLoader__.load({
        * 这里不是「把错误藏起来」——提示条会一直挂着，直到 stats 恢复。
        */
       /*
-       * ───── 顶层看板切换：任务看板 / 分析看板（二选一） ─────
+       * ───── 顶层看板切换：派发工作台 / 分析看板（二选一） ─────
        *
        * 这一组 hook 全部加在 BoardPanel 的**末尾**（既有 20 多个 hook 之后）：
        * 离线冒烟的迷你 React 按调用序号复用 store，把新 hook 插在中间会让
@@ -7812,7 +7814,7 @@ window.__ModuleLoader__.load({
       const anQuery = analyticsQuery(anFilters)
       const anActive = surface !== 'tasks'
 
-      /* 分析数据只在分析视图可见时取；失败/降级不影响任务看板的 2 秒轮询。 */
+      /* 分析数据只在分析视图可见时取；失败/降级不影响派发工作台的 2 秒轮询。 */
       useEffect(function () {
         if (!anActive) return undefined
         let disposed = false
@@ -7923,7 +7925,7 @@ window.__ModuleLoader__.load({
               title: tr('an.surfaceHint'),
               onClick: function () {
                 setSurface(item.id)
-                // 切回任务看板：把 2 秒轮询立刻叫醒。
+                // 切回派发工作台：把 2 秒轮询立刻叫醒。
                 // 分析看板可见期间那条轮询是停着的（见它的 load()），所以这里
                 // 必须显式重启一次，否则回来看到的是切换前那张旧快照。
                 if (item.id === 'tasks') refresh()
@@ -8540,7 +8542,20 @@ window.__ModuleLoader__.load({
             })),
           }))
         }
-        body = parts.length ? h('div', { className: 'dsh-sa-sections' }, parts) : h(Blank, { title: tr('emptyFiltered') })
+        /*
+         * 空总览必须区分「真的没有任务」和「任务都在归档区」。
+         *
+         * 后一种情况用户会以为数据丢了（保留期从 24h 提到 168h 就是为了少撞上它），
+         * 所以把 `counts.archived` 直接说出来——不新增接口，N 来自快照已有字段。
+         */
+        body = parts.length
+          ? h('div', { className: 'dsh-sa-sections' }, parts)
+          : h(Blank, {
+              title: tr('emptyFiltered'),
+              hint: archivedNow > 0
+                ? fill(tr('emptyArchivedHint'), { n: archivedNow })
+                : null,
+            })
       }
 
       /*
@@ -8568,10 +8583,10 @@ window.__ModuleLoader__.load({
       }
 
       /*
-       * 二选一的装配点。任务看板模式下 `header / strips / body` 三段的**顺序、
+       * 二选一的装配点。派发工作台模式下 `header / strips / body` 三段的**顺序、
        * 内容与 props 完全保持原样**，只在前面多一条顶层切换条；因此五个 chip、
        * 工作区下拉、批次聚合、行内取消/重试/归档/续派/跳会话、历史抽屉都不受影响。
-       * 切到分析看板时任务看板不渲染，但 2 秒快照轮询照常，切回来立刻是最新数据。
+       * 切到分析看板时派发工作台不渲染，但 2 秒快照轮询照常，切回来立刻是最新数据。
        */
       return h(
         'div',
@@ -8625,7 +8640,7 @@ window.__ModuleLoader__.load({
           name: 'sidebar.panellist',
           id: BOARD_ID,
           order: 60,
-          label: '任务看板',
+          label: '派发工作台',
         }, BoardIcon)
       })
 

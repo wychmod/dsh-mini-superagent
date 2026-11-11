@@ -365,11 +365,11 @@ function boardFixture() {
     workspaces: WORKSPACES,
     targets: { 'session-a': { workspace_id: 'ws-1', title: '主工作区', path: 'C:/w1' } },
     tasks: [
-      { task_id: 't-run-1', title: '批次任务甲', status: 'running', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', group: 'g1', worker_session_id: 'dispatch-t-run-1', elapsed_ms: 12345, report_count: 1, background: { jobs: 1, subagents: 0, since: hoursAgo(0) }, last_report: { summary: '第一行摘要\n第二行不该出现' } },
+      { task_id: 't-run-1', title: '批次任务甲', status: 'running', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', group: 'g1', worker_session_id: 'dispatch-t-run-1', elapsed_ms: 12345, report_count: 1, background: { jobs: 1, subagents: 0, since: hoursAgo(0) }, plan_total: 5, plan_done: 2, plan_current: '补 dispatch 单测', last_report: { summary: '第一行摘要\n第二行不该出现' } },
       { task_id: 't-run-2', title: '单跑任务', status: 'running', attempt: 1, workspace_id: 'ws-2', workspace_title: '副工作区', group: null, worker_session_id: 'dispatch-t-run-2', elapsed_ms: 800, report_count: 0, input_pending_at: hoursAgo(0) },
       { task_id: 't-q-3', title: '批次任务乙', status: 'queued', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', group: 'g1', worker_session_id: 'dispatch-t-q-3', elapsed_ms: 0, report_count: 0, created_at: hoursAgo(2) },
       { task_id: 't-f-4', title: '失败任务', status: 'failed', attempt: 2, workspace_id: 'ws-2', workspace_title: '副工作区', worker_session_id: 'dispatch-t-f-4', elapsed_ms: 4000, report_count: 1, error: 'spawn 失败：ENOENT', updated_at: hoursAgo(1) },
-      { task_id: 't-done-5', title: '完成的任务', status: 'done', attempt: 1, workspace_id: null, workspace_title: null, worker_session_id: 'dispatch-t-done-5', elapsed_ms: 65000, report_count: 1, updated_at: hoursAgo(2) },
+      { task_id: 't-done-5', title: '完成的任务', status: 'done', attempt: 1, workspace_id: null, workspace_title: null, worker_session_id: 'dispatch-t-done-5', elapsed_ms: 65000, report_count: 1, updated_at: hoursAgo(2), plan_total: 5, plan_done: 5 },
       { task_id: 't-blocked-6', title: '阻塞任务', status: 'blocked', attempt: 1, workspace_id: 'ws-2', workspace_title: '副工作区', worker_session_id: 'dispatch-t-blocked-6', elapsed_ms: 1000, report_count: 0, updated_at: hoursAgo(3) },
       // 窗口外的已结算任务：状态 done、耗时极大。它必须在指标里消失，
       // 否则「窗口化」只是个说法（成功率仍会被旧小数拉下去）。
@@ -966,6 +966,23 @@ const batchCounts = findAll(panel.tree, (item) => item.props && item.props.class
 check('批次头给出 0/2 的进度', batchCounts.includes('0/2'), JSON.stringify(batchCounts))
 check('「后台收尾」徽标可见', nowText().includes('后台收尾'))
 check('「待读」徽标可见', nowText().includes('待读'))
+
+/*
+ * PRD-01 任务级计划：行标签区给 `2/5`，且**只在 queued / running 显示**。
+ * 这里两行用的是同一份「宿主给了 plan_*」的数据：
+ * - t-run-1（running）必须显示，否则长任务又只能靠反复 inspect；
+ * - t-done-5（done）即使数据里带着 plan_* 也必须不显示——终态优先在客户端是
+ *   第二道闸，第一道在宿主 `boardTask()`（已结算不下发这三个标量）。
+ */
+const planRows = findAll(panel.tree, (item) => hasClass(item, 'dsh-sa-row'))
+const planRowOf = (id) => planRows.find((row) => text(row).includes(id))
+// 「最近完成」是 dense 行：不渲染 id，只留标题，所以按标题找。
+const donePlanRow = planRows.find((row) => text(row).includes('完成的任务'))
+check('进行中的任务行显示计划进度 2/5', Boolean(planRowOf('t-run-1')) && text(planRowOf('t-run-1')).includes('2/5'),
+  planRowOf('t-run-1') ? text(planRowOf('t-run-1')).slice(0, 120) : '没找到 t-run-1')
+check('已完成任务不再显示计划进度（终态优先于计划）',
+  Boolean(donePlanRow) && !text(donePlanRow).includes('2/5') && !text(donePlanRow).includes('5/5'),
+  donePlanRow ? text(donePlanRow).slice(0, 120) : '没找到「完成的任务」')
 
 chipFor('已归档').props.onClick()
 update(panel)
@@ -2892,6 +2909,107 @@ await anSettle(anPanel)
 check('再次进入分析看板，KPI 与筛选控件都在',
   anFind(anPanel, 'data-an-metric', 'total').length === 1 && Boolean(anSelect(anPanel, 'status')))
 unmount(anPanel)
+
+/* ═════════════════════ 批次依赖（PRD-02） ═════════════════════ */
+
+/**
+ * 依赖（PRD-02 §4.5）的离线证据：`/board` 快照新增五个字段，客户端必须把它们
+ * 变成三处可读的文案，而不是安静地丢掉——
+ *
+ * - 任务行标签：「等 接口改造」/「前置失败」/「依赖 2」；
+ * - 批次头：「3 个成员 · 1 个等待前置 · 1 个未执行」；
+ * - 抽屉：「前置：…」「当前等待：…（运行中）」「未执行原因：前置 … 失败」。
+ *
+ * 另起一份 fixture 而不是往 `boardFixture()` 里塞：那份的计数、chip 数字、三段
+ * 结构被十几条断言钉着，加行会连带改掉无关断言。
+ */
+function dependencyFixture() {
+  return {
+    version: '0.9.0',
+    generatedAt: new Date().toISOString(),
+    concurrency: { running: 0, queued: 2, max: 6 },
+    counts: { total: 4, running: 0, queued: 2, done: 1, blocked: 0, failed: 0, cancelled: 1, ended: 0, interrupted: 0, archived: 0, retired: 0 },
+    memory: {
+      window: { days: WINDOW_DAYS, tasks: 200 },
+      ledger: { tasks: 4, retired: 0, archived: 0, retiredDropped: 0, capPerTask: { summary: 6000, detail: 4000 } },
+    },
+    workspaces: WORKSPACES,
+    targets: {},
+    tasks: [
+      // 批次 g-dep：A 已完成；B 在等 A；C 因为 A 没成被连带取消。
+      { task_id: 't-dep-a', title: '接口改造', status: 'done', attempt: 1, group: 'g-dep', workspace_id: 'ws-1', workspace_title: '主工作区', worker_session_id: 'dispatch-t-dep-a', elapsed_ms: 5000, report_count: 1, updated_at: hoursAgo(1) },
+      { task_id: 't-dep-b', title: '补实现', status: 'queued', attempt: 1, group: 'g-dep', workspace_id: 'ws-1', workspace_title: '主工作区', worker_session_id: 'dispatch-t-dep-b', elapsed_ms: 0, report_count: 0, created_at: hoursAgo(1), depends_on: ['t-dep-a'], blocked_by: 't-dep-a', blocked_reason: 'running' },
+      { task_id: 't-dep-c', title: '跑测试', status: 'cancelled', attempt: 1, group: 'g-dep', workspace_id: 'ws-1', workspace_title: '主工作区', worker_session_id: 'dispatch-t-dep-c', elapsed_ms: 0, report_count: 0, updated_at: hoursAgo(1), depends_on: ['t-dep-a'], blocked_by: 't-dep-a', blocked_reason: 'failed', cancel_reason: 'dependency_failed', error_code: 'dispatch/dependency-failed' },
+      // 独立任务：声明了两个前置但此刻没被挡 → 行标签只写「依赖 2」。
+      { task_id: 't-dep-d', title: '补文档', status: 'queued', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', worker_session_id: 'dispatch-t-dep-d', elapsed_ms: 0, report_count: 0, created_at: hoursAgo(1), depends_on: ['t-dep-a', 't-dep-b'] },
+    ],
+  }
+}
+
+console.log('\n批次依赖：行标签 / 批次头 / 抽屉（PRD-02 §4.5）')
+
+boardResponse = dependencyFixture()
+const depPanel = mount(panelReg.component)
+await tick()
+await tick()
+update(depPanel)
+
+const waitingTags = tagsOfRow(depPanel.tree, '补实现')
+check('被挡的任务行显示「等 接口改造」（标题按 id 从快照里查）',
+  Boolean(waitingTags) && waitingTags.some((label) => label.includes('等 接口改造')),
+  JSON.stringify(waitingTags))
+const failedTags = tagsOfRow(depPanel.tree, '跑测试')
+check('被连带取消的任务行显示「前置失败」',
+  Boolean(failedTags) && failedTags.includes('前置失败'), JSON.stringify(failedTags))
+const depOnlyTags = tagsOfRow(depPanel.tree, '补文档')
+check('有依赖但没被挡的任务行显示「依赖 2」',
+  Boolean(depOnlyTags) && depOnlyTags.includes('依赖 2'), JSON.stringify(depOnlyTags))
+
+const batchDepTexts = findAll(depPanel.tree, (item) => item.props && item.props['data-batch-dep'] === 'true')
+  .map((item) => text(item).replace(/\s+/g, ' ').trim())
+check('批次头给出「3 个成员 · 1 个等待前置 · 1 个未执行」',
+  batchDepTexts.length === 1 && batchDepTexts[0] === '3 个成员 · 1 个等待前置 · 1 个未执行',
+  JSON.stringify(batchDepTexts))
+unmount(depPanel)
+
+/*
+ * 抽屉：TaskDrawer 挂在历史视图里（点历史行打开）。这里复用同一份 fixture，
+ * 分别点「被挡的 B」与「被连带取消的 C」，验证两条不同路径的文案。
+ */
+boardResponse = dependencyFixture()
+const depHist = mount(panelReg.component)
+await tick()
+await tick()
+update(depHist)
+const depHistTab = findAll(depHist.tree, (item) => item && item.props && item.props['data-view-tab'] === 'history')[0]
+check('历史视图分段可点开（抽屉依赖块的前置条件）', Boolean(depHistTab))
+depHistTab.props.onClick()
+update(depHist)
+await tick()
+await tick()
+update(depHist)
+
+const depHistRow = (id) => findAll(depHist.tree, (item) => item.props && item.props['data-history-row'] === id)[0]
+const depDrawerText = () => {
+  const drawer = findAll(depHist.tree, (item) => item.props && typeof item.props['data-drawer'] === 'string')[0]
+  return drawer ? text(drawer).replace(/\s+/g, ' ') : ''
+}
+
+depHistRow('t-dep-c').props.onClick({ type: 'click', preventDefault() {} })
+update(depHist)
+check('抽屉给出前置列表（前置：接口改造）',
+  depDrawerText().includes('前置') && depDrawerText().includes('接口改造'),
+  depDrawerText().slice(0, 300))
+check('抽屉给出未执行原因（前置 接口改造 失败）',
+  depDrawerText().includes('未执行原因') && depDrawerText().includes('前置 接口改造 失败'),
+  depDrawerText().slice(0, 300))
+
+depHistRow('t-dep-b').props.onClick({ type: 'click', preventDefault() {} })
+update(depHist)
+check('抽屉给出「当前等待：接口改造（运行中）」',
+  depDrawerText().includes('当前等待') && depDrawerText().includes('接口改造（运行中）'),
+  depDrawerText().slice(0, 300))
+unmount(depHist)
 
 /* ═════════════════════ 文案成对（zh/en） ═════════════════════ */
 

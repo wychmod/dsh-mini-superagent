@@ -1,5 +1,5 @@
 /**
- * dsh-mini-superagent — Client 半边：常驻侧边栏图标 + 主面板「任务看板」
+ * dsh-mini-superagent — Client 半边：常驻侧边栏图标 + 主面板「派发工作台」
  *
  * 形态：plain ModuleLoader 包，无构建、无编译、无 CDN；React 从 require('react') 拿。
  * 只做两件事：向 sidebar.panellist 注册一个图标，向 main 注册一个面板。
@@ -60,7 +60,7 @@ window.__ModuleLoader__.load({
 
     /** 内置中文文案（locale 不可用时的兜底，也是默认界面语言）。 */
     const TEXT = {
-      title: '任务看板',
+      title: '派发工作台',
       concurrency: '并发',
       queuedOne: '排队',
       total: '总计',
@@ -79,11 +79,49 @@ window.__ModuleLoader__.load({
       attemptPrefix: '第',
       attemptSuffix: '次',
       reports: '报告',
+      /*
+       * 任务级计划（PRD-01 §4.3）。看板只显示「做了几步 / 共几步」与当前步骤一句，
+       * 不搬完整步骤数组（那是 2 秒轮询的快照）；要看全部用 dispatch_inspect。
+       * 三个键都要有 zh/en 两份，缺英文的会在英文界面下静默退回中文。
+       */
+      'plan.label': '计划',
+      'plan.ratio': '计划 {done}/{total}',
+      'plan.currentLabel': '当前步骤',
+      'plan.tagHint': '计划 {done}/{total}',
+      /*
+       * 批次依赖（PRD-02 §4.5）：任务行标签 / 抽屉 / 批次头三处共用这一组文案。
+       *
+       * - `dep.tag` = 「依赖 2」，`dep.waiting` = 「等 A」，`dep.failedTag` = 「前置失败」；
+       * - 抽屉三条：`dep.tagHint` 的「前置：A、B」、`dep.waitingOn` 的「当前等待：
+       *   A（运行中）」、`dep.notRun` 的「未执行原因：前置 A 失败」；
+       * - `dep.batchHead` = 「3 个成员 · 1 个等待前置 · 1 个未执行」。
+       *
+       * 标题由客户端从同一份快照里按 id 查（`depTitles`），所以这里只需要占位符，
+       * 不要把前置标题拼进看板 payload。英文必须与中文逐键成对（client-smoke 会数）。
+       */
+      'dep.tag': '依赖 {n}',
+      'dep.waiting': '等 {title}',
+      'dep.failedTag': '前置失败',
+      'dep.tagHint': '前置：{list}',
+      'dep.block': '前置与等待',
+      'dep.label': '前置',
+      'dep.join': '、',
+      'dep.waitingLabel': '当前等待',
+      'dep.waitingOn': '{title}（{reason}）',
+      'dep.notRunLabel': '未执行原因',
+      'dep.notRun': '前置 {title} 失败',
+      'dep.notRunMissing': '前置 {title} 已不在账本',
+      'dep.reason.running': '运行中',
+      'dep.reason.failed': '失败',
+      'dep.reason.missing': '缺失',
+      'dep.none': '没有前置任务',
+      'dep.batchHead': '{total} 个成员 · {waiting} 个等待前置 · {skipped} 个未执行',
       noReport: '尚无报告',
       waiting: '等待中',
       updatedAt: '更新于',
       empty: '还没有任务。让主会话用 dispatch_launch 派发一个。',
       emptyFiltered: '这个筛选下没有任务。',
+      emptyArchivedHint: '还有 {n} 条历史已归档，可在「已归档」查看。',
       loading: '正在读取看板…',
       unreachable: '看板数据暂时取不到',
       stale: '展示的是上一次成功取到的数据',
@@ -470,11 +508,11 @@ window.__ModuleLoader__.load({
       'drawer.noSessionHint': '这条记录没有可打开的子会话（已归档或已退休），只能复制 id 去 dispatch_inspect 查',
       'drawer.retiredNote': '该任务已退休：只保留留痕（何时、为什么、最后一条摘要），报告正文不可用',
       'drawer.summary': '最后一条摘要',
-      /* ── 分析数据看板（与任务看板平级，文案成对硬编码，见 scripts/client-smoke.mjs） ── */
+      /* ── 分析数据看板（与派发工作台平级，文案成对硬编码，见 scripts/client-smoke.mjs） ── */
       'an.surface': '看板',
-      'an.surfaceTasks': '任务看板',
+      'an.surfaceTasks': '派发工作台',
       'an.surfaceAnalytics': '分析看板',
-      'an.surfaceHint': '两块看板共用一个入口；任务看板的字段、入口与所有操作保持不变',
+      'an.surfaceHint': '两块看板共用一个入口；派发工作台的字段、入口与所有操作保持不变',
       'an.title': '分析数据看板',
       'an.kpi': '核心指标',
       'an.kpiHint': '四张卡基于同一批筛选后的任务',
@@ -501,12 +539,12 @@ window.__ModuleLoader__.load({
       'an.refresh': '刷新',
       'an.updatedAt': '汇总于',
       'an.loading': '正在汇总分析数据…',
-      'an.loadingHint': '读取完整账本，不使用任务看板的 200 条快照',
+      'an.loadingHint': '读取完整账本，不使用派发工作台的 200 条快照',
       'an.unavailable': '分析数据暂时取不到',
       'an.degraded': '分析数据聚合失败，已降级返回',
       'an.stale': '展示的是上一次成功汇总的数据',
       'an.retry': '重试',
-      'an.backTasks': '回到任务看板',
+      'an.backTasks': '回到派发工作台',
       'an.empty': '这个筛选下没有任务',
       'an.emptyHint': '放宽时间范围或清除筛选条件后再看',
       'an.emptyTrend': '这个时间范围里没有趋势数据',
@@ -592,7 +630,7 @@ window.__ModuleLoader__.load({
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
     const TEXT_EN = {
-      title: 'Task Board',
+      title: 'Dispatch Workbench',
       concurrency: 'Running',
       queuedOne: 'Queued',
       total: 'Total',
@@ -611,11 +649,35 @@ window.__ModuleLoader__.load({
       attemptPrefix: 'attempt ',
       attemptSuffix: '',
       reports: 'reports',
+      /* 与上面 TEXT 的 plan.* 一一对应；缺一条英文界面就会退回中文。 */
+      'plan.label': 'Plan',
+      'plan.ratio': 'Plan {done}/{total}',
+      'plan.currentLabel': 'Current step',
+      'plan.tagHint': 'Plan {done}/{total}',
+      /* 与上面 TEXT 的 dep.* 一一对应；缺一条英文界面下会退回中文。 */
+      'dep.tag': 'needs {n}',
+      'dep.waiting': 'waiting for {title}',
+      'dep.failedTag': 'upstream failed',
+      'dep.tagHint': 'Depends on: {list}',
+      'dep.block': 'Dependencies',
+      'dep.label': 'Depends on',
+      'dep.join': ', ',
+      'dep.waitingLabel': 'Waiting on',
+      'dep.waitingOn': '{title} ({reason})',
+      'dep.notRunLabel': 'Not run because',
+      'dep.notRun': 'upstream {title} failed',
+      'dep.notRunMissing': 'upstream {title} is no longer in the ledger',
+      'dep.reason.running': 'running',
+      'dep.reason.failed': 'failed',
+      'dep.reason.missing': 'missing',
+      'dep.none': 'No dependencies',
+      'dep.batchHead': '{total} members · {waiting} waiting on deps · {skipped} not run',
       noReport: 'no report yet',
       waiting: 'waiting',
       updatedAt: 'updated',
       empty: 'No tasks yet. Ask the main session to dispatch one with dispatch_launch.',
       emptyFiltered: 'No tasks in this filter.',
+      emptyArchivedHint: '{n} older tasks are archived — switch to "Archived" to view them.',
       loading: 'Loading board…',
       unreachable: 'Board data is temporarily unavailable',
       stale: 'Showing the last successful snapshot',
@@ -973,9 +1035,9 @@ window.__ModuleLoader__.load({
       'drawer.summary': 'Last summary',
       /* Analytics dashboard (zh/en keys must stay identical, see scripts/client-smoke.mjs). */
       'an.surface': 'Board',
-      'an.surfaceTasks': 'Tasks',
+      'an.surfaceTasks': 'Dispatch Workbench',
       'an.surfaceAnalytics': 'Analytics',
-      'an.surfaceHint': 'Both boards share one entry point; the task board keeps every field, entry and action',
+      'an.surfaceHint': 'Both boards share one entry point; the dispatch workbench keeps every field, entry and action',
       'an.title': 'Task analytics',
       'an.kpi': 'Key metrics',
       'an.kpiHint': 'All four cards use the same filtered task set',
@@ -1007,7 +1069,7 @@ window.__ModuleLoader__.load({
       'an.degraded': 'Analytics aggregation failed; degraded response returned',
       'an.stale': 'Showing the last successful aggregation',
       'an.retry': 'Retry',
-      'an.backTasks': 'Back to task board',
+      'an.backTasks': 'Back to Dispatch Workbench',
       'an.empty': 'No tasks match these filters',
       'an.emptyHint': 'Widen the time range or clear the filters',
       'an.emptyTrend': 'No trend data in this time range',
@@ -1517,6 +1579,28 @@ window.__ModuleLoader__.load({
       const members = tasks.filter(function (task) { return task && task.group === name })
       const done = members.filter(function (task) { return SETTLED_STATUS.has(task.status) }).length
       return { done: done, total: members.length }
+    }
+
+    /**
+     * 批次的依赖状态计数（PRD-02 §4.5）：批次头要写「3 个成员 · 1 个等待前置 ·
+     * 1 个未执行」。
+     *
+     * 为什么扫**整份快照**而不是 `activeTasks`：批次成员的依赖信息分布在三种状态里
+     * ——等着的（queued + blocked_by）、已经在跑的、被连带取消的（cancelled +
+     * cancel_reason）。只扫活跃任务会把「未执行」漏掉，批次头于是永远显示 0 个未执行，
+     * 而那正是用户最需要看到的一项。
+     */
+    function batchDependencyCounts(tasks, name) {
+      let total = 0
+      let waiting = 0
+      let skipped = 0
+      for (const task of tasks) {
+        if (!task || task.group !== name) continue
+        total += 1
+        if (task.status === 'queued' && typeof task.blocked_by === 'string' && task.blocked_by) waiting += 1
+        else if (task.cancel_reason === 'dependency_failed' || task.cancel_reason === 'dependency_missing') skipped += 1
+      }
+      return { total: total, waiting: waiting, skipped: skipped }
     }
 
     /* ───────────────────────── 已退休记录（只读视图） ───────────────────────── */
@@ -2398,6 +2482,20 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
   color: var(--dsw-alias-state-warn-primary, #b45309);
 }
+/*
+ * 依赖标签（PRD-02 §4.5）：
+ * - 「依赖 N」/「等 A」用信息蓝：等前置是**正常运行状态**，不是问题；
+ * - 「前置失败」用警示色：那是这条任务不会再跑了的终局原因，需要人处理前置。
+ * 颜色不是唯一通道——三种标签的文字本身已经把状态说清（§八.8）。
+ */
+.dsh-sa-tag-dep {
+  background: var(--dsw-alias-state-info-surface, rgba(37,99,235,.12));
+  color: var(--dsw-alias-state-info-primary, #2563eb);
+}
+.dsh-sa-tag-dep-failed {
+  background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
+  color: var(--dsw-alias-state-warn-primary, #b45309);
+}
 /* 截断标记：贴着报告数/摘要，比正文弱一档，但点得出「这里被切过」。 */
 .dsh-sa-truncated {
   flex: none;
@@ -3047,11 +3145,11 @@ window.__ModuleLoader__.load({
 }
 
 /*
- * ── 分析数据看板（与任务看板平级，二选一切换） ──
+ * ── 分析数据看板（与派发工作台平级，二选一切换） ──
  *
  * 三条约束：
  * 1. 复用 .dsh-sa-card / .dsh-sa-dist / .dsh-sa-trend-* / .dsh-sa-table 等既有组件样式，
- *    新看板与任务看板「看起来是同一个产品」，不另起一套配色与圆角；
+ *    新看板与派发工作台「看起来是同一个产品」，不另起一套配色与圆角；
  * 2. 所有新选择器仍挂在 .dsh-sa 前缀语义下，随面板 <style> 一起卸载；
  * 3. 折行按**容器宽度**而不是视口决定：侧边栏再窄也不会把内容挤成横向滚动。
  */
@@ -3940,12 +4038,26 @@ window.__ModuleLoader__.load({
       const total = num(props.total, 0)
       const done = num(props.done, 0)
       const percent = total > 0 ? Math.round((done / total) * 100) : 0
+      const members = num(props.members, total)
+      const waiting = num(props.waiting, 0)
+      const skipped = num(props.skipped, 0)
       return h(
         'div',
         { className: 'dsh-sa-batch' },
         h('span', { className: 'dsh-sa-tag dsh-sa-tag-group' }, tr('groupTag')),
         h('span', { className: 'dsh-sa-batch-name' }, String(props.name || '')),
         h('span', { className: 'dsh-sa-batch-count' }, done + '/' + total),
+        /*
+         * 依赖口径（PRD-02 §4.5）：只在真有等待/未执行时出现——一个「0 个等待前置
+         * · 0 个未执行」的尾巴对用户没有信息量，还会把批次头撑成两行。
+         */
+        waiting + skipped > 0
+          ? h(
+              'span',
+              { className: 'dsh-sa-meta', 'data-batch-dep': 'true' },
+              fill(tr('dep.batchHead'), { total: members, waiting: waiting, skipped: skipped }),
+            )
+          : null,
         h(
           'div',
           { className: 'dsh-sa-bar dsh-sa-batch-bar', 'aria-hidden': 'true' },
@@ -3995,6 +4107,78 @@ window.__ModuleLoader__.load({
       const reportLine = firstLine(summary) || tr('noReport')
       const attempt = num(task.attempt, 1)
       const reportCount = num(task.report_count, 0)
+      /*
+       * 计划标签（PRD-01 §4.3）。**只在 queued / running 且真有计划时出现**：
+       * 终态优先于计划——任务 done 之后再挂一个「2/5」，用户会以为它没跑完。
+       * 宿主 `boardTask()` 已经对已结算任务不下发 plan_*，这里再判一次状态是
+       * 第二道闸：快照契约与界面契约任一被绕开时，仍不会画出自相矛盾的标签。
+       *
+       * 只在标签区显示、**不在元信息行重复**：元信息行已经有「报告 N」，
+       * 两个数字并排会让人分不清哪个是报告数、哪个是步骤数。
+       */
+      const planTotal = num(task.plan_total, 0)
+      const planDone = num(task.plan_done, 0)
+      const planCurrent = typeof task.plan_current === 'string' ? task.plan_current : ''
+      const planVisible = !archived
+        && (task.status === 'queued' || task.status === 'running')
+        && planTotal > 0
+      const planHint = planCurrent
+        ? fill(tr('plan.tagHint'), { done: planDone, total: planTotal }) + ' · ' + planCurrent
+        : fill(tr('plan.tagHint'), { done: planDone, total: planTotal })
+      /*
+       * 依赖标签（PRD-02 §4.5）。三种形态互斥，按信息量从高到低只放一个：
+       *
+       *   前置失败（被连带取消）> 等 A（被挡）> 依赖 2（有依赖但此刻没被挡）
+       *
+       * 只放一个而不是并列：行内标签区已经有可能在放计划 / 后台 / 待读 / 冻结，
+       * 再加两个会把标题挤到换行；完整前置列表在抽屉里（`dep.tagHint` 是它的 hover）。
+       *
+       * 标题从 `props.depTitles` 查（同一份快照里的 title），查不到就退回 id——
+       * **不**在这一行里发一次 fetch：看板是 2 秒轮询的纯展示层，多一个请求源
+       * 就多一处会和快照不同步的数字。
+       */
+      const deps = Array.isArray(task.depends_on) ? task.depends_on : []
+      const depFailed = task.cancel_reason === 'dependency_failed' || task.cancel_reason === 'dependency_missing'
+      // 「等 A」只在**还在排队**时成立：已结算的任务留着 blocked_by 只是留痕，
+      // 再画一个「在等」会让用户以为它还会自己开始。
+      const depWaitingId = task.status === 'queued' && typeof task.blocked_by === 'string' ? task.blocked_by : ''
+      const depTitleOf = function (id) {
+        const titles = props.depTitles || {}
+        const raw = typeof titles[id] === 'string' && titles[id] ? titles[id] : id
+        return raw.length > 12 ? raw.slice(0, 12) : raw
+      }
+      const depHint = deps.length
+        ? fill(tr('dep.tagHint'), { list: deps.map(depTitleOf).join(tr('dep.join')) })
+        : ''
+      const depTag = depFailed
+        ? h(
+            'span',
+            {
+              key: 'dep-failed',
+              className: 'dsh-sa-tag dsh-sa-tag-dep-failed',
+              title: depHint || tr('dep.failedTag'),
+              'data-dep': 'failed',
+            },
+            tr('dep.failedTag'),
+          )
+        : depWaitingId
+          ? h(
+              'span',
+              {
+                key: 'dep-waiting',
+                className: 'dsh-sa-tag dsh-sa-tag-dep',
+                title: depHint,
+                'data-dep': 'waiting',
+              },
+              fill(tr('dep.waiting'), { title: depTitleOf(depWaitingId) }),
+            )
+          : deps.length && !archived
+            ? h(
+                'span',
+                { key: 'dep', className: 'dsh-sa-tag dsh-sa-tag-dep', title: depHint, 'data-dep': deps.length },
+                fill(tr('dep.tag'), { n: deps.length }),
+              )
+            : null
       const title = typeof task.title === 'string' && task.title ? task.title : tr('noTitle')
       const group = typeof task.group === 'string' ? task.group : ''
       const background = task.background && typeof task.background === 'object' ? task.background : null
@@ -4263,6 +4447,20 @@ window.__ModuleLoader__.load({
         attempt > 1
           ? h('span', { key: 'attempt', className: 'dsh-sa-tag' }, tr('attemptPrefix') + attempt + tr('attemptSuffix'))
           : null,
+        planVisible
+          ? h(
+              'span',
+              {
+                key: 'plan',
+                className: 'dsh-sa-tag dsh-sa-tag-plan',
+                title: planHint,
+                'aria-label': planHint,
+                'data-plan': planDone + '/' + planTotal,
+              },
+              planDone + '/' + planTotal,
+            )
+          : null,
+        depTag,
         background
           ? h('span', { key: 'bg', className: 'dsh-sa-tag dsh-sa-tag-bg', title: tr('backgroundHint') }, tr('backgroundTag'))
           : null,
@@ -5264,6 +5462,18 @@ window.__ModuleLoader__.load({
         cwd: typeof record.cwd === 'string' ? record.cwd : '',
         task_dir: typeof record.task_dir === 'string' ? record.task_dir : '',
         prepare_at: record.prepare_at || null,
+        /*
+         * 依赖（PRD-02 §4.5）：抽屉要说「前置：A、B」「当前等待：A（运行中）」
+         * 「未执行原因：前置 A 失败」。这里是**白名单**归一，不补就会在抽屉里
+         * 安静地少掉一整块——历史行是唯一能打开抽屉的地方。
+         *
+         * 退休留痕是薄记录（没有依赖边），一律给空值而不是去猜。
+         */
+        depends_on: retired ? [] : (Array.isArray(record.depends_on) ? record.depends_on : []),
+        blocked_by: retired ? null : (typeof record.blocked_by === 'string' ? record.blocked_by : null),
+        blocked_reason: retired ? null : (typeof record.blocked_reason === 'string' ? record.blocked_reason : null),
+        cancel_reason: retired ? null : (typeof record.cancel_reason === 'string' ? record.cancel_reason : null),
+        error_code: retired ? null : (typeof record.error_code === 'string' ? record.error_code : null),
         // 退休留痕只剩最后一条摘要：账本封顶的目的就是让写放大有上界。
         summary: retired && typeof record.summary === 'string' ? record.summary : '',
       }
@@ -5589,8 +5799,72 @@ window.__ModuleLoader__.load({
         ),
       ])
 
+      /*
+       * 依赖（PRD-02 §4.5）：抽屉是「它在等谁 / 为什么没跑」唯一能说清的地方。
+       * 三行分别对应 PRD 的三条文案：
+       *   「前置：A、B」            → 它声明了哪些前置；
+       *   「当前等待：A（运行中）」   → 此刻卡在哪一条、对面是什么状态；
+       *   「未执行原因：前置 A 失败」 → 被连带取消时的终局原因。
+       *
+       * 只在真有依赖信息时出现；没有依赖的任务不生成空块（与 frozen_at 等同风格）。
+       * 标题从 `props.depTitles` 查（同一份快照），查不到退回 id——不编一个假名字。
+       */
+      const depTitleOf = function (id) {
+        const titles = props.depTitles || {}
+        const raw = typeof titles[id] === 'string' && titles[id] ? titles[id] : id
+        return raw.length > 12 ? raw.slice(0, 12) : raw
+      }
+      const depList = Array.isArray(row.depends_on) ? row.depends_on : []
+      const depBlockedBy = typeof row.blocked_by === 'string' ? row.blocked_by : ''
+      const depFailed = row.cancel_reason === 'dependency_failed'
+      const depMissing = row.cancel_reason === 'dependency_missing'
+      const depLines = []
+      if (depList.length) {
+        depLines.push(kv('deps', tr('dep.label'), depList.map(depTitleOf).join(tr('dep.join'))))
+      }
+      if (depBlockedBy && row.status === 'queued') {
+        // 「当前等待」只对**还在排队**的任务成立：已结算的任务留着 blocked_by 只是
+        // 留痕（抽屉的「未执行原因」会用同一个 id），再写「在等」会自相矛盾。
+        // 机器值（running/failed/missing）必须翻成人话：抽屉是给人看的。
+        const reasonText = row.blocked_reason === 'failed'
+          ? tr('dep.reason.failed')
+          : row.blocked_reason === 'missing'
+            ? tr('dep.reason.missing')
+            : tr('dep.reason.running')
+        depLines.push(kv(
+          'waiting',
+          tr('dep.waitingLabel'),
+          fill(tr('dep.waitingOn'), { title: depTitleOf(depBlockedBy), reason: reasonText }),
+        ))
+      }
+      if (depFailed || depMissing) {
+        const failingDep = depBlockedBy || (depList.length ? depList[0] : '')
+        depLines.push(kv(
+          'not-run',
+          tr('dep.notRunLabel'),
+          failingDep
+            ? fill(depMissing ? tr('dep.notRunMissing') : tr('dep.notRun'), { title: depTitleOf(failingDep) })
+            : tr('dep.none'),
+        ))
+      }
+      const dependencyBlock = depLines.length ? block('deps', tr('dep.block'), depLines) : null
+
       const lastReport = row.last_report
       const reportLines = []
+      /*
+       * 计划进度（PRD-01 §4.3）：抽屉里给「计划 2/5」与当前步骤文案。
+       *
+       * 与任务行同一条显示优先级：只在 queued / running 时出现。宿主快照对已结算
+       * 任务本来就不下发 plan_*（见 `boardTask()`），这里判状态是为了让「终态优先」
+       * 在界面上是**读得到的规则**，而不是依赖快照恰好没给字段。
+       */
+      const planTotal = num(row.plan_total, 0)
+      const planDone = num(row.plan_done, 0)
+      const planCurrent = typeof row.plan_current === 'string' ? row.plan_current : ''
+      if ((row.status === 'queued' || row.status === 'running') && planTotal > 0) {
+        reportLines.push(kv('plan', tr('plan.label'), fill(tr('plan.ratio'), { done: planDone, total: planTotal })))
+        if (planCurrent) reportLines.push(kv('plan-current', tr('plan.currentLabel'), planCurrent))
+      }
       reportLines.push(kv('count', tr('drawer.reportCount'), String(num(row.report_count, 0))))
       if (lastReport) {
         const bits = [lastReport.at ? stampText(lastReport.at, now) : tr('drawer.noTime')]
@@ -5709,6 +5983,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dsh-sa-drawer-title2' }, row.title || tr('noTitle')),
           block('lifecycle', tr('drawer.lifecycle'), lifecycle),
           scopeBlock,
+          dependencyBlock,
           reportsBlock,
           faultsBlock,
           deliveryBlock,
@@ -5924,6 +6199,8 @@ window.__ModuleLoader__.load({
           ? h(TaskDrawer, {
               row: props.drawerRow,
               now: props.now,
+              // 依赖短名表（PRD-02 §4.5）：抽屉里的「前置：A、B」按 id 查标题。
+              depTitles: props.depTitles,
               onClose: props.onCloseDrawer,
               onCopy: props.onCopy,
               onOpen: props.onOpen,
@@ -5932,14 +6209,14 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /* ───────────── 分析数据看板（与任务看板平级的一块独立视图） ─────────────
+    /* ───────────── 分析数据看板（与派发工作台平级的一块独立视图） ─────────────
      *
      * 架构上刻意让 **BoardPanel 持有全部 state / effect，AnalyticsView 是无 hook 的
-     * 纯展示组件**：任务看板是注册在 main 槽的根组件，它的 hook 顺序与既有离线
+     * 纯展示组件**：派发工作台是注册在 main 槽的根组件，它的 hook 顺序与既有离线
      * 冒烟（scripts/client-smoke.mjs 的迷你 React）一一对应；把状态放进嵌套组件，
      * 真机能跑，但离线断言就再也验证了「切筛选 → 数字跟着变」这件事。
      *
-     * 数据只来自 GET /board/analytics（完整账本）。任务看板的 /board 快照、
+     * 数据只来自 GET /board/analytics（完整账本）。派发工作台的 /board 快照、
      * 五个 chip、行内操作、历史抽屉一行都没被复用或改写。
      */
 
@@ -6630,7 +6907,7 @@ window.__ModuleLoader__.load({
            * 于是整个分析视图每 2 秒重建一次（而分析看板自己的轮询是 10 秒）——
            * 两套轮询互相踩，用户盯着分析数字时整个视图在背后反复重绘。
            *
-           * 只停「落状态」是不够的：状态不更新的话，切回任务看板时看到的会一直
+           * 只停「落状态」是不够的：状态不更新的话，切回派发工作台时看到的会一直
            * 是切换前那张快照。所以这里整轮停掉（连取数也不做——没人看的数据
            * 不必去拉），由切换动作把轮询叫醒（见 `SurfaceBar` 的 onClick）。
            */
@@ -6646,7 +6923,7 @@ window.__ModuleLoader__.load({
             if (disposed || current.signal.aborted) return
             // 取数期间用户切到了分析看板：这一份结果**不落状态**。
             // 否则「切过去的那一刻」仍会有一次 setSnapshot 把分析视图重建一遍，
-            // 而这一份数据此刻没有人在看（切回任务看板时会立刻重取）。
+            // 而这一份数据此刻没有人在看（切回派发工作台时会立刻重取）。
             if (surfaceRef.current === 'analytics') return
             setSnapshot(data)
             setFetchedAt(Date.now())
@@ -7032,6 +7309,18 @@ window.__ModuleLoader__.load({
 
       const data = snapshot && Array.isArray(snapshot.tasks) ? snapshot : null
       const allTasks = data ? data.tasks.filter(function (task) { return task && typeof task === 'object' }) : []
+      /**
+       * 依赖链的短名表（PRD-02 §4.5）：看板快照只给前置 id，任务行与抽屉要说
+       * 「等 A」/「前置 A 失败」。在这里拍平成 id → 标题一层映射传下去。
+       *
+       * 用整份快照（`allTasks`）而不是筛选后的 `scopedTasks`：抽屉可能指向一条
+       * 被筛选掉的任务，它的前置仍然要能读出名字；而再发一次请求拿标题，会让
+       * 同一屏出现两份可能不同步的数据。
+       */
+      const depTitles = {}
+      for (const task of allTasks) {
+        if (task && typeof task.task_id === 'string' && task.task_id) depTitles[task.task_id] = task.title
+      }
       const counts = data && data.counts ? data.counts : {}
       const concurrency = data && data.concurrency ? data.concurrency : {}
       const workspaces = data && Array.isArray(data.workspaces)
@@ -7256,6 +7545,8 @@ window.__ModuleLoader__.load({
           continueAsk: continueAsk,
           continueDraft: continueDraft,
           continueHandlers: continueHandlers,
+          // 依赖短名表（PRD-02 §4.5）：行标签要说「等 A」「前置 A 失败」。
+          depTitles: depTitles,
           handlers: handlers,
         })
       }
@@ -7265,7 +7556,17 @@ window.__ModuleLoader__.load({
         const rows = []
         for (const group of activeGroups.groups) {
           const progress = batchProgress(live, group.name)
-          rows.push(h(BatchHead, { key: 'batch-' + group.name, name: group.name, done: progress.done, total: progress.total }))
+          const depCounts = batchDependencyCounts(allTasks, group.name)
+          rows.push(h(BatchHead, {
+            key: 'batch-' + group.name,
+            name: group.name,
+            done: progress.done,
+            total: progress.total,
+            // 「3 个成员 · 1 个等待前置 · 1 个未执行」里的三个数字（PRD-02 §4.5）。
+            members: depCounts.total,
+            waiting: depCounts.waiting,
+            skipped: depCounts.skipped,
+          }))
           for (const task of group.members) rows.push(card(task, 'active', false))
         }
         if (activeGroups.singles.length) {
@@ -7318,7 +7619,7 @@ window.__ModuleLoader__.load({
        * 这里不是「把错误藏起来」——提示条会一直挂着，直到 stats 恢复。
        */
       /*
-       * ───── 顶层看板切换：任务看板 / 分析看板（二选一） ─────
+       * ───── 顶层看板切换：派发工作台 / 分析看板（二选一） ─────
        *
        * 这一组 hook 全部加在 BoardPanel 的**末尾**（既有 20 多个 hook 之后）：
        * 离线冒烟的迷你 React 按调用序号复用 store，把新 hook 插在中间会让
@@ -7347,7 +7648,7 @@ window.__ModuleLoader__.load({
       const anQuery = analyticsQuery(anFilters)
       const anActive = surface !== 'tasks'
 
-      /* 分析数据只在分析视图可见时取；失败/降级不影响任务看板的 2 秒轮询。 */
+      /* 分析数据只在分析视图可见时取；失败/降级不影响派发工作台的 2 秒轮询。 */
       useEffect(function () {
         if (!anActive) return undefined
         let disposed = false
@@ -7458,7 +7759,7 @@ window.__ModuleLoader__.load({
               title: tr('an.surfaceHint'),
               onClick: function () {
                 setSurface(item.id)
-                // 切回任务看板：把 2 秒轮询立刻叫醒。
+                // 切回派发工作台：把 2 秒轮询立刻叫醒。
                 // 分析看板可见期间那条轮询是停着的（见它的 load()），所以这里
                 // 必须显式重启一次，否则回来看到的是切换前那张旧快照。
                 if (item.id === 'tasks') refresh()
@@ -7890,6 +8191,7 @@ window.__ModuleLoader__.load({
             emptyHint: tr('hist.subHint'),
             selected: drawerRow ? { kind: drawerRow.kind, task_id: drawerRow.task_id } : null,
             drawerRow: drawerRow,
+            depTitles: depTitles,
             onSub: function (next) {
               setHistSub(next)
               setHistPage(0)
@@ -8075,7 +8377,20 @@ window.__ModuleLoader__.load({
             })),
           }))
         }
-        body = parts.length ? h('div', { className: 'dsh-sa-sections' }, parts) : h(Blank, { title: tr('emptyFiltered') })
+        /*
+         * 空总览必须区分「真的没有任务」和「任务都在归档区」。
+         *
+         * 后一种情况用户会以为数据丢了（保留期从 24h 提到 168h 就是为了少撞上它），
+         * 所以把 `counts.archived` 直接说出来——不新增接口，N 来自快照已有字段。
+         */
+        body = parts.length
+          ? h('div', { className: 'dsh-sa-sections' }, parts)
+          : h(Blank, {
+              title: tr('emptyFiltered'),
+              hint: archivedNow > 0
+                ? fill(tr('emptyArchivedHint'), { n: archivedNow })
+                : null,
+            })
       }
 
       /*
@@ -8103,10 +8418,10 @@ window.__ModuleLoader__.load({
       }
 
       /*
-       * 二选一的装配点。任务看板模式下 `header / strips / body` 三段的**顺序、
+       * 二选一的装配点。派发工作台模式下 `header / strips / body` 三段的**顺序、
        * 内容与 props 完全保持原样**，只在前面多一条顶层切换条；因此五个 chip、
        * 工作区下拉、批次聚合、行内取消/重试/归档/续派/跳会话、历史抽屉都不受影响。
-       * 切到分析看板时任务看板不渲染，但 2 秒快照轮询照常，切回来立刻是最新数据。
+       * 切到分析看板时派发工作台不渲染，但 2 秒快照轮询照常，切回来立刻是最新数据。
        */
       return h(
         'div',
@@ -8160,7 +8475,7 @@ window.__ModuleLoader__.load({
           name: 'sidebar.panellist',
           id: BOARD_ID,
           order: 60,
-          label: '任务看板',
+          label: '派发工作台',
         }, BoardIcon)
       })
 
