@@ -27,9 +27,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { VOICE_SECTION } from '../src/constants.js'
+import { HANDOFF_JUDGE_SECTION, VOICE_SECTION } from '../src/constants.js'
 import { Dispatch } from '../src/dispatch.js'
-import { DISPATCH_HINT, FORCED_HINT } from '../src/prompt.js'
+import { DISPATCH_HINT, FORCED_HINT, HANDOFF_JUDGE_RULE } from '../src/prompt.js'
 
 // ---------------------------------------------------------------- 夹具
 
@@ -80,7 +80,7 @@ function makeAgent(id) {
   }
 }
 
-async function withDispatch(fn) {
+async function withDispatch(fn, options = {}) {
   const host = makeHost()
   const dir = await mkdtemp(join(tmpdir(), 'mas-voice-prompt-'))
   const d = new Dispatch(host.ctx, {
@@ -88,6 +88,7 @@ async function withDispatch(fn) {
     provisionDefaultWorkspace: false,
     archiveSweepMinutes: 0,
     archiveAfterHours: 0,
+    ...(options.config ?? {}),
   })
   d.workspaces = {
     list: () => [],
@@ -248,6 +249,115 @@ test('段落带 1–2 组改前/改后示例，且标明只是兜底参考（pla
     assert.match(section, /兜底参考/, `${name}：示例没说明只是兜底参考`)
     assert.match(section, /别照抄句式|不要照抄/, `${name}：示例没说明不要照抄句式（模板句会让话变僵）`)
   }
+})
+
+// ---------------------------------------------------------------- 接续判断段（plans/11 §七）
+
+/**
+ * 从装配后的完整提示里切出「接续判断」段。
+ *
+ * 切法与 `sliceVoiceSection()` 同一套：段之间用 `\n\n` 分隔，段内只有标题行与
+ * `- ` 列表项。三条判据叠加后失败一律朝安全方向（吞多了只会显得更长，超限照样被抓）。
+ *
+ * @param {string} text 装配后的完整提示
+ * @returns {string} 段原文（含标题行，不含分隔空行）
+ */
+function sliceJudgeSection(text) {
+  const lines = String(text).split('\n')
+  const start = lines.findIndex(line => line.includes(HANDOFF_JUDGE_SECTION.TITLE))
+  if (start < 0) return ''
+  const out = [lines[start]]
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (line.trim() === '') break
+    if (!/^[\s-]/.test(line)) break
+    if (out.length > HANDOFF_JUDGE_SECTION.MAX_LINES + 4) break
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
+test('P1：autoHandoff 关闭（默认）时，两种模式的提示都不含接续判断段', async () => {
+  await withDispatch(async ({ d, host }) => {
+    const lead = makeAgent('lead')
+    host.agents.set('lead', lead)
+
+    // 轻提示模式。
+    d.refreshHint(lead)
+    assert.equal(lead.renderHint(), DISPATCH_HINT, 'autoHandoff 关闭时轻提示必须逐字不变')
+    assert.ok(!sliceJudgeSection(lead.renderHint()), 'autoHandoff 关闭时不该注入接续段')
+
+    // 强制派发模式。
+    d.targets.set('lead', { workspace_id: 'w-proj', title: '项目 A', path: 'D:\\work\\a' })
+    d.refreshHint(lead)
+    assert.equal(lead.renderHint(), FORCED_HINT, 'autoHandoff 关闭时强制提示必须逐字不变')
+    assert.ok(!sliceJudgeSection(lead.renderHint()), 'autoHandoff 关闭时不该注入接续段')
+  })
+})
+
+test('P2：autoHandoff 打开时含接续段，且 ≤5 行 / ≤250 字（两种模式）', async () => {
+  await withDispatch(async ({ d, host }) => {
+    const lead = makeAgent('lead')
+    host.agents.set('lead', lead)
+
+    const check = (name, text) => {
+      const section = sliceJudgeSection(text)
+      assert.ok(section, `${name}：autoHandoff 打开时必须注入接续段`)
+      const lines = section.split('\n').length
+      const chars = Array.from(section).length
+      assert.ok(lines <= HANDOFF_JUDGE_SECTION.MAX_LINES,
+        `${name}：接续段 ${lines} 行，超过 ${HANDOFF_JUDGE_SECTION.MAX_LINES} 行上限：\n${section}`)
+      assert.ok(chars <= HANDOFF_JUDGE_SECTION.MAX_CHARS,
+        `${name}：接续段 ${chars} 字，超过 ${HANDOFF_JUDGE_SECTION.MAX_CHARS} 字上限：\n${section}`)
+    }
+
+    d.refreshHint(lead)
+    check('DISPATCH_HINT（软提示）', lead.renderHint())
+
+    d.targets.set('lead', { workspace_id: 'w-proj', title: '项目 A', path: 'D:\\work\\a' })
+    d.refreshHint(lead)
+    check('FORCED_HINT（强制派发）', lead.renderHint())
+  }, { config: { autoHandoff: true } })
+})
+
+test('P3：接续段的位置在 SPEAK_RULE 之后、HANDOFF_RULE 之前（两种模式一致）', async () => {
+  await withDispatch(async ({ d, host }) => {
+    const lead = makeAgent('lead')
+    host.agents.set('lead', lead)
+
+    d.refreshHint(lead)
+    d.targets.set('lead', { workspace_id: 'w-proj', title: '项目 A', path: 'D:\\work\\a' })
+    d.refreshHint(lead)
+    const text = lead.renderHint()
+    const order = [
+      text.indexOf(VOICE_SECTION.TITLE),
+      text.indexOf(HANDOFF_JUDGE_SECTION.TITLE),
+      text.indexOf('**派发即移交**'),
+    ]
+    assert.ok(order[0] >= 0 && order[1] >= 0 && order[2] >= 0, '三个锚点都必须出现')
+    assert.ok(order[0] < order[1] && order[1] < order[2],
+      `接续段的顺序错了：说话方式@${order[0]}、接续判断@${order[1]}、派发即移交@${order[2]}`)
+  }, { config: { autoHandoff: true } })
+})
+
+test('P4：注入接续段后，「说话方式」段仍是 8 行 / ≤500 字（没有挤爆既有门禁）', async () => {
+  await withDispatch(async ({ d, host }) => {
+    const lead = makeAgent('lead')
+    host.agents.set('lead', lead)
+    d.refreshHint(lead)
+    const section = sliceVoiceSection(lead.renderHint())
+    assert.equal(section.split('\n').length, VOICE_SECTION.MAX_LINES,
+      '说话方式段的行数不该因为新增独立段而变化')
+    assert.ok(Array.from(section).length <= VOICE_SECTION.MAX_CHARS,
+      '说话方式段不该因为新增独立段而超字数')
+  }, { config: { autoHandoff: true } })
+})
+
+test('P5：接续段里必须有「由你判断」与「不打分」两个锚点（防止改回插件推荐）', () => {
+  const section = sliceJudgeSection(HANDOFF_JUDGE_RULE)
+  assert.ok(section, 'HANDOFF_JUDGE_RULE 自身必须能切出整段')
+  assert.match(section, /由你判断/, '必须把判定权明确交给模型')
+  assert.match(section, /不打分/, '必须否定「插件打分」这件事')
 })
 
 test('门禁能真的失败（负向对照：判据不许退化成恒真）', () => {

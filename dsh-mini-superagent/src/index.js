@@ -109,6 +109,9 @@ export async function apply(ctx, config) {
   ctx.effect(() => () => dispatch.dispose())
 
   void dispatch.pump()
+  // 重启恢复出来的后台活巡检在这里统一重挂：pump() 的同步部分已经把
+  // 排队任务占好位，此时再起定时器不会和启动时的推进抢同一批任务。
+  dispatch.resumeBackgroundWatches()
   // 已有会话按当前模式刷新一次（插件重载后不会重复注册段，只换文本）。
   dispatch.refreshAllHints()
   // 过期子会话自动归档（archiveAfterHours / archiveSweepMinutes 都为 0 时不起）。

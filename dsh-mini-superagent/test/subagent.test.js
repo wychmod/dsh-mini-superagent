@@ -1,7 +1,7 @@
 /**
  * worker 的 subagent 也受工具面约束（对齐上游 `limitSubagent()` 的边界部分）。
  *
- * 全局注册的 9 个工具对每个 Session 可见，所以 worker 的 subagent 也能调
+ * 全局注册的 10 个工具对每个 Session 可见，所以 worker 的 subagent 也能调
  * `dispatch_launch`——一个任务可以无限往下派生，而 `maxTasksPerSession` 只按主会话计。
  * 这里把 subagent 的 `dispatch_*` 收走，保留读写与执行（subagent 的职责就是干活）。
  */

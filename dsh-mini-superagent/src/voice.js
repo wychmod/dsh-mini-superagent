@@ -14,7 +14,7 @@
  * 3. **失败与阻塞必须带行动指向**（「需要你…」）——只报状态等于没说清楚下一步。
  */
 import {
-  HEADLINE_MAX, LABEL, REPORT_SECTIONS, REPORT_VIEW, STATUS_VOICE,
+  CANCEL_REASONS, HEADLINE_MAX, LABEL, REPORT_SECTIONS, REPORT_VIEW, STATUS_VOICE,
 } from './constants.js'
 import { clip, oneLine } from './tasks.js'
 
@@ -378,6 +378,9 @@ export function idleText(task, options = {}) {
  * - 先给比例，再给分组，不逐条复述成功项；
  * - **没成的必须逐条点名到具体任务**（带短标签），不能只写「1 条失败」；
  * - 失败必须带原因与「需要你做什么」；
+ * - **「未执行」与「没成」分开**（PRD-02 §8）：前置失败导致的后继取消不是它
+ *   自己失败，混进「没成」会让用户去查一个根本没错的任务；这类只写「未执行」
+ *   并说明「等前置结算后再派一次」；
  * - 超过 5 条时只列「成了几条 / 没成的哪条」，成功项不再逐个列。
  *
  * @param {object[]} members 这一批的成员任务
@@ -392,13 +395,25 @@ export function batchText(members, options = {}) {
   const okStatuses = new Set(['done'])
   const ok = list.filter(item => okStatuses.has(item.status))
   const bad = list.filter(item => !okStatuses.has(item.status))
+  /**
+   * 「未执行」= 被依赖连带取消（`cancelReason` 是 PRD-02 的两个稳定机器值）。
+   *
+   * 必须与「人取消」分开：前者是**前置的错**，它自己的活根本没开始；后者是用户
+   * 收回。把两者混成一个「已取消」会让用户少一次「B 为什么没跑」的解释，
+   * 而这正是 PRD-02 §8 要求同步改文案的原因。
+   */
+  const dependencyCancelled = item => item.status === 'cancelled'
+    && (item.cancelReason === CANCEL_REASONS.DEPENDENCY_FAILED
+      || item.cancelReason === CANCEL_REASONS.DEPENDENCY_MISSING)
+  const notRun = bad.filter(dependencyCancelled)
   // 取消是用户自己收回的，不算「没成」——把它混进去会让汇总读起来像失败。
-  const cancelled = bad.filter(item => item.status === 'cancelled')
+  const cancelled = bad.filter(item => item.status === 'cancelled' && !dependencyCancelled(item))
   const failed = bad.filter(item => item.status !== 'cancelled')
 
   const lines = [`${REPORT_SECTIONS.BATCH}${label}`]
   const parts = [`${total} 条成了 ${ok.length} 条`]
   if (failed.length) parts.push(`${failed.length} 条没成`)
+  if (notRun.length) parts.push(`${notRun.length} 条未执行`)
   if (cancelled.length) parts.push(`${cancelled.length} 条已取消`)
   lines.push(`${parts.join('，')}。`)
 
@@ -418,11 +433,23 @@ export function batchText(members, options = {}) {
     })
     lines.push(`· 没成：${names.join('、')}`)
   }
+  if (notRun.length) {
+    // 「未执行」逐条点名并带**前置**的原因：用户要能直接去处理前置，而不是猜
+    // 「这条为什么没跑」。两种原因分开说——「前置没成」和「前置已不在账本」需要
+    // 完全不同的处置（前者等它结算/修好，后者得重新派前置）。
+    const names = notRun.map(item => {
+      const why = item.cancelReason === CANCEL_REASONS.DEPENDENCY_MISSING ? '前置已不在' : '前置没成'
+      return `${labelOf(item)}（${why}）`
+    })
+    lines.push(`· 未执行：${names.join('、')}`)
+  }
   if (cancelled.length) lines.push(`· 已取消：${cancelled.map(labelOf).join('、')}`)
 
-  // 「需要你」只在有没成的任务时出现：批次全绿时喊一句「无」纯属噪音。
+  // 「需要你」只在有没成 / 未执行的任务时出现：批次全绿时喊一句「无」纯属噪音。
   if (failed.length) {
     lines.push(`${REPORT_SECTIONS.NEED}${failed.length} 条没成，看看要重试、换做法，还是先放着？`)
+  } else if (notRun.length) {
+    lines.push(`${REPORT_SECTIONS.NEED}${notRun.length} 条因前置没成没有执行：把前置处理掉后重新派发它们即可。`)
   }
   if (options.group) lines.push(`${REPORT_SECTIONS.DETAIL}dispatch_inspect 按任务查（批次 ${options.group}）`)
   return lines.join('\n')

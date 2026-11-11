@@ -12,12 +12,16 @@
  *   POST /dsh-mini-superagent/board/cancel    {"task_id"} -> {ok, task}
  *   POST /dsh-mini-superagent/board/retry     {"task_id"} -> {ok, task}
  */
-import { BOARD_ALLOWED_HOSTS, BOARD_HEADER, LOG_PREFIX, SETTLED, VERSION } from './constants.js'
+import { BOARD_ALLOWED_HOSTS, BOARD_BASE, BOARD_HEADER, ERROR_CODES, LOG_PREFIX, SETTLED, VERSION } from './constants.js'
 import { analyticsSnapshot, degradedAnalytics } from './analytics.js'
 import { boardStats, degradedStats } from './stats.js'
 
-/** 路由前缀；客户端 client/index.js 里有一份同样的常量，改一处要改两处。 */
-const BASE = '/dsh-mini-superagent/board'
+/**
+ * 路由前缀的唯一事实源在 constants.js。浏览器半边 `client/index.js` 无法
+ * import（plain ModuleLoader），仍保留一份字面量；两份是否一致由
+ * `test/contract-consistency.test.js` 在每次 `npm test` 时钉住。
+ */
+const BASE = BOARD_BASE
 
 /** 单次响应最多带多少条任务。 */
 const MAX_TASKS = 200
@@ -66,11 +70,43 @@ function elapsedOf(task, started) {
   return Math.max(0, settled - started)
 }
 
+/**
+ * 一条任务的计划进度（PRD-01 §4.3）：**只算三个短标量**，不回步骤数组。
+ *
+ * 为什么不上完整步骤：看板是 2 秒轮询的全量快照，200 条任务 × 12 步会把每次
+ * 轮询的 payload 放大一个量级；而任务行只需要 `2/5`、抽屉只需要「当前步骤」那句。
+ * 想看全量计划的走 `dispatch_inspect`（账本里有 `task.plan`）。
+ *
+ * `plan_current` 的取法：优先 `doing`（worker 明确说的「正在做」），没有就退到
+ * 第一条 `pending`（下一个要做的），全 done 时是空串——**不编一句「已完成」**，
+ * 那个结论由任务状态表达，不由计划表达。
+ *
+ * @param {object} task
+ * @returns {{total: number, done: number, current: string}|undefined} 没有计划时 undefined
+ */
+function planOf(task) {
+  const steps = Array.isArray(task.plan)
+    ? task.plan.filter(step => step && typeof step.text === 'string' && step.text)
+    : []
+  if (!steps.length) return undefined
+  const done = steps.filter(step => step.status === 'done').length
+  const doing = steps.find(step => step.status === 'doing')
+  const pending = steps.find(step => step.status === 'pending')
+  return { total: steps.length, done, current: (doing ?? pending)?.text ?? '' }
+}
+
 /** 一条任务在看板上的形状。字段刻意拍平，客户端不需要理解内部结构。 */
 export function boardTask(task) {
   const reports = Array.isArray(task.reports) ? task.reports : []
   const last = reports.length ? reports.at(-1) : undefined
   const started = task.startedAt ? Date.parse(task.startedAt) : NaN
+  /**
+   * 计划标量的**显示优先级由宿主先做一层**（PRD-01 §4.3「终态 > 计划 > 报告数」）：
+   * 已结算的任务不再下发 `plan_*`。这样即使将来有第二个客户端，也不会因为忘了
+   * 判状态而给一条 done 的任务画「2/5」——「明明完了还停在第 2 步」是最容易
+   * 被当成 bug 报的形态。计划本身仍留在账本里，`dispatch_inspect` 查得到。
+   */
+  const plan = SETTLED.has(task.status) ? undefined : planOf(task)
   /**
    * 「有一条报告被截过」。
    *
@@ -100,6 +136,18 @@ export function boardTask(task) {
     attempt: task.attempt ?? 1,
     parent_session_id: task.parentSessionId,
     worker_session_id: task.workerSessionId,
+    /**
+     * 复用血缘（plans/08 阶段 2）：这条任务是「接续自哪条」。
+     *
+     * 三个字段都可选、都只在真的复用时出现——独立任务不会凭空多出
+     * `handoff_from: null` 之类需要调用方判空的噪音。`handoff_source` 是审计值
+     * （`agent` = 调用方给了理由 / `explicit` = 只给了 handoff_from），
+     * `handoff_reason` 是调用方的一句话解释（≤200 字）。**它们只用于展示与审计，
+     * 不参与任何判定或打分**；插件不会根据它们自动决定接不接上一轮。
+     */
+    ...(task.parentTaskId ? { handoff_from: task.parentTaskId } : {}),
+    ...(task.handoffSource ? { handoff_source: task.handoffSource } : {}),
+    ...(task.handoffReason ? { handoff_reason: task.handoffReason } : {}),
     cwd: task.cwd,
     workspace_id: task.workspaceId ?? null,
     workspace_title: task.workspaceTitle ?? null,
@@ -109,6 +157,23 @@ export function boardTask(task) {
     host_workspace_title: task.hostWorkspaceTitle ?? null,
     archived_at: task.archivedAt ?? null,
     ...(task.group ? { group: task.group } : {}),
+    /**
+     * 依赖（PRD-02 §4.5）：五个短字段，都是标量或短 id 数组。
+     *
+     * 体积约束（看板是 2 秒轮询的全量快照）：`depends_on` 最多 8 个 id（与
+     * `DEFAULTS.maxDependsOn` 一致，这里再 slice 一次只是防手工改账本把快照撑大），
+     * 其余四个都是单个短串。**不搬前置任务的标题/状态**——客户端从同一份快照里
+     * 按 id 查，搬过来会让同一事实在 payload 里出现两次。
+     *
+     * `depends_on` 恒定给数组（没有依赖就是 `[]`），客户端不必判属性存在；
+     * 其余四个是「出过这件事才有」的可选键，与 `frozen_at` 等同风格。
+     * `blocked_*` 是派生值（只描述此刻），`cancel_reason` / `error_code` 是终态事实。
+     */
+    depends_on: Array.isArray(task.dependsOn) ? task.dependsOn.slice(0, 8) : [],
+    ...(task.blockedBy ? { blocked_by: task.blockedBy } : {}),
+    ...(task.blockedReason ? { blocked_reason: task.blockedReason } : {}),
+    ...(task.cancelReason ? { cancel_reason: task.cancelReason } : {}),
+    ...(task.errorCode ? { error_code: task.errorCode } : {}),
     created_at: task.createdAt,
     updated_at: task.updatedAt,
     started_at: task.startedAt,
@@ -131,6 +196,8 @@ export function boardTask(task) {
       : {}),
     elapsed_ms: elapsedOf(task, started),
     report_count: reports.length,
+    // 计划（PRD-01 §4.3）：只有未结算且真有计划时才出现这三个短标量；见 `planOf()`。
+    ...(plan ? { plan_total: plan.total, plan_done: plan.done, plan_current: plan.current } : {}),
     last_report: last ? { at: last.at, status: last.status, summary: last.summary } : null,
     last_text_preview: typeof task.lastText === 'string' ? task.lastText.slice(0, PREVIEW_CHARS) : '',
     // 追问的投递阶段：pending = 进了收件箱但 worker 还没读；read = 已经读进上下文。
@@ -292,9 +359,20 @@ export function retiredSnapshot(dispatch) {
   }
 }
 
+/** 按 HTTP 状态把错误响应映射到错误码闭集，客户端不用再猜中文措辞。 */
+function errorCodeFor(status) {
+  if (status === 400) return ERROR_CODES.BAD_ARGS
+  if (status === 403) return ERROR_CODES.FORBIDDEN
+  if (status === 404) return ERROR_CODES.NOT_FOUND
+  if (status === 409) return ERROR_CODES.CONFLICT
+  return ERROR_CODES.INTERNAL
+}
+
 /** 写 JSON 响应。 */
 function send(res, status, body) {
-  const payload = JSON.stringify(body)
+  const payload = JSON.stringify(
+    body?.ok === false && !body.code ? { ...body, code: errorCodeFor(status) } : body,
+  )
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',

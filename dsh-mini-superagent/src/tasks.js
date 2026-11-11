@@ -254,11 +254,40 @@ export class TaskTable {
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
   }
 
-  /** 正在 running 的任务数（= 已占用的并发位）。 */
+  /**
+   * 正在 running 的任务数（= 已占用的并发位）。
+   *
+   * **两个口径为什么并存（plans/08 §三.6）**：
+   * - 并发位**按任务**计：`maxWorkers` 限制的是「同时有多少个任务在跑」。
+   *   复用会话之后，一条会话上可能有第二条任务；若按会话计并发位，这条任务就
+   *   不占位，队列会被绕过、指标也会把排队中的活算成并行。
+   * - 执行**按会话串行**：宿主的事实是「一条会话同一时刻只能跑一个回合」。
+   *   所以 `takeRunnable()` 还会跳过「目标会话已有 running 任务」的队首，
+   *   让它保持 queued。前者决定「开几个」，后者决定「哪几个能同时开」，两件事
+   *   不能合成一个计数：合成之后要么并发位虚高，要么排队任务被永久丢弃。
+   */
   runningCount() {
     let count = 0
     for (const task of this.tasks.values()) if (task.status === 'running') count += 1
     return count
+  }
+
+  /**
+   * 这条 worker 会话上是否已经有一个 running 任务。
+   *
+   * 会话级互斥的唯一判据（plans/08 §三.6）。`takeRunnable()` 用它跳过暂时不能
+   * 开始的任务；把它做成公开方法是为了可观测：将来看板要显示「这条在等同一个
+   * 会话空出来」时，读的应当是这个方法，而不是再扫一遍全表（两处扫描迟早分叉）。
+   *
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  sessionBusy(sessionId) {
+    if (!sessionId) return false
+    for (const task of this.tasks.values()) {
+      if (task.status === 'running' && task.workerSessionId === sessionId) return true
+    }
+    return false
   }
 
   /**
@@ -357,18 +386,60 @@ export class TaskTable {
    *
    * 占位也走 `transition()`，保证「所有状态变化都经过同一个入口」这条
    * 不变式没有例外；`transition` 会顺手把它从队列里摘掉。
-   * 没有空位或队列已空时返回 undefined。
+   *
+   * **会话级互斥（plans/08 阶段 2）**：队首的目标会话若已有 running 任务，
+   * 就跳过它继续看后面的任务，并把它**留在队列里**。三个细节都是必需的：
+   *
+   * 1. **不能丢**：跳过不等于取消。丢了它，用户会看到任务从看板上消失、
+   *    却没有任何报告——那比排队更糟。这里用 `deferred` 收集后原样放回队首，
+   *    相对顺序保持不变。
+   * 2. **不能无限循环**：队列里只剩「等同一会话」的任务时，必须返回 undefined，
+   *    否则 `while` 会一直 shift/push 同一批 id。做法是只扫当前队列长度一遍。
+   * 3. **允许后面的任务先跑**：一条会话被占着，不应该堵住别的会话的活。
+   *    跳过队首、继续向后看，正好让不同会话的任务按各自节奏并行。
+   *
+   * 没有空位或没有可开始的任务时返回 undefined。
+   *
+   * **前置依赖（PRD-02 §4.3）**：`isRunnable` 是一个**只读谓词**，由调用方给出
+   * （`Dispatch.pump()` 传 `task => !task.blockedBy`）。它在 `queued` 判断之后、
+   * 会话忙判断之前执行：被挡的任务与「等同一会话」的任务走同一条路——跳过、
+   * 留在队列里、按原序放回队首。这样等待中的任务既不占并发位，也不会被丢掉。
+   *
+   * 谓词是同步且只读的，所以「取任务」仍然在一个同步循环里完成，不会因为多了一层
+   * 判定而超发；谓词抛错会直接冒泡（那是调用方的 bug，静默吞掉会让任务永久卡住）。
+   * 默认 `() => true` 保持旧行为：不传时与 0.8.x 逐字相同。
+   *
+   * @param {(task: object) => boolean} [isRunnable] 只读准入谓词；false = 这次轮不到它
    */
-  takeRunnable() {
+  takeRunnable(isRunnable = () => true) {
     if (this.runningCount() >= this.maxWorkers) return undefined
-    while (this.queue.length) {
+    // 只扫「进入本次调用时」的队列长度：扫完一遍就停，避免同一批被会话互斥的
+    // 任务被 shift 出去又 unshift 回来、在循环里空转。
+    const scan = this.queue.length
+    if (!scan) return undefined
+    const deferred = []
+    let picked
+    for (let index = 0; index < scan; index += 1) {
       const id = this.queue.shift()
       const task = this.tasks.get(id)
       if (!task || task.status !== 'queued') continue
-      this.transition(task, 'running')
-      return task
+      // 依赖未满足：与「会话忙」同一种处理——不丢、不抢队首后面的位。
+      if (!isRunnable(task)) {
+        deferred.push(id)
+        continue
+      }
+      if (this.sessionBusy(task.workerSessionId)) {
+        deferred.push(id)
+        continue
+      }
+      picked = task
+      break
     }
-    return undefined
+    // 被跳过的任务原样回到队首，保持它们之间的相对顺序（只是这次轮不到它们）。
+    if (deferred.length) this.queue.unshift(...deferred)
+    if (!picked) return undefined
+    this.transition(picked, 'running')
+    return picked
   }
 
   /**

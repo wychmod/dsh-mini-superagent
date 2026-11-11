@@ -92,6 +92,19 @@ async function withDispatch(config, fn) {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+/**
+ * 巡检收尾现在要等一次真实写盘（`await persistCritical()`），慢盘/冷启动下
+ * 固定 60ms 的 sleep 会偶发不够。改成轮询等条件，测试才不依赖磁盘速度。
+ */
+async function waitFor(predicate, label, timeout = 1500) {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    if (predicate()) return
+    await sleep(10)
+  }
+  assert.fail(`等待超时：${label}`)
+}
+
 test('回合结束但 job 还在跑：不结算，记下后台活', async () => {
   await withDispatch({}, async ({ d, host }) => {
     host.services.jobs = { list: () => [{ id: 'j1', owner: 'dispatch-t-bg', status: 'running' }] }
@@ -125,7 +138,9 @@ test('后台清空后自动收尾并回流', async () => {
     assert.equal(task.status, 'running')
 
     running = false
-    await sleep(60)
+    // 等「回流消息真的发出」而不是只等状态变：结算发生在 finishIdleTurn 里，
+    // notify() 在它之后；只等状态会在消息发出前就返回。
+    await waitFor(() => delivered.length >= 1, '后台清空后收尾并回流')
 
     assert.equal(task.status, 'ended', '后台清空后应当正常收尾')
     assert.equal(task.background, undefined)
@@ -149,7 +164,7 @@ test('到上限：终止剩余 job 再结算，并在报告里说明', async () 
     d.table.add(task)
 
     await d.onWorkerIdle('dispatch-t-bg')
-    await sleep(80)
+    await waitFor(() => delivered.length >= 1, '到上限后结算并回流')
 
     assert.equal(task.status, 'ended', '到上限必须结算，不能永久占着并发位')
     assert.deepEqual(killed, ['j1'])

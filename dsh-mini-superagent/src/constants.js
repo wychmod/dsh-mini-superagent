@@ -13,6 +13,57 @@ export const VERSION = '0.8.0'
 export const LOG_PREFIX = `${NAME}:`
 
 /**
+ * Host 看板路由前缀。
+ *
+ * `src/board.js` 用它注册路由；浏览器半边 `client/index.js` 无法 import 本文件
+ * （plain ModuleLoader，不打包），所以那里仍有一份字面量。两份必须逐字相同，
+ * 由 `test/contract-consistency.test.js` 在每次 `npm test` 时钉住——这是单一
+ * 事实源在不引入构建步骤前提下能做到的最强约束。
+ */
+export const BOARD_BASE = '/dsh-mini-superagent/board'
+
+/**
+ * 错误码闭集：工具抛出、HTTP 响应与日志里出现的机器可读标识。
+ *
+ * 中文 `message` 继续给人/模型读，`code` 给排障脚本与上游对账用。此前
+ * 只有 13 处 `throw new Error(中文)` 与看板手工状态码，同一个「任务已归档」
+ * 在不同路径有不同措辞，无法按类统计。新增错误码时只改这张表。
+ */
+export const ERROR_CODES = Object.freeze({
+  BAD_ARGS: 'dispatch/bad-args',
+  NOT_FOUND: 'dispatch/not-found',
+  FORBIDDEN: 'dispatch/forbidden',
+  CONFLICT: 'dispatch/conflict',
+  HOST_UNAVAILABLE: 'dispatch/host-unavailable',
+  BAD_STATE: 'dispatch/bad-state',
+  INTERNAL: 'dispatch/internal',
+  /**
+   * 依赖（PRD-02）。四个码对应四种「为什么这条没按声明的关系跑起来」：
+   * 前置 id 查不到、依赖成环、前置没成、前置已不在账本里。
+   * 看板的 `error_code` 与工具的 `code` 都从这里取，调用方按码分流，不解析中文。
+   */
+  UNKNOWN_DEPENDENCY: 'dispatch/unknown-dependency',
+  DEPENDENCY_CYCLE: 'dispatch/dependency-cycle',
+  DEPENDENCY_FAILED: 'dispatch/dependency-failed',
+  DEPENDENCY_MISSING: 'dispatch/dependency-missing',
+})
+
+/** 生成一个带稳定 `code` 的 Error；`message` 保持中文可读文案。 */
+export function fail(code, message) {
+  const error = new Error(message)
+  error.code = ERROR_CODES[code] ?? (typeof code === 'string' ? code : ERROR_CODES.INTERNAL)
+  return error
+}
+
+/** 把任意抛出的错误归一化到闭集：已有合法 code 就保留，否则用兜底值。 */
+export function codeOf(error, fallback = ERROR_CODES.INTERNAL) {
+  const value = error?.code
+  return typeof value === 'string' && Object.values(ERROR_CODES).includes(value)
+    ? value
+    : fallback
+}
+
+/**
  * 投递进会话的消息来源 kind。
  * 报告以自己的来源出现，不会被误当成用户手打的消息；
  * DSH 对未知 kind 不做运行时校验（见 docs/api-contracts.md）。
@@ -171,6 +222,50 @@ export const DEFAULTS = {
   maxWorkers: 6,
   /** 每个主会话最多累计派发多少个任务。 */
   maxTasksPerSession: 64,
+  /**
+   * 是否允许新任务复用已有子会话（plans/08 阶段 2 · 模型 B）。
+   *
+   * 默认 **true**：`dispatch_launch({ handoff_from })` 会新建一条任务记录，
+   * 但把 `workerSessionId` / `threadId` 指向来源任务的子会话，上下文接着走。
+   *
+   * 设 false = **回滚开关**：带 `handoff_from` 的调用降级为普通新派，
+   * 并在工具返回值里给出明确 `note`。**不允许静默忽略参数**——用户显式要求复用，
+   * 结果却悄悄新开一条会话、上下文其实断了，比直接报错更难发现。
+   */
+  allowSessionReuse: true,
+  /**
+   * 是否把「接续判断」指引注入主会话提示（plans/11 §七.4）。
+   *
+   * **语义只有一件事**：提示里提不提「派发前先想一次这是不是接着上一条」。
+   * 它不是「让插件自动绑定」的开关——插件里没有任何相似度、阈值或自动选择，
+   * 接不接永远由调用方（主会话的模型）判断；这个开关只决定模型**会不会被提醒**
+   * 去想一次。关掉它，`dispatch_candidates` 与 `handoff_from` 照常可用，只是
+   * 提示里不再提。
+   *
+   * 默认 **false**：它改变的是模型行为（会开始用一个新的工具、新的参数），
+   * 出问题时的表现是「多接了一条」，不是报错。先在单机打开跑一段、看
+   * `handoffSource` 分布与抽查准确率，再决定是否随版本默认打开。
+   */
+  autoHandoff: false,
+  /**
+   * 候选窗口（天）：只看最近 N 天**结算**的任务。
+   *
+   * 与 `archiveAfterHours: 168`（7 天）对齐：更老的任务会被归档巡检收走，
+   * 而归档任务不能当复用来源（`dispatch_launch` 会拒），窗口超过 7 天只会
+   * 返回一堆注定不可用的候选。
+   */
+  handoffCandidatesDays: 7,
+  /** 每次 `dispatch_candidates` 返回的候选上限（工具参数 1–10 可覆盖）。 */
+  handoffCandidatesLimit: 5,
+  /**
+   * 候选里简报的截断长度（字符）。
+   *
+   * 与 `dispatch_inspect` 的 2000 区分：候选是「扫一眼挑一个」，不是详情；
+   * 5 条 ×（简报 + 摘要 + 结构字段）约 7.5k 字符，是模型愿意读完的量。
+   */
+  handoffBriefChars: 600,
+  /** 候选里「最后一条报告摘要」的二次截断（入库上限 `maxReportSummaryChars` 可能更大）。 */
+  handoffReportSummaryChars: 600,
   /** 子会话默认继承主会话的工作目录。 */
   inheritWorkingDirectory: true,
   /** 子会话权限预设；空字符串表示继承 DSH 默认。 */
@@ -185,8 +280,14 @@ export const DEFAULTS = {
   workspaceRoot: '',
   /** 首次激活时创建默认工作区（mini-superagent）与其中的默认主会话。 */
   provisionDefaultWorkspace: true,
-  /** 子会话结束多少小时后自动归档；0 表示不归档。 */
-  archiveAfterHours: 24,
+  /**
+   * 子会话结束多少小时后自动归档；0 表示不归档。
+   *
+   * 默认 168（7 天）而不是 24：看板「全部」chip 不含已归档任务，24 小时一到
+   * 昨天的任务就整批消失，用户会误以为数据丢了（「看板隔一天就空了」）。
+   * 7 天覆盖「周一回来看上周五的活」这类跨周查看。
+   */
+  archiveAfterHours: 168,
   /** 归档巡检间隔（分钟）；0 表示不巡检。 */
   archiveSweepMinutes: 10,
   /**
@@ -316,6 +417,26 @@ export const DEFAULTS = {
   /** `task.lastText`（worker 最后一段输出）的入库上限（P0-3）。 */
   maxLastTextChars: 5000,
   /**
+   * 任务计划（`dispatch_report.plan`）的**步骤数**上限（PRD-01 §4.1）。
+   *
+   * 上限只约束账本里那**一版**最新计划（计划不进每条 report entry，见
+   * `MAX_REPORTS` 的说明），所以 12 步 × 120 字是固定的最坏体积，不随报告条数放大。
+   * 超限不报错，截断后在返回值里给 `plan_truncated: true`——worker 是模型，
+   * 让它为了「计划太长」中断整个汇报不划算。
+   */
+  maxPlanSteps: 12,
+  /** 单个计划步骤的**文案字数**上限；超长截断（同样只留痕，不报错）。 */
+  maxPlanStepChars: 120,
+  /**
+   * 单个任务最多声明几个前置（PRD-02 §5，默认 8）。
+   *
+   * **超限报错，不静默截断**：依赖少一条是逻辑错误（用户以为 B 等 A、实际没等），
+   * 截断会把一个错误变成一条「看起来跑成了」的任务，事后无法从账本发现。
+   * 8 的取法：一条后端链（读接口 → 改实现 → 跑测试 → 补文档）远用不到 8 个；
+   * 再多通常是调用方把「汇合」写错了，该让它重新想一遍依赖。
+   */
+  maxDependsOn: 8,
+  /**
    * 「已投递未读」的存活上限（毫秒，P0-4，默认 30 分钟）。
    *
    * 宿主在某些部署里不发 `session/event`，于是 `inputPendingAt` 会**永久**挂着
@@ -370,6 +491,33 @@ export const BOARD_HEADER = 'x-dsh-mini-superagent'
  * @type {string[]}
  */
 export const BOARD_ALLOWED_HOSTS = []
+
+/**
+ * 后继被「前置没成」连带取消时写进 `task.cancelReason` 的稳定机器串（PRD-02 §4.2）。
+ *
+ * 为什么不复用 `cancel()` 的自由文本：`cancelReason` 在依赖链上要能被**程序**判断
+ * （看板标签、批次汇总把「未执行」从「失败 / 人取消」里分出来），自由文本做不到。
+ * 人取消仍然写用户给的原因；这里只放依赖这一类的两个值。
+ */
+export const CANCEL_REASONS = Object.freeze({
+  DEPENDENCY_FAILED: 'dependency_failed',
+  DEPENDENCY_MISSING: 'dependency_missing',
+})
+
+/**
+ * `blockedReason` 的闭集（PRD-02 §4.2 / §4.3）：后继为什么还留在队列里、或为什么没跑。
+ *
+ * - `running`：前置还没结算——**正常等待**，任务仍是 queued，但不占 worker 并发位；
+ * - `failed`：前置以非 done 的终态结算（failed / cancelled / interrupted / ended / blocked）；
+ * - `missing`：前置已不在活表，退休留痕非 done 或根本查不到。
+ *
+ * 它是**派生值**（只描述「此刻」），不落盘参与判定；重启后由 `annotate` 重算。
+ */
+export const BLOCK_REASONS = Object.freeze({
+  RUNNING: 'running',
+  FAILED: 'failed',
+  MISSING: 'missing',
+})
 
 /** 已结算：不再占并发位、不再等它。 */
 export const SETTLED = new Set(['done', 'blocked', 'failed', 'cancelled', 'ended', 'interrupted'])
@@ -540,6 +688,67 @@ export function newTaskId() {
  * 所以两处都必须引用这一个常量：字面量散落在两处时，改一处就会让校验与产出分家。
  */
 export const WORKER_PREFIX = 'dispatch-'
+
+/**
+ * 复用子会话时，首条「交接摘要」消息的总长度上限（字符）。
+ *
+ * 为什么必须有硬上限（plans/08 §五）：复用会把前序上下文带进新任务，而交接摘要
+ * 的用途恰恰是「只带结论、不带整段历史」。没有上限时，一个写了 2 万字简报的来源
+ * 任务会让每次复用都往会话里灌一遍全文——上下文污染与费用都会随复用次数放大。
+ *
+ * 1200 的取法：四段（上一任务终态 / 未决问题 / 变更面 / 本次目标）各留 ~200 字，
+ * 加上固定的续接声明与工作规则，刚好能讲清「接着做什么」而不至于把来源任务重讲一遍。
+ * 超长统一走 `clip()` 截断并标注，不静默丢。
+ */
+export const HANDOFF_MAX_CHARS = 1200
+
+/**
+ * 交接原因的上限（字符，plans/08 阶段 2 的补充口径）。
+ *
+ * `handoff_reason` 是**调用方（大模型）对自己判断的一句话解释**，例如
+ * 「压缩的是上一轮刚生成的调研文档」。它只用于审计与事后解释，**不参与任何
+ * 判定或打分**——插件里没有相似度、阈值或候选排序，连续性由模型判断。
+ *
+ * 200 的取法：一句人能读完的理由，超过就不是「一句话」而是把整段推理塞进账本。
+ * 超长统一 `clip()` 截断并在任务上标 `handoffReasonTruncated`。
+ */
+export const HANDOFF_REASON_MAX_CHARS = 200
+
+/**
+ * 复用的来源类型（审计字段 `handoffSource` 的闭集）。
+ *
+ * - `agent`：调用方给了 `handoff_reason`，说明连续性判断来自模型；
+ * - `explicit`：只给了 `handoff_from`，没有解释——仍然是用户/模型的显式选择。
+ *
+ * 两者都是「显式复用」；插件不会自己推断连续性，所以这里没有 `auto`。
+ */
+export const HANDOFF_SOURCE = Object.freeze({
+  AGENT: 'agent',
+  EXPLICIT: 'explicit',
+})
+
+/**
+ * 「接续判断」提示段的标题行与长度门禁（plans/11 §七.2、§七.3）。
+ *
+ * 为什么不塞进 `VOICE_SECTION`（「说话方式」段）：
+ * 1. 空间：那一段实测已经是 **8/8 行、481/500 字**，加一行立刻破行数上限；
+ * 2. 语义：`VOICE_SECTION` 管的是「对用户怎么说话」，接续判断是**派发前的决策**；
+ *    动作规则混进语气规则里，模型对两者的遵守方式不同（动作会被执行、语气会被变通）；
+ * 3. 可回滚：独立段可以整段开关（`autoHandoff`），塞进去就只能改文案。
+ *
+ * 正文留在 `src/prompt.js`（会反复润色），锚点与数字放这里：测试按标题行切段、
+ * 按这两个上限判超限，改措辞时不必同时改测试。`MAX_LINES` / `MAX_CHARS` 是
+ * **行为契约**不是排版偏好：plans/11 §十二 把「提示词膨胀」列为风险，而本段按
+ * 设计只有 5 行 / 233 字，留 17 字余量。
+ */
+export const HANDOFF_JUDGE_SECTION = {
+  /** 段落首行；测试按它从装配后的提示里切出整段。 */
+  TITLE: '接续判断（接不接上一条由你判断；插件只给候选，不打分）:',
+  /** 段落最多几行（含标题行）。 */
+  MAX_LINES: 5,
+  /** 段落最多多少字（按 code point 数，中文一个字算一个）。 */
+  MAX_CHARS: 250,
+}
 
 /**
  * 一个会话 id 是不是本插件建的 worker 会话。

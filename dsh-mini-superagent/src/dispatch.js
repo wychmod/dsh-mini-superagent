@@ -9,13 +9,15 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  ADMISSION, AUTO, DEFAULTS, HEADLINE_LEDGER_MAX, LOG_PREFIX, MAX_REPORTS, MERGEABLE_REPORT_STATUSES,
+  ADMISSION, AUTO, BLOCK_REASONS, CANCEL_REASONS, DEFAULTS, ERROR_CODES, HANDOFF_REASON_MAX_CHARS,
+  HANDOFF_SOURCE, HEADLINE_LEDGER_MAX, LOG_PREFIX,
+  MAX_REPORTS, MERGEABLE_REPORT_STATUSES,
   MODE_ALWAYS, MODE_OFF, NAME, NONE, NOTICE_MERGE_MAX_MS, PROJECTION, REPORT_SECTIONS, REPORT_VIEW,
-  RETIRED_REASONS, SETTLED, SOURCE_KIND, STATE_DIR, TERMINAL_REPORT, VERSION,
-  WORKER_PREFIX, WORKER_WORKSPACE_CWD, isWorkerSessionId, newTaskId, newThreadId, nextMessageId,
+  RETIRED_REASONS, SETTLED, SOURCE_KIND, STATE_DIR, TERMINAL_REPORT, TIME_BASIS, VERSION,
+  WORKER_PREFIX, WORKER_WORKSPACE_CWD, fail, isWorkerSessionId, newTaskId, newThreadId, nextMessageId,
   normalizeWorkerWorkspace, now,
 } from './constants.js'
-import { FORCED_HINT, ROUTER_LOCKED, SOFT_HINT, workerPrompt } from './prompt.js'
+import { FORCED_HINT, ROUTER_LOCKED, SOFT_HINT, handoffPrompt, withHandoffJudge, workerPrompt } from './prompt.js'
 import { prepareEnv, runPrepare, taskDirectory } from './prepare.js'
 import { SessionGateway } from './sessions.js'
 import { readState, writeState } from './store.js'
@@ -38,6 +40,72 @@ const TRANSIENT = new RegExp([
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR',
   'socket hang up', 'fetch failed', 'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b',
 ].join('|'), 'i')
+
+/** 计划步骤的合法状态。未知值按 `pending` 处理（PRD-01 §4.1「缺省按 pending」）。 */
+const PLAN_STATUSES = new Set(['pending', 'doing', 'done'])
+
+/**
+ * 同一段步骤文案最多保留几条（PRD-01 §4.1）。
+ *
+ * 为什么只限「完全相同的文案」而不做去重：计划的顺序有意义（第一步改文件、
+ * 第二步跑测试，文案不同），去重会改掉 worker 表达的执行顺序。但模型偶尔会把
+ * 同一条复制好几遍（尤其是「跑全量测试」），那种重复没有任何信息量，还会让
+ * `plan_done / plan_total` 看起来永远做不完。
+ */
+const PLAN_MAX_SAME_TEXT = 3
+
+/**
+ * 把 worker 给的 `plan` 归一化成账本里的形状（PRD-01 §4.1）。
+ *
+ * 三条边界都在这里收口，`report()` 只负责调用：
+ * - **整版替换**：不做增量合并，worker 不用维护 step id；
+ * - **上限**：步数 / 单步字数超出就截断并回报 `truncated`，**不报错**——
+ *   计划是汇报的附属信息，不能因为计划太长让结论回不来；
+ * - **空文案**：丢弃该步；全空视同没传（调用方据此保持已有计划不变）。
+ *
+ * 字符串条目按 `{text, status: 'pending'}` 容错接受：schema 只声明对象形状，
+ * 但模型偶尔会直接给字符串数组，为一个纯格式问题拒掉整条计划没有收益。
+ *
+ * @param {unknown} raw `dispatch_report` 的 `plan` 参数
+ * @param {object} config 已合并的配置（取 `maxPlanSteps` / `maxPlanStepChars`）
+ * @returns {{steps: Array<{text: string, status: string}>|undefined, accepted: boolean, truncated: boolean}}
+ */
+function normalizePlan(raw, config) {
+  // 配置写成 0 视为「不接收计划」：上限为 0 时任何一步都存不下，早退比逐条截断更诚实。
+  const maxSteps = Math.max(0, Math.floor(Number(config?.maxPlanSteps) || 0))
+  const maxChars = Math.max(0, Math.floor(Number(config?.maxPlanStepChars) || 0))
+  if (!Array.isArray(raw) || !maxSteps || !maxChars) {
+    return { steps: undefined, accepted: false, truncated: false }
+  }
+  const steps = []
+  /** 已收集的同文案次数；键是**截断后的**文案，避免两条超长文案截完相同却各占一份额度。 */
+  const seen = new Map()
+  let truncated = false
+  for (const item of raw) {
+    const source = typeof item === 'string' ? { text: item } : (item && typeof item === 'object' ? item : null)
+    if (!source) continue
+    // 单行化：步骤文案会进 2 秒轮询的看板与抽屉的一行，换行会把布局撑坏。
+    const text = String(source.text ?? '').replace(/\s+/g, ' ').trim()
+    if (!text) continue
+    const chars = Array.from(text)
+    if (chars.length > maxChars) truncated = true
+    const clipped = chars.length > maxChars ? chars.slice(0, maxChars).join('') : text
+    const count = seen.get(clipped) ?? 0
+    // 重复文案只保留前 3 条；这属于清洗而不是超限，不置 truncated（返回值只说「超限截断」）。
+    if (count >= PLAN_MAX_SAME_TEXT) continue
+    // 收满上限后还能看到一条**有效**步骤，才说明真的被截了；全是空/重复则不算。
+    if (steps.length >= maxSteps) {
+      truncated = true
+      break
+    }
+    seen.set(clipped, count + 1)
+    steps.push({
+      text: clipped,
+      status: PLAN_STATUSES.has(String(source.status ?? '')) ? String(source.status) : 'pending',
+    })
+  }
+  return { steps: steps.length ? steps : undefined, accepted: steps.length > 0, truncated }
+}
 
 /**
  * 续派时追加给 worker 的那条消息的**开头**（plans/08 阶段 1 · 模型 A）。
@@ -96,6 +164,16 @@ export class Dispatch {
   #persistChain = Promise.resolve()
 
   /**
+   * 依赖级联取消的**重入闸**（PRD-02 §4.4）。
+   *
+   * `#cancelDependents()` 会通过 `settle()` 触发嵌套 `pump()`，而嵌套 pump 又会算出
+   * 新的「可取消后继」。没有这道闸，同一条链会在每一层被重算一遍（幂等所以不会
+   * 错，但会随链长做 O(n²) 的重复扫描）。闸只在**级联期间**为真，最外层的工作队列
+   * 会按 BFS 把整条链走完，所以放过内层不会漏掉任何一条。
+   */
+  #cascadingDependencies = false
+
+  /**
    * @param {import('@deepseek-ai/cordis').Context} ctx 插件 context
    * @param {object} [config] cordis.patch.yml 里的 config
    */
@@ -108,6 +186,15 @@ export class Dispatch {
     this.persistTimer = undefined
     this.sweepTimer = undefined
     this.disposed = false
+    /**
+     * 恢复期间为 true：`pump()` 一律直接返回（PRD-02 §4.6）。
+     *
+     * 依赖收敛必须走 `settle()`（终态、`settledAt`、等待者都挂在那里），而 `settle()`
+     * 会 `void this.pump()`。`restore()` 跑在 `apply()` 里、工具还没注册、工作区还没
+     * provision——此刻启动 worker 比不启动危险得多。所以恢复窗口内用这个闸挡住推进，
+     * 等 `apply()` 末尾的正常 pump 用**同一份** `takeRunnable(blockedBy)` 判定接手。
+     */
+    this.restoring = false
     /** 最近一次落盘失败的原因（自检用）。 */
     this.persistError = undefined
     /** 最近一次恢复失败或走了备份的原因（自检用）。 */
@@ -150,6 +237,18 @@ export class Dispatch {
     this.subagentOf = new Map()
     /** 任务 id → 「后台活还在跑」的巡检定时器。 */
     this.backgroundTimers = new Map()
+    /**
+     * 重启恢复出来的「后台活巡检待重挂」任务 id。
+     *
+     * `restore()` 只读账本，此刻 `pump()` 还没跑、`table` 也还没装完；
+     * 直接在这里起定时器，它的收尾可能反过来触发 `settle → pump`。
+     * 所以先记账，等 `apply()` 把队列推进完再由 `resumeBackgroundWatches()` 统一重挂。
+     */
+    this.pendingBackgroundWatchers = []
+    /** 本进程累计终止过的后台 job 数（供 selfCheck 回显，不落盘）。 */
+    this.backgroundKills = 0
+    /** 持久化屏障不可用时只 warn 一次，避免每条报告刷一条日志。 */
+    this.durabilityWarned = false
     /**
      * 已退休任务的薄留痕：任务 id → record（P0-5）。
      *
@@ -197,6 +296,15 @@ export class Dispatch {
      * 就再也分不出来——而这恰好是 P1-2 想让人看见的差别。
      */
     this.projectionCounts = { full: 0, digest: 0, ledger: 0 }
+    /**
+     * 复用调用被降级时的说明（任务对象 → note，plans/08 阶段 2 的回滚开关）。
+     *
+     * 为什么用 WeakMap 而不是在任务上挂一个字段：`launch()` 的返回值同时是
+     * 工具层与测试的契约，任务对象会被 `persist()` 原样落盘（`{...task}`）。
+     * 把「这次调用为什么没有复用」写进任务，重启后它会变成一条**永远为真**的
+     * 历史字段，而它其实只是一次调用的结果；随任务对象一起回收才是它该有的生命周期。
+     */
+    this.reuseNotices = new WeakMap()
     const stateRoot = this.config.stateDir
       || join(process.env.DSH_HOME || join(homedir(), '.dsh'), STATE_DIR)
     this.stateFile = join(stateRoot, 'tasks.json')
@@ -275,9 +383,21 @@ export class Dispatch {
   /** 此刻该发给 `agent` 的提示文本（纯求值，无副作用）。 */
   #hintTextFor(agent) {
     const base = this.modeOf(agent.id) === MODE_ALWAYS ? FORCED_HINT : SOFT_HINT
+    /**
+     * 接续判断段只在 `autoHandoff` 打开时注入（plans/11 §七.2、§八）。
+     *
+     * 注意这个开关的语义**不是**「让插件自动绑定」：插件里没有任何相似度、
+     * 阈值或自动选择，接不接永远由调用方（主会话的模型）判断。它只决定提示里
+     * 提不提「派发前先想一次这是不是接着上一条」——关掉它，`dispatch_candidates`
+     * 与 `handoff_from` 照常可用。
+     *
+     * 注入点固定在 `SPEAK_RULE` 之后、`HANDOFF_RULE` 之前（见 `withHandoffJudge`），
+     * 两种模式共用同一段文本，顺序由结构保证而不是靠两处各拼一遍。
+     */
+    const text = this.config.autoHandoff === true ? withHandoffJudge(base) : base
     // 进了路由模式就把「write/edit 已不可用」说出来：模型看不到工具时，
     // 一句提示能让它直接改道派发，而不是反复试错或声称自己没有能力。
-    return this.routerLocked(agent) ? `${base}\n\n${ROUTER_LOCKED}` : base
+    return this.routerLocked(agent) ? `${text}\n\n${ROUTER_LOCKED}` : text
   }
 
   /**
@@ -357,7 +477,7 @@ export class Dispatch {
   /**
    * worker 派生出来的 subagent 也受 worker 的工具面约束——至少不能自己再派发。
    *
-   * 为什么需要：9 个工具注册在全局层，所以 worker 的 subagent 也能看到 `dispatch_launch`，
+   * 为什么需要：10 个工具注册在全局层，所以 worker 的 subagent 也能看到 `dispatch_launch`，
    * 于是「一个任务」可以无限往下派生，而 `maxTasksPerSession` 只按主会话计数。
    * 上游用 `limitSubagent()` 把 subagent 限制到 worker 的工作工具，这里对齐它的**边界部分**：
    * 收走全部 `dispatch_*`，保留读写与执行（subagent 的职责本来就是干活）。
@@ -488,6 +608,99 @@ export class Dispatch {
   }
 
   /**
+   * 校验并归一 `depends_on`（PRD-02 §4.1 / §5）。
+   *
+   * 顺序是刻意的，每一步对应一个明确的错误码：
+   *
+   * 1. **形状**：必须是数组、元素必须是字符串（`null` / `undefined` 当没传）；
+   * 2. **去空 + 去重**：保留首次出现的顺序——`depends_on` 的声明顺序就是看板与
+   *    `dispatch_inspect` 里的展示顺序，重排会让「A、B」变成「B、A」；
+   * 3. **数量上限** `maxDependsOn`：超过直接报错，**不静默截断**。少一条依赖
+   *    等于让后继在错误的时机开跑，而那种错在账本里看起来完全正常（状态、报告
+   *    都对，只是顺序错了），事后极难发现；
+   * 4. **存在性**：必须在活表或退休留痕里，否则 `UNKNOWN_DEPENDENCY`；
+   * 5. **自引用**：不能包含自己的 id；
+   * 6. **环**：从每个前置沿 `dependsOn` 做 DFS，有环报 `DEPENDENCY_CYCLE`。
+   *    正常路径构造不出环（只能指向已存在的任务；批内只能指向前面的下标），
+   *    这一步是防御**账本被手工改过**——有环的链会永远等下去，不会报错也不会结束。
+   *
+   * 调用点必须在 `table.add` 之前：任一步抛错都不能留下半条任务（PRD-02 §6）。
+   *
+   * @param {object} agent 调用者。**目前不参与判定**：跨批依赖允许引用其它会话的
+   *   任务（PRD-02 §10 决策 2），所以这里不做归属校验；保留这个参数是为了与 PRD
+   *   的签名一致，也让以后「按会话收紧可依赖范围」有一个明确的落点。
+   * @param {object} input `launch()` 的输入（读取 `dependsOn`）
+   * @param {string} taskId 这条任务自己的 id（自引用检查用）
+   * @returns {string[]} 归一后的前置 id（去重、去空、保持声明顺序）
+   */
+  #resolveDependencies(agent, input, taskId) {
+    const raw = input?.dependsOn
+    if (raw === undefined || raw === null) return []
+    if (!Array.isArray(raw)) throw fail('BAD_ARGS', 'depends_on 必须是任务 id 数组')
+    const seen = new Set()
+    const ids = []
+    for (const item of raw) {
+      if (item === undefined || item === null) continue
+      if (typeof item !== 'string') {
+        throw fail('BAD_ARGS', `depends_on 里只能放任务 id 字符串，收到的是「${String(item)}」`)
+      }
+      const id = item.trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      ids.push(id)
+    }
+    if (!ids.length) return ids
+    const max = Math.max(0, Math.floor(Number(this.config.maxDependsOn) || 0))
+    if (ids.length > max) {
+      throw fail('BAD_ARGS', `一个任务最多声明 ${max} 个前置（收到 ${ids.length} 个）。`
+        + '依赖少一条会让后继在错误的时机开跑，所以这里直接报错，不静默截断')
+    }
+    for (const id of ids) {
+      if (id === taskId) {
+        throw fail('BAD_ARGS', `depends_on 不能包含任务自己（${taskId}）`)
+      }
+      if (!this.resolveTask(id)) {
+        throw fail('UNKNOWN_DEPENDENCY', `没有任务 ${id}：depends_on 只能引用活任务或退休留痕`
+          + '（先用 dispatch_list 查现有任务；本批内的前后关系用 depends_on_index）')
+      }
+    }
+    this.#assertNoDependencyCycle(ids)
+    return ids
+  }
+
+  /**
+   * 沿 `dependsOn` 边做 DFS，检测已存在于账本里的依赖环（PRD-02 §6）。
+   *
+   * 为什么必须查「整条链」而不是只看直接前置：`launch` 只新增**出边**，所以新任务
+   * 自己不可能成环；可能成环的是账本里已经存在的 A → B → A（手工改过 tasks.json、
+   * 或将来某条重开路径写坏了）。这种环不会报错，只会让链上的任务永远 `queued`，
+   * 占着 `maxTasksPerSession` 的名额却不占 worker 位——从看板上看就是「排队中」，没人能解释。
+   *
+   * @param {string[]} ids 待检查的入口节点（新的前置）
+   */
+  #assertNoDependencyCycle(ids) {
+    /** 当前 DFS 栈上的节点：再次遇到就是环。 */
+    const visiting = new Set()
+    /** 已经完全展开过的节点：同一条边不必重复走。 */
+    const finished = new Set()
+    const walk = (id, path) => {
+      if (finished.has(id)) return
+      if (visiting.has(id)) {
+        throw fail('DEPENDENCY_CYCLE', `依赖成环：${[...path, id].join(' → ')}。`
+          + '环上的任务都在等对方，永远不会开始')
+      }
+      visiting.add(id)
+      const task = this.table.get(id)
+      for (const next of Array.isArray(task?.dependsOn) ? task.dependsOn : []) {
+        walk(next, [...path, id])
+      }
+      visiting.delete(id)
+      finished.add(id)
+    }
+    for (const id of ids) walk(id, [])
+  }
+
+  /**
    * 派发一个任务：登记 → 排队 → 由 pump 按并发位启动。
    * 立即返回，不等子会话干活。
    *
@@ -496,8 +709,14 @@ export class Dispatch {
    * 不传时本函数的行为与 0.8.x **逐字相同**——这是回滚保证：只要有任何一个调用方
    * 没带这个参数，它就走的是完全没有改过的那条路径。
    *
+   * **复用会话（plans/08 阶段 2 · 模型 B）**：传了 `input.handoffFrom` 时照常新建
+   * 一条任务记录，但把 `workerSessionId` / `threadId` 指向来源任务的子会话
+   * （见 `#launchReused()`）。它与 `continue_task_id` 是两件事：前者有独立记录，
+   * 后者没有。`allowSessionReuse: false` 时这一支降级为普通新派，并在返回值里
+   * 留一条 note（`reuseNotice()`），绝不静默忽略参数。
+   *
    * @param {object} agent 调用者（主会话）
-   * @param {{title: string, brief: string, cwd?: string, workspace?: string, createWorkspace?: boolean, model?: string, agentPreset?: string, permissionPreset?: string, group?: string, continueTaskId?: string}} input
+   * @param {{title: string, brief: string, cwd?: string, workspace?: string, createWorkspace?: boolean, model?: string, agentPreset?: string, permissionPreset?: string, group?: string, continueTaskId?: string, handoffFrom?: string, handoffReason?: string, noReuse?: boolean, dependsOn?: string[]}} input
    */
   async launch(agent, input) {
     // 续派要在**任何**登记动作之前分流：走过去就会被建出一条新任务，
@@ -505,11 +724,41 @@ export class Dispatch {
     if (input.continueTaskId !== undefined && input.continueTaskId !== null && input.continueTaskId !== '') {
       return this.continueLaunch(agent, input)
     }
+    const handoffId = typeof input.handoffFrom === 'string' ? input.handoffFrom.trim() : ''
+    /**
+     * 优先级链（补充口径）：**`no_reuse: true` > `handoff_from` > 都不传**。
+     *
+     * `no_reuse` 是逃生门：调用方（大模型）明确判断「这次不该接上一轮」时，
+     * 即使同一条调用里还带着 `handoff_from` 也必须新开。它**不是错误组合**——
+     * 用参数冲突把逃生门挡住，只会让调用方卡在「想走却走不了」。
+     *
+     * `allowSessionReuse: false` 是部署级的回滚开关，排在 `no_reuse` 之后：
+     * 两者都关时，返回值解释「因为 no_reuse」更容易让人理解当场发生了什么。
+     */
+    const forcedFresh = input.noReuse === true
+    const reuseSession = !forcedFresh && handoffId !== '' && this.config.allowSessionReuse !== false
+    const degradedNote = handoffId !== '' && !reuseSession
+      ? (forcedFresh
+          ? 'no_reuse=true：已按 no_reuse 强制新开会话，忽略 handoff_from。'
+            + `任务 ${handoffId} 的子会话没有被使用，本次是一条独立的普通新任务。`
+          : `配置 allowSessionReuse=false：本次已降级为普通新派，没有沿用任务 ${handoffId} 的子会话。`
+            + '要恢复复用请打开该配置；要显式另起会话请去掉 handoff_from。')
+      : undefined
     const used = this.quotaUsed(agent.id)
     if (used >= this.config.maxTasksPerSession) {
       throw new Error(`本会话还有 ${used} 个未收尾的任务，达到上限 ${this.config.maxTasksPerSession}；`
         + '请先取消或等待它们结束（归档与超过 24 小时的已结算任务不计入）')
     }
+    /**
+     * 任务 id 提前生成（PRD-02 §4.1）：依赖校验必须发生在 `table.add` **之前**，
+     * 而「自引用」只能拿这条任务自己的 id 去比。id 只是 `newTaskId()` 的进程内计数，
+     * 提前取不会改变任何可观察行为——工作区解析失败时它被丢弃，账本里什么都没有。
+     */
+    const id = newTaskId()
+    // 未知 id / 自引用 / 超过 `maxDependsOn` / 成环都在这里收口：全部抛错且不登记任务
+    // （PRD-02 §6「校验在 table.add 之前」）。
+    const dependsOn = this.#resolveDependencies(agent, input, id)
+    if (reuseSession) return this.#launchReused(agent, input, handoffId, id, dependsOn)
 
     /**
      * 显式参数与「记住的设置」谁优先——本函数最容易改错的一处，规则写死在这里：
@@ -579,7 +828,6 @@ export class Dispatch {
       }
     }
 
-    const id = newTaskId()
     const title = oneLine(input.title, 120) || '未命名任务'
     const brief = String(input.brief ?? '')
 
@@ -635,16 +883,217 @@ export class Dispatch {
       ...(autoTarget ? { workspaceAuto: true } : {}),
       ...(cwdInput ? { cwdExplicit: cwdInput } : {}),
       ...(input.group ? { group: input.group } : {}),
+      /**
+       * 前置依赖（PRD-02 §4.2）：**按声明顺序**保留；去重、去空、查存在性、查环
+       * 都在 `#resolveDependencies()` 里做完了，这里只负责落账。
+       *
+       * 没有依赖时整个键都不写：旧账本、旧调用方的任务形状因此与今天逐字相同，
+       * `#annotateDependencies()` 读到 undefined 也不会凭空补一个空数组。
+       */
+      ...(dependsOn.length ? { dependsOn } : {}),
       model: input.model,
       agentPreset: input.agentPreset,
       permissionPreset: input.permissionPreset,
     }
     this.table.add(task)
+    // 回滚开关的留痕：只挂在这条任务对象上（WeakMap），不落盘、不进卡片的公开形状。
+    if (degradedNote) this.reuseNotices.set(task, degradedNote)
     // 第一次从某个会话派发 → 这个会话就是「主会话」，进路由模式（改代码只能派下去）。
     // 放在 refreshHint 之前：提示文本的求值函数会读 routers，先锁再刷能把新文本带上。
     this.enforceRouter(agent)
     this.refreshHint(agent)
-    this.schedulePersist()
+    // 任务登记必须先落盘再 pump：否则进程在「pump 已经建了会话、账本还没写」
+    // 之间被 kill，会留下一个没有任务记录的孤儿 worker。
+    await this.persistCritical()
+    void this.pump()
+    return task
+  }
+
+  /**
+   * 读取一次派发被降级的原因（`allowSessionReuse: false` 时）。
+   *
+   * 只给工具层用：任务落盘时**不**带它（WeakMap），所以重启后不会出现
+   * 「一条历史任务永远带着一句『本次已降级』」的假事实。
+   *
+   * @param {object} task
+   * @returns {string|undefined}
+   */
+  reuseNotice(task) {
+    return task ? this.reuseNotices.get(task) : undefined
+  }
+
+  /**
+   * 复用会话前的**四条硬校验**（plans/08 §四）。
+   *
+   * 顺序刻意是「便宜的判据在前」：先查 id 是否存在（调用方最可能打错），再查
+   * 退休/归档（它已经不是可用的历史），再查归属（它不是你的），再查它是否结算
+   * （一个会话同一时刻只能跑一个回合），最后才查形状、模型与工作区。
+   * 这样报错永远指向真正的病因，而不是笼统的「不能复用」。
+   *
+   * 为什么必须要求来源任务**已结算**：复用是把一条新要求投进**同一个会话**。
+   * 来源任务还在 running/queued 时，那条会话正被一个回合占着；再投一条只会
+   * 让两个任务共用同一段上下文，报告归属与取消都会立刻串账（§三.1、§三.3）。
+   *
+   * 为什么模型/preset 必须一致而不是「新任务覆盖」：模型与权限在会话创建时
+   * 定死（§三.4），复用沿用旧会话就是沿用旧模型。允许「填一个新模型」会让
+   * 工具 schema 承诺一件做不到的事——静默用旧模型比直接拒绝更贵。
+   *
+   * @param {object} agent 调用者（主会话）
+   * @param {object} input `launch()` 的输入
+   * @param {string} taskId 来源任务 id
+   * @returns {Promise<object>} 通过校验的来源任务
+   */
+  async #handoffSource(agent, input, taskId) {
+    const parent = this.resolveTask(taskId)
+    if (!parent) {
+      throw new Error(`没有任务 ${taskId}：无法沿用它的子会话。`
+        + '先用 dispatch_list 查现有任务，或去掉 handoff_from 新派一个任务')
+    }
+    if (this.isRetired(parent)) {
+      throw new Error(`任务 ${taskId} 已退休（记录已移出活表，原因：${parent.retiredReason}）：`
+        + '它的会话已经没有可核对的上下文，不能复用。请新派一个任务')
+    }
+    if (parent.archivedAt) {
+      throw new Error(`任务 ${taskId} 已归档（${parent.archivedAt}）：归档是只读冻结，不能拿它的会话接着干。`
+        + '请新派一个任务')
+    }
+    if (parent.parentSessionId !== agent.id) {
+      throw new Error(`任务 ${taskId} 不属于本会话（它是 ${parent.parentSessionId} 派出的）：不能复用别人的子会话`)
+    }
+    if (!SETTLED.has(parent.status)) {
+      throw new Error(`任务 ${taskId} 还在 ${parent.status}，不能复用它的子会话：`
+        + '一个子会话同一时刻只能跑一个回合。请等它结算后再用 handoff_from，或去掉参数新派一个任务')
+    }
+    if (!isWorkerSessionId(parent.workerSessionId)) {
+      throw new Error(`任务 ${taskId} 的子会话 id「${parent.workerSessionId ?? '(空)'}」不是本插件建的`
+        + `（应以「${WORKER_PREFIX}」开头）：不能复用`)
+    }
+
+    const changed = (label, given, actual) => {
+      const value = given === undefined || given === null ? '' : String(given).trim()
+      if (!value) return ''
+      const current = actual === undefined || actual === null ? '' : String(actual).trim()
+      return value === current ? '' : `${label}（来源任务用的是「${current || '(部署默认)'}」，这次给的是「${value}」）`
+    }
+    const optionDiff = [
+      changed('model', input.model, parent.model),
+      changed('agent_preset', input.agentPreset, parent.agentPreset),
+      changed('permission_preset', input.permissionPreset, parent.permissionPreset),
+    ].filter(Boolean)
+    if (optionDiff.length) {
+      throw new Error(`复用不能换模型或 preset：${optionDiff.join('；')}。`
+        + '这些参数在会话创建时已经定死，复用沿用原来的模型。要换请去掉 handoff_from 新开一个任务')
+    }
+
+    // 工作区 / cwd：复用是「在**同一条会话、同一个目录**里接着干」，跨目录会让任务 A
+    // 的代码被任务 B 改掉（§三.5）。这里复用 `sameDir()`（Windows 大小写/分隔符不敏感）。
+    if (!parent.cwd) {
+      throw new Error(`任务 ${taskId} 没有记录工作目录，无法确认这次复用是否会跨目录。`
+        + '请去掉 handoff_from 新派一个任务，并显式给 cwd')
+    }
+    const cwdInput = typeof input.cwd === 'string' ? input.cwd.trim() : ''
+    if (cwdInput && !sameDir(cwdInput, parent.cwd)) {
+      throw new Error(`复用的工作目录与任务 ${taskId} 不一致：这次给的是「${cwdInput}」，`
+        + `该任务的工作目录是「${parent.cwd}」。复用沿用来源任务的子会话与目录——`
+        + '要在别的目录干活，请去掉 handoff_from 新派一个任务')
+    }
+    const workspaceRef = typeof input.workspace === 'string' ? input.workspace.trim() : ''
+    if (workspaceRef) {
+      const asked = await this.workspaces.resolve(workspaceRef)
+      if (!asked) {
+        throw new Error(`复用指定的工作区「${workspaceRef}」解析不到。复用沿用来源任务的工作区`
+          + `（${parent.workspaceTitle ?? parent.workspaceId ?? parent.cwd}）`)
+      }
+      if (parent.workspaceId) {
+        if (asked.id !== parent.workspaceId) {
+          throw new Error(`复用的工作区与任务 ${taskId} 不一致：这次是「${asked.title}」，`
+            + `该任务在「${parent.workspaceTitle ?? parent.workspaceId}」。复用沿用来源任务的工作区——`
+            + '要在别的工作区干活，请去掉 handoff_from 新派一个任务')
+        }
+      } else if (!sameDir(asked.path, parent.cwd)) {
+        throw new Error(`复用的工作区与任务 ${taskId} 不一致：这次是「${asked.title}」（${asked.path}），`
+          + `该任务在「${parent.cwd}」。复用不能跨工作区`)
+      }
+    }
+    return parent
+  }
+
+  /**
+   * 新建一条**复用来源任务子会话**的任务（plans/08 阶段 2 · 模型 B）。
+   *
+   * 与普通新派唯一的结构差别是三个字段：`workerSessionId` 指向来源、`threadId`
+   * 复制来源（同一条线程）、`parentTaskId` 记下来源。其余（标题、简报、报告链、
+   * 看板行、状态）全部独立——这正是模型 B 相对模型 A 的全部价值。
+   *
+   * 为什么 `cwd` / `workspaceId` 直接抄来源而不是重新解析：会话的目录已经在
+   * `createWorker` 时定死，重新解析只能得到「这次想要哪个目录」，改不了会话事实。
+   * 抄来源既不会凭空建出日期工作区，也不会让任务的元数据与会话实际所在位置分家。
+   *
+   * @param {object} agent 调用者（主会话）
+   * @param {object} input `launch()` 的输入
+   * @param {string} taskId 来源任务 id
+   * @param {string} id 这条新任务的 id（由 `launch()` 提前生成，依赖校验已经用过它）
+   * @param {string[]} dependsOn 已校验的前置 id 数组
+   */
+  async #launchReused(agent, input, taskId, id, dependsOn = []) {
+    const parent = await this.#handoffSource(agent, input, taskId)
+    const title = oneLine(input.title, 120) || '未命名任务'
+    const brief = String(input.brief ?? '')
+    const threadId = typeof parent.threadId === 'string' && parent.threadId
+      ? parent.threadId
+      : newThreadId(parent.id)
+    /**
+     * 交接原因（补充口径）：调用方（大模型）对自己判断的一句话解释。
+     *
+     * **只用于审计与事后解释**：插件不拿它做任何相似度、权重或阈值判断，
+     * 连续性由模型自己判断。超长按 `HANDOFF_REASON_MAX_CHARS` 截断，并在任务上
+     * 留 `handoffReasonTruncated`（原始长度），与 `briefTruncated` 同一套做法。
+     */
+    const reason = typeof input.handoffReason === 'string' ? input.handoffReason.trim() : ''
+    const storedReason = reason ? clip(reason, HANDOFF_REASON_MAX_CHARS) : ''
+    const task = {
+      id,
+      title,
+      brief,
+      parentSessionId: agent.id,
+      // 复用：会话与线程都指向来源任务；这是与普通新派**唯一**的结构差异。
+      workerSessionId: parent.workerSessionId,
+      threadId,
+      parentTaskId: parent.id,
+      // 审计字段：`agent` = 调用方给了理由（模型判断的痕迹）；`explicit` = 只给了
+      // handoff_from。两者都是显式复用，没有任何自动推断。
+      handoffSource: reason ? HANDOFF_SOURCE.AGENT : HANDOFF_SOURCE.EXPLICIT,
+      ...(storedReason ? { handoffReason: storedReason } : {}),
+      ...(reason.length > HANDOFF_REASON_MAX_CHARS ? { handoffReasonTruncated: reason.length } : {}),
+      status: 'queued',
+      attempt: 1,
+      createdAt: now(),
+      updatedAt: now(),
+      turnStartedAt: undefined,
+      lastReportAt: undefined,
+      lastText: '',
+      reports: [],
+      cwd: parent.cwd,
+      workspaceId: parent.workspaceId,
+      workspaceTitle: parent.workspaceTitle,
+      // 会话实际挂在哪个工作区也一起复制：`start()` 的复用分支不会重新 placement，
+      // 不复制的话看板会把这条显示成「没有归属」。
+      hostWorkspaceId: parent.hostWorkspaceId,
+      hostWorkspaceTitle: parent.hostWorkspaceTitle,
+      // 模型/preset 在会话创建时定死，复用沿用原值（`#handoffSource` 已挡住「换模型」）。
+      model: parent.model,
+      agentPreset: parent.agentPreset,
+      permissionPreset: parent.permissionPreset,
+      // 复用任务同样可以声明前置（PRD-02 §4.1）：语义与普通新派完全一致，
+      // 「等上一批的 A 做完，再用已结算任务的会话接着干」是合法组合。
+      ...(dependsOn.length ? { dependsOn } : {}),
+      ...(input.group ? { group: input.group } : {}),
+    }
+    this.table.add(task)
+    this.enforceRouter(agent)
+    this.refreshHint(agent)
+    // 与普通派发同一条因果：任务登记必须先落盘再 pump，避免「会话已经在跑、账本没写」。
+    await this.persistCritical()
     void this.pump()
     return task
   }
@@ -928,13 +1377,219 @@ export class Dispatch {
    */
   async pump() {
     if (this.disposed) return
+    // 恢复窗口内不推进（PRD-02 §4.6）：见 constructor 里 `restoring` 的注释。
+    if (this.restoring) return
+    /**
+     * 依赖判定**先于**取任务（PRD-02 §4.3）：`blockedBy` 是唯一的准入位。
+     * `#annotateDependencies()` 只写派生的看板字段，不改状态、不动队列；没有
+     * `dependsOn` 的任务这一步什么都不写，行为与今天完全一致。
+     */
+    const doomed = this.#annotateDependencies()
+    if (doomed.length) {
+      // 前置已经确定没成：当场收敛（PRD-02 §4.4「在下一次 pump() 内变 cancelled」）。
+      this.#cancelDependents(doomed)
+      // 取消改变了前置状态；重新标注一次，避免拿旧 `blockedBy` 放跑一条后继。
+      this.#annotateDependencies()
+    }
     const launching = []
     for (;;) {
-      const task = this.table.takeRunnable()
+      const task = this.table.takeRunnable(candidate => !candidate.blockedBy)
       if (!task) break
       launching.push(this.#launchOne(task))
     }
     await Promise.all(launching)
+  }
+
+  /**
+   * 计算每条**排队中**任务的 `blockedBy` / `blockedReason`（PRD-02 §4.3）。
+   *
+   * 三个边界：
+   * - 只扫 `table.queue`：准入只对队列里的任务有意义，已结算的任务不该有「被挡」这个概念；
+   * - **只写派生字段**：不改状态、不动队列顺序、不启动会话。所以 `maxWorkers` 已满时
+   *   调用它也不会产生副作用（`takeRunnable` 会提前返回，下一轮再判）；
+   * - 清空是写 `undefined` 而不是 `delete`：序列化时两者都消失，但 `undefined` 不会
+   *   让对象的键形状在「曾被挡过」之后与「从没被挡过」不同。
+   *
+   * @returns {Array<{task: object, cancelReason: string, errorCode: string}>}
+   *   前置已经**确定没成**、应当连带取消的后继。调用方决定何时取消（pump / restore）。
+   */
+  #annotateDependencies() {
+    const doomed = []
+    // 先取快照：本轮不修改队列（取消在调用方），但 `settle()` 会改，迭代中不能边读边改。
+    for (const id of [...this.table.queue]) {
+      const task = this.table.get(id)
+      if (!task || task.status !== 'queued') continue
+      const verdict = this.#blockedStateOf(task)
+      task.blockedBy = verdict.blockedBy
+      task.blockedReason = verdict.blockedReason
+      if (!verdict.blockedBy) continue
+      if (verdict.blockedReason === BLOCK_REASONS.FAILED) {
+        doomed.push({
+          task,
+          cancelReason: CANCEL_REASONS.DEPENDENCY_FAILED,
+          errorCode: ERROR_CODES.DEPENDENCY_FAILED,
+        })
+      } else if (verdict.blockedReason === BLOCK_REASONS.MISSING) {
+        doomed.push({
+          task,
+          cancelReason: CANCEL_REASONS.DEPENDENCY_MISSING,
+          errorCode: ERROR_CODES.DEPENDENCY_MISSING,
+        })
+      }
+    }
+    return doomed
+  }
+
+  /**
+   * 一条任务的依赖判定——PRD-02 §4.3 的规则表**逐行**落在这里，只读。
+   *
+   * | 前置状态 | 结论 |
+   * | --- | --- |
+   * | `done` | 满足，继续看下一个 |
+   * | `queued` / `running` | 等待，`blockedReason: 'running'` |
+   * | `failed` / `cancelled` / `interrupted` / `ended` / `blocked` | 不满足，`'failed'` |
+   * | 不在活表、退休留痕 `status === 'done'` | 满足（它做完了，只是被移出计算） |
+   * | 不在活表、退休留痕非 done 或不存在 | `'missing'` |
+   *
+   * 返回**第一个**不满足的前置（声明顺序），因为看板与抽屉只需要说「现在等谁」；
+   * 全部满足时两个字段都是 `undefined`。
+   *
+   * @param {object} task
+   * @returns {{blockedBy?: string, blockedReason?: string}}
+   */
+  #blockedStateOf(task) {
+    const deps = Array.isArray(task.dependsOn) ? task.dependsOn : []
+    for (const id of deps) {
+      const dep = this.table.get(id)
+      if (!dep) {
+        const trace = this.retired.get(id)
+        // 退休留痕 `done` = 它已经做完、只是被移出计算（PRD-02 §4.3 最后两行）。
+        if (trace && trace.status === 'done') continue
+        return { blockedBy: id, blockedReason: BLOCK_REASONS.MISSING }
+      }
+      if (dep.status === 'done') continue
+      // 还没结算 → 正常等待：任务留在 queued，不占 worker 并发位；前置结算时走
+      // settle → pump 的现成链路触发后继，不需要定时器（PRD-02 §4.3「触发点」）。
+      if (dep.status === 'queued' || dep.status === 'running') {
+        return { blockedBy: id, blockedReason: BLOCK_REASONS.RUNNING }
+      }
+      return { blockedBy: id, blockedReason: BLOCK_REASONS.FAILED }
+    }
+    return { blockedBy: undefined, blockedReason: undefined }
+  }
+
+  /** 直接依赖某个任务的全部任务（扫全表，不只看队列：旧数据里两者可能不一致）。 */
+  #dependentsOf(taskId) {
+    const found = []
+    for (const task of this.table.tasks.values()) {
+      if (!Array.isArray(task.dependsOn) || !task.dependsOn.includes(taskId)) continue
+      found.push(task)
+    }
+    return found
+  }
+
+  /**
+   * 把「前置没成」的后继**连带取消**（PRD-02 §4.4）。BFS，不做深递归。
+   *
+   * 三条规则：
+   * - **只动 `queued`**：已经在 `running` 的后继不回溯、不打断。正常路径不会出现
+   *   （后继只在前置 `done` 后才启动），只有「前置被 retry 重开、又再次失败」这种
+   *   事后情况才会遇到；那时按 PRD 定义为不回溯，只记一条 warn；
+   * - **幂等**：`seen` 挡重复入队，`TaskTable.settle()` 对已结算任务返回 `false`，
+   *   所以同一条后继不会被取消两次，也不会覆盖别人的取消原因；
+   * - **原因会传递**：B 因 A 失败被取消后，C（依赖 B）的原因仍是 `dependency_failed`
+   *   ——对 C 来说，它的前置确实「没成」。
+   *
+   * 重入闸 `#cascadingDependencies` 见字段注释：`settle()` 会触发嵌套 `pump()`，
+   * 让最外层的工作队列独自走完整条链，内层直接放行，避免 O(n²) 的重复扫描。
+   *
+   * @param {Array<{task: object, cancelReason: string, errorCode: string}>} seeds
+   * @returns {number} 本次真正取消了几个任务（供恢复收敛判断是否需要再扫一遍）
+   */
+  #cancelDependents(seeds) {
+    if (this.#cascadingDependencies) return 0
+    this.#cascadingDependencies = true
+    let cancelled = 0
+    try {
+      const worklist = Array.isArray(seeds) ? [...seeds] : []
+      const seen = new Set()
+      while (worklist.length) {
+        const item = worklist.shift()
+        const task = item?.task
+        if (!task || seen.has(task.id)) continue
+        seen.add(task.id)
+        if (task.status === 'running') {
+          this.warn(`${LOG_PREFIX} 任务 %s 正在运行，但它的前置 %s 没成：不回溯、不打断（PRD-02 §4.4）`,
+            task.id, task.blockedBy ?? '(未知)')
+          continue
+        }
+        if (task.status !== 'queued') continue
+        // 原因先落在任务上，再取消：`cancel()` 那条路径也会写 `cancelReason`，
+        // 但依赖取消不经过 `cancel()`（它没有子会话可取消），必须在这里自己写。
+        task.cancelReason = item.cancelReason
+        task.errorCode = item.errorCode
+        // `settle` 幂等：重复取消在这里被挡下，不会产生第二次通知/第二次写盘。
+        if (!this.settle(task, 'cancelled')) continue
+        cancelled += 1
+        for (const next of this.#dependentsOf(task.id)) {
+          if (next.status === 'running') {
+            this.warn(`${LOG_PREFIX} 任务 %s 正在运行，但它的前置 %s 被连带取消：不回溯、不打断（PRD-02 §4.4）`,
+              next.id, task.id)
+            continue
+          }
+          if (next.status !== 'queued') continue
+          // 让看板/抽屉说清「为什么没执行」：原因落在任务上，取消之后再补就晚了。
+          next.blockedBy = next.blockedBy ?? task.id
+          next.blockedReason = next.blockedReason ?? BLOCK_REASONS.FAILED
+          worklist.push({
+            task: next,
+            cancelReason: CANCEL_REASONS.DEPENDENCY_FAILED,
+            errorCode: ERROR_CODES.DEPENDENCY_FAILED,
+          })
+        }
+      }
+    } finally {
+      this.#cascadingDependencies = false
+    }
+    return cancelled
+  }
+
+  /**
+   * 一条任务结算后，把「还在排队等它」的后继连带取消（PRD-02 §4.4）。
+   *
+   * 为什么挂在 `settle()` 里、且在 `pump()` **之后**：pump 负责让**满足条件**的后继
+   * 启动，这里负责让**永远满足不了**的后继有一个确定的终局。两件事分开写，取消才不会
+   * 和启动在同一个循环里互相干扰；顺序反了的话，先取消会改变队列，pump 就得重扫。
+   *
+   * `done` 直接返回：前置做成了，后继由 pump 正常启动，没有要取消的东西。
+   * 其余终态都向后传递；`blockedReason`/`blockedBy` 已经由 annotate 写好的不覆盖
+   * （它们指向的是更早的那个未满足前置，信息更准）。
+   *
+   * @param {object} settledTask 刚结算的任务
+   */
+  #failDependents(settledTask) {
+    if (!settledTask || settledTask.status === 'done') return
+    const seeds = []
+    for (const task of this.#dependentsOf(settledTask.id)) {
+      if (task.status === 'running') {
+        this.warn(`${LOG_PREFIX} 任务 %s 正在运行，但它的前置 %s 结算成 %s：不回溯、不打断（PRD-02 §4.4）`,
+          task.id, settledTask.id, settledTask.status)
+        continue
+      }
+      if (task.status !== 'queued') continue
+      // 不在 `queue` 数组里也要收：`#annotateDependencies()` 只扫队列，这一支是
+      // 它的补集（旧数据里 status 与 queue 可能不一致），保证后继不会永远挂着。
+      if (!task.blockedBy) {
+        task.blockedBy = settledTask.id
+        task.blockedReason = BLOCK_REASONS.FAILED
+      }
+      seeds.push({
+        task,
+        cancelReason: CANCEL_REASONS.DEPENDENCY_FAILED,
+        errorCode: ERROR_CODES.DEPENDENCY_FAILED,
+      })
+    }
+    if (seeds.length) this.#cancelDependents(seeds)
   }
 
   /** 启动一个任务；失败则结算成 failed 并回报主会话。 */
@@ -944,7 +1599,7 @@ export class Dispatch {
     } catch (error) {
       task.error = String(error)
       this.settle(task, 'failed')
-      this.schedulePersist()
+      await this.persistCritical()
       this.ctx.logger?.error?.(`${LOG_PREFIX} 任务 %s 启动失败: %s`, task.id, String(error))
       await this.relayFailure(task)
     }
@@ -961,10 +1616,21 @@ export class Dispatch {
     // 结算就不再占后台巡检：任务已经结束，再巡检只会重复结算。
     this.stopBackgroundWatch(task.id)
     void this.pump()
+    /**
+     * 前置没成 → 后继连带取消（PRD-02 §4.4）。放在 `pump()` 之后：
+     * pump 已经让「满足条件」的后继启动，这里只收拾「永远满足不了」的那些。
+     * `settle()` 自身幂等（`TaskTable.settle`），所以级联取消不会重复取消同一条。
+     */
+    this.#failDependents(task)
     void this.maybeSummarize(task)
     // P0-5：结算后立刻判一次封顶。放在这里而不是放定时器里，是因为
     // 「体积在增长」这件事恰好发生在结算点；幂等，多调几次没有代价。
     this.enforceLedgerCap()
+    // 结算是账本里最不能丢的事实，但 `settle()` 是同步方法，不能在这里
+    // 起一个无人等待的异步写盘（会与调用方的清理动作竞态）。所有调用点
+    // 都在 async 方法里，由它们在结算后 `await persistCritical()`；这里
+    // 只留防抖兜底，防止将来新增调用点漏掉。
+    this.schedulePersist()
     return true
   }
 
@@ -1053,7 +1719,7 @@ export class Dispatch {
       task.error = String(error?.message ?? error)
       this.warn(`${LOG_PREFIX} 任务 %s 目录准备失败: %s`, task.id, task.error)
       this.settle(task, 'failed')
-      this.schedulePersist()
+      await this.persistCritical()
       await this.relayFailure(task)
       return false
     }
@@ -1064,6 +1730,19 @@ export class Dispatch {
     task.startedAt = now()
     task.updatedAt = task.startedAt
     this.schedulePersist()
+
+    /**
+     * 复用会话的任务（plans/08 阶段 2）：**不建会话、不重新 placement、不建任务目录**。
+     *
+     * 三条都不能做：
+     * - `createWorker` 会新开或换号会话，等于把「复用」静默撤销；
+     * - `placementFor` 在来源工作区被删时会顺手建一个日期工作区，而任务实际仍住在
+     *   来源会话里，元数据会与事实分家；
+     * - `taskDirRoot` 会给出一个新目录，来源会话的 cwd 已经定死，切过去就跨目录了。
+     *
+     * 所以这一支只做一件事：确认来源会话还活着，然后投递交接摘要。
+     */
+    if (task.parentTaskId) return this.#startReused(task)
 
     // 每任务目录（可选）：配了 `taskDirRoot` 就先把目录准备好，再把 cwd 指过去。
     // 放在建会话之前，是因为 prepare 失败时不该留下一个孤儿 worker 会话。
@@ -1123,6 +1802,64 @@ export class Dispatch {
   }
 
   /**
+   * 复用分支的启动：确认来源会话仍存活，然后投递**交接摘要**。
+   *
+   * 为什么找不到会话时必须让任务失败，而不是 `createWorker` 新建一条：
+   * 新建出来的会话是一个空上下文，worker 会以为自己「刚被派了一个新任务」，
+   * 而用户以为「上下文接上了」。这种错不是报错，是**看起来成功**——最难发现。
+   * 所以这里明确失败，并把「不要 handoff_from」的下一步写进错误里。
+   */
+  async #startReused(task) {
+    const parent = this.resolveTask(task.parentTaskId)
+    // 只确认存活；拿到的 Agent 不需要再操作（投递走 sessions.deliver）。
+    await this.#resolveReusedAgent(task)
+    if (this.abortIfSettled(task, '复用确认子会话之后')) return task
+
+    task.lastText = ''
+    await this.sessions.deliver(
+      task.workerSessionId,
+      `${task.id}:start`,
+      handoffPrompt(task, parent),
+      { mode: 'queue' },
+    )
+    // 中止时**不能** cancel 这条 agent：它是来源任务的会话，后续任务还在用。
+    // 普通派发的会话是这条任务独占的，才可以顺手取消。
+    if (this.abortIfSettled(task, '投递交接摘要之后')) return task
+
+    this.log(`${LOG_PREFIX} 任务 %s 已启动（复用子会话 %s，来源任务 %s，工作目录 %s）`,
+      task.id, task.workerSessionId, task.parentTaskId, task.cwd)
+    return task
+  }
+
+  /**
+   * 确认一个复用目标的子会话还活着。
+   *
+   * 优先用 `resolveAgent()`（与 `message()` / `retry()` 同一条探测口径）；
+   * 它抛错时退回 `ctx.agents` 里的活引用——活引用本身就是「会话存在」的证据，
+   * 不该因为一次探测失败把一条本来能用的会话判死。
+   */
+  async #resolveReusedAgent(task) {
+    const sessionId = task.workerSessionId
+    const live = this.ctx.agents.get(sessionId)
+    let resolved
+    try {
+      resolved = await this.ctx.sessionController.resolveAgent(sessionId)
+    } catch (error) {
+      if (live) return live
+      throw new Error(`任务 ${task.id} 要沿用子会话 ${sessionId}，但无法确认它是否还存在`
+        + `（${oneLine(String(error?.message ?? error), 200)}）：不能新建一条会话冒充复用。`
+        + '请去掉 handoff_from 新派一个任务')
+    }
+    if (!resolved || resolved.error || !resolved.agent) {
+      if (live) return live
+      throw new Error(`任务 ${task.id} 要沿用子会话 ${sessionId}，但它已不存在`
+        + `（${resolved?.error?.code ?? 'not-found'}）：不能新建一条会话冒充复用——那样上下文其实是断的。`
+        + '请去掉 handoff_from 新派一个任务')
+    }
+    return resolved.agent
+  }
+
+  /**
    * 启动流程的中止检查：任务是已结算或插件已卸载时返回 true。
    * 放在每个 await 之后调用。
    */
@@ -1166,13 +1903,36 @@ export class Dispatch {
   async report(agent, input) {
     const task = this.table.byWorker(agent.id)
     if (!task) throw new Error('dispatch_report 只能由被派发的 worker 调用；当前会话不属于任何派发任务')
-    if (task.status === 'cancelled') return { recorded: false, task_id: task.id, note: '任务已取消，报告不再回流' }
+    // 已取消的任务不再写账本：计划也没有可写的宿主，直接回绝（与 recorded:false 同一口径）。
+    if (task.status === 'cancelled') {
+      return {
+        recorded: false,
+        task_id: task.id,
+        plan_accepted: false,
+        plan_truncated: false,
+        note: '任务已取消，报告不再回流',
+      }
+    }
 
     const status = String(input.status || 'progress')
     const summary = String(input.summary ?? '').trim()
     if (!summary) throw new Error('dispatch_report 需要 summary')
 
     const entry = this.#admitEntry(status, input)
+    /**
+     * 计划（PRD-01 §4.2）：**只写 `task.plan`，不进 `entry`**。
+     *
+     * 为什么不写进每条 report entry：`MAX_REPORTS = 50`，12 步 × 50 条会把账本
+     * 放大一个量级，而看板只需要「最新一版」；历史计划没有决策价值。
+     *
+     * 为什么必须在下面的 `settle()` **之前**：终态报告可以带计划，按 PRD 是
+     * 「先应用计划、再结算、然后冻结」。`#applyPlan` 自己会判终态冻结，所以
+     * 结算之后迟到的 `progress` 带计划只会拿到 `plan_accepted:false`。
+     *
+     * 幂等也由 `#applyPlan` 负责：内容相同不更新 `planUpdatedAt`、不追加写盘动作。
+     */
+    const plan = normalizePlan(input.plan, this.config)
+    const planAccepted = this.#applyPlan(task, plan.steps, entry.at)
     task.reports.push(entry)
     if (task.reports.length > MAX_REPORTS) task.reports.splice(0, task.reports.length - MAX_REPORTS)
     task.lastReportAt = entry.at
@@ -1183,9 +1943,24 @@ export class Dispatch {
     // 记下「本回合已经给过终态报告」，供 onWorkerIdle 判断要不要补一条。
     // 用标记而不是时间戳比较，是因为 turnStartedAt 会被每一步 running 刷新。
     if (TERMINAL_REPORT.has(status)) task.reportedSinceTurn = true
-    // progress 不结束任务；其余都是终态。结算后立刻让出并发位给排队任务。
-    if (TERMINAL_REPORT.has(status)) this.settle(task, status)
-    this.schedulePersist()
+    // 终态报告也要过后台活门禁（P0-1）：worker 报 done 时，它起的 dev server
+    // 或 subagent 可能还在改同一个目录。直接 settle 会立刻让出并发位，
+    // 而后台活并不知道自己「被完成」了。此前只有 `onWorkerIdle()` 走门禁，
+    // 于是显式 `dispatch_report(status:'done')` 成了一条完全绕过它的后门。
+    //
+    // 报告本身照常入库、照常回流——worker 的结论不必等后台；被推迟的只有
+    // 「结算」这一件事。终态先记在 `pendingTerminal` 上，等巡检收尾时按
+    // worker 自己给的结论结算，不能退化成 `done`。
+    let deferred = false
+    if (TERMINAL_REPORT.has(status)) {
+      task.pendingTerminal = status
+      deferred = await this.handOffToBackground(task)
+      if (!deferred) {
+        task.pendingTerminal = undefined
+        this.settle(task, status)
+      }
+    }
+    await this.persistCritical()
 
     const admission = this.admissionOf(task, entry)
     this.admissionCounts[admission] += 1
@@ -1236,6 +2011,13 @@ export class Dispatch {
       status: task.status,
       admission,
       projection,
+      // 计划的两个回执（PRD-01 §4.2）：没传 plan 时也是 false —— 语义是
+      // 「本条报告没有一版计划被接受」，而不是「计划被拒绝」。被终态冻结拒绝时
+      // 同样是 false，模型据此知道这版计划没生效。
+      plan_accepted: planAccepted,
+      plan_truncated: plan.truncated,
+      // 状态仍是 running 时给模型一句解释，否则它会以为报告没被接受。
+      ...(deferred ? { deferred: true, note: '报告已记录；后台还有 job/subagent 在跑，任务等后台清空后再结算' } : {}),
       ...(entry.truncated ? { truncated: entry.truncated } : {}),
       grouped: !selfRelay,
       ...(throttled ? { throttled: true } : {}),
@@ -1411,6 +2193,38 @@ export class Dispatch {
       // 只在真被截时出现：一个恒存在的空对象会让「是否截过」变成永远 true。
       ...(Object.keys(truncated).length ? { truncated } : {}),
     }
+  }
+
+  /**
+   * 把一版已经归一化的计划**整版**写进任务（PRD-01 §4.2）。
+   *
+   * 三条语义在这里收口：
+   * - **整版替换**：不做增量合并，worker 不需要 step id；每一步的 status 由 worker 给，
+   *   插件不推断「前面 done 了后面就也算完成」——计划可能被缩减，推断会把事实编出来。
+   * - **终态冻结**：结算之后任何计划更新都被拒（返回 false），避免「明明完了还停在第 2 步」。
+   *   终态报告自己的计划是在 `settle()` 之前调用的，所以那一版能被接受。
+   * - **幂等**：内容完全相同就原样返回 true，**不刷新 `planUpdatedAt`、不额外写盘**。
+   *   重投同一条报告不该让「计划更新时间」往前走，否则看板上的时间会随重投漂移。
+   *
+   * 只改 `task.plan` / `task.planUpdatedAt` 两个字段，不碰 `updatedAt`：计划是报告的
+   * 附属信息，报告本身已经负责刷新 `updatedAt`（见 `report()`）。
+   *
+   * @param {object} task
+   * @param {Array<{text: string, status: string}>|undefined} steps 已归一化的步骤
+   * @param {string} at 本次报告的时间戳（与 `entry.at` 同一个值）
+   * @returns {boolean} 计划是否被接受（幂等命中也算接受）
+   */
+  #applyPlan(task, steps, at) {
+    if (!task || !Array.isArray(steps) || !steps.length) return false
+    // `queued` 还没有 worker 起来，计划没有意义；终态后冻结（PRD-01 §4.2 / §6）。
+    if (task.status === 'queued' || SETTLED.has(task.status)) return false
+    const current = Array.isArray(task.plan) ? task.plan : []
+    const same = current.length === steps.length
+      && current.every((step, index) => step?.text === steps[index].text && step?.status === steps[index].status)
+    if (same) return true
+    task.plan = steps
+    task.planUpdatedAt = at
+    return true
   }
 
   /**
@@ -1615,8 +2429,41 @@ export class Dispatch {
   }
 
   /** 记一条投递结果到任务上（不占报告数组，单独字段）。 */
-  noteDelivery(task, outcome, attempt) {
-    task.delivery = { at: now(), outcome, ...(attempt ? { attempt } : {}) }
+  noteDelivery(task, outcome, attempt, durable) {
+    task.delivery = {
+      at: now(),
+      outcome,
+      ...(attempt ? { attempt } : {}),
+      // true = 已 flush 到持久化日志；false = 宿主不支持/调用失败；
+      // undefined = 这条结果不涉及投递（dropped / recorded / failed）。
+      ...(durable === undefined ? {} : { durable }),
+    }
+  }
+
+  /**
+   * 投递成功后尽量刷一次会话持久化日志，再对生产者确认「已送达」。
+   *
+   * 官方原型 `AgentDelivery.send()` 是「稳定 MessageId → 扫历史 → 投递 →
+   * `sessionPersistence.flush()` → 确认」（plans/05 §1.5）。缺这道屏障时，
+   * 「消息已进收件箱、但事件还没落盘」的崩溃窗口会让重启后重复报告或漏报。
+   *
+   * `flush()` 的签名在本机仍是静态取证（docs/api-contracts.md §8 #3），
+   * 所以整段只作**可选屏障**：拿不到服务或调用抛错都退回弱幂等，并明确
+   * 记在 `task.delivery.durable` 上，由 selfCheck 汇总，绝不假装已持久化。
+   */
+  async #flushSessionPersistence() {
+    const persistence = this.ctx.get('sessionPersistence')
+    if (typeof persistence?.flush !== 'function') return 'unsupported'
+    try {
+      await persistence.flush()
+      return true
+    } catch (error) {
+      if (!this.durabilityWarned) {
+        this.durabilityWarned = true
+        this.warn(`${LOG_PREFIX} sessionPersistence.flush() 不可用（跨重启投递幂等退化为弱级别）: %s`, String(error))
+      }
+      return false
+    }
   }
 
   /**
@@ -1646,7 +2493,8 @@ export class Dispatch {
       // 重试前先问一句「已经在里面了吗」：在就当作已送达，不再投。
       if (attempt > 0 && parent && this.sessions.holds?.(parent, requestId)) {
         this.warn(`${LOG_PREFIX} 任务 %s 的报告第 %d 次重试前已在会话中，按已送达处理`, task.id, attempt + 1)
-        this.noteDelivery(task, 'delivered', attempt + 1)
+        const durable = await this.#flushSessionPersistence()
+        this.noteDelivery(task, 'delivered', attempt + 1, durable)
         return 'delivered'
       }
       try {
@@ -1655,7 +2503,8 @@ export class Dispatch {
           wake: !!wake,
         })
         const outcome = result.delivered === 'prompt' ? 'delivered-degraded' : 'delivered'
-        this.noteDelivery(task, outcome, attempt > 0 ? attempt + 1 : undefined)
+        const durable = await this.#flushSessionPersistence()
+        this.noteDelivery(task, outcome, attempt > 0 ? attempt + 1 : undefined, durable)
         if (outcome === 'delivered-degraded') {
           this.warn(`${LOG_PREFIX} 任务 %s 的报告已送达，但来源降级为 user（收件箱不可用）`, task.id)
         }
@@ -1742,9 +2591,24 @@ export class Dispatch {
 
     const reportedThisTurn = !!task.reportedSinceTurn
     task.reportedSinceTurn = false
+
+    // 终态报告因后台活被推迟结算（report() 里的 pendingTerminal）。
+    // 按 worker 自己给的结论收尾，不要退化成 `done`；也不能再发
+    // 「worker 本轮没给结论」的兜底回报——它明明给过了。
+    const pending = task.pendingTerminal
+    task.pendingTerminal = undefined
+    if (pending) {
+      if (extra.note) task.backgroundNote = extra.note
+      if (!SETTLED.has(task.status)) {
+        this.settle(task, canTransition(task.status, pending) ? pending : 'ended')
+      }
+      await this.persistCritical()
+      return
+    }
+
     if (reportedThisTurn) {
       if (task.status === 'running') this.settle(task, 'done')
-      this.schedulePersist()
+      await this.persistCritical()
       return
     }
 
@@ -1757,7 +2621,7 @@ export class Dispatch {
     // 结果是重复打扰。所以用一个独立标记，不动批次的原状态。
     const reopened = !!task.groupReopened
     this.settle(task, 'ended')
-    this.schedulePersist()
+    await this.persistCritical()
     if (!this.config.reportOnTurnEnd) return
 
     // settle() 里的 maybeSummarize 可能**刚刚**为这一批发了汇总（尤其单成员批次，
@@ -1798,7 +2662,9 @@ export class Dispatch {
     if (!active) return false
     task.background = { ...active, since: now() }
     task.updatedAt = now()
-    this.schedulePersist()
+    // 「还有后台活」是一条会决定结算与否的事实：不能等 800ms 防抖，
+    // 否则这中间崩溃，重启后会以为任务已经可以结算了。
+    await this.persistCritical()
     this.log('%s 任务 %s 回合结束，但后台还有 %d 个 job / %d 个 subagent，暂不结算',
       LOG_PREFIX, task.id, active.jobs, active.subagents)
     this.watchBackground(task)
@@ -1857,12 +2723,12 @@ export class Dispatch {
         return
       }
       this.stopBackgroundWatch(task.id)
-      const killed = over ? this.killBackground(task) : 0
+      const killed = over ? await this.killBackground(task) : 0
       const hadJobs = task.background?.jobs ?? 0
       task.background = undefined
       if (killed) task.backgroundKilled = killed
       task.updatedAt = now()
-      this.schedulePersist()
+      await this.persistCritical()
       const note = over
         ? `后台活超过 ${Math.round(limit / 60000)} 分钟上限，已结束（终止 ${killed}/${hadJobs} 个 job）`
         : '后台活已结束'
@@ -1872,19 +2738,26 @@ export class Dispatch {
     schedule()
   }
 
-  /** 到上限时终止还在跑的 shell job（best-effort：失败只记日志，不阻塞结算）。 */
-  killBackground(task) {
+  /**
+   * 终止还在跑的 shell job（best-effort：失败只记日志，不阻塞结算）。
+   *
+   * `jobs.list` 在宿主里是异步的。此前这里漏了 `await`，`Array.isArray(Promise)`
+   * 恒为 false，于是「到上限终止 job」一个 job 都杀不到，任务却被结算掉、
+   * 报告里还写着「已结束」。评估 §2.4 把它列为一行可修的 P0 缺陷。
+   */
+  async killBackground(task) {
     let killed = 0
     const sessionId = task?.workerSessionId
     if (!sessionId) return killed
+    const service = this.ctx.get('jobs')
+    if (typeof service?.list !== 'function' || typeof service.kill !== 'function') return killed
     try {
-      const service = this.ctx.get('jobs')
-      const list = service?.list?.(sessionId)
-      for (const job of Array.isArray(list) ? list : []) {
+      const listed = await service.list(sessionId)
+      for (const job of Array.isArray(listed) ? listed : []) {
         if (job?.owner !== sessionId) continue
         if (job.status !== 'running' && job.status !== 'stopping') continue
         try {
-          service.kill?.(job.id, sessionId, 'dsh-mini-superagent background limit')
+          await service.kill(job.id, sessionId, 'dsh-mini-superagent background limit')
           killed += 1
         } catch (error) {
           this.warn(`${LOG_PREFIX} 终止后台 job %s 失败: %s`, job.id, String(error))
@@ -1893,7 +2766,24 @@ export class Dispatch {
     } catch (error) {
       this.warn(`${LOG_PREFIX} 终止任务 %s 的后台活失败: %s`, task?.id, String(error))
     }
+    this.backgroundKills += killed
     return killed
+  }
+
+  /**
+   * 重启后重挂后台活巡检（由 `apply()` 在 `pump()` 之后调用）。
+   *
+   * `restore()` 只负责读账本与记待办；真正起定时器要等队列推进完，
+   * 否则巡检收尾触发的 `settle → pump` 会和启动时的 pump 抢同一批任务。
+   */
+  resumeBackgroundWatches() {
+    const ids = this.pendingBackgroundWatchers
+    this.pendingBackgroundWatchers = []
+    for (const id of ids) {
+      const task = this.table.tasks.get(id)
+      if (task && !SETTLED.has(task.status) && task.background) this.watchBackground(task)
+    }
+    if (ids.length) this.log(`${LOG_PREFIX} 重启后重新接管 %d 个后台活巡检`, ids.length)
   }
 
   /** 停止一个任务的巡检器（幂等）。 */
@@ -1984,7 +2874,7 @@ export class Dispatch {
      * （实测第二轮零报告被判 done 且完全不发通知）。
      */
     task.reportedSinceTurn = false
-    this.schedulePersist()
+    await this.persistCritical()
     return task
   }
 
@@ -1996,9 +2886,58 @@ export class Dispatch {
    */
   async cancel(task, reason) {
     if (SETTLED.has(task.status)) {
-      throw new Error(`任务 ${task.id} 已结算（${task.status}），不能取消`)
+      throw fail('CONFLICT', `任务 ${task.id} 已结算（${task.status}），不能取消`)
+    }
+    /**
+     * 会话级取消闸门（plans/08 §八「同会话有活跃任务时，取消返回 409 并说明」）。
+     *
+     * 为什么要拒绝而不是照样取消：`cancel()` 调用的是 `agent.cancel()`，取消的是
+     * **整条会话的当前回合**。复用之后一条会话可能正被另一条任务使用，取消其中一条
+     * 就会打断另一条的回合——用户看到的是「我取消了 A，B 却失败了」。
+     *
+     * 只挡 **running** 的任务：排队中的任务还没占用会话回合，取消它只是把它移出队列。
+     * 这样用户仍然有出路——先取消排队中的那条，再取消正在跑的那条。
+     */
+    const siblings = task.status === 'running'
+      ? this.table.tasksOfWorker(task.workerSessionId)
+        .filter(other => other.id !== task.id && !SETTLED.has(other.status))
+      : []
+    if (siblings.length) {
+      const listed = siblings.slice(0, 5).map(other => `${other.id}（${other.status}）`).join('、')
+      throw fail('CONFLICT', `任务 ${task.id} 正在使用子会话 ${task.workerSessionId}，`
+        + `同会话还有 ${siblings.length} 个未结算任务：${listed}${siblings.length > 5 ? ' 等' : ''}。`
+        + '取消会打断它们的回合（一个会话同一时刻只能跑一个回合）；'
+        + '请先取消排队中的任务，或等它们结算后再取消这条')
     }
     this.table.dequeue(task.id)
+    /**
+     * 排队中的任务从没跑过：它没有后台活、也没有自己的回合可取消。
+     * 尤其**不能** `agent.cancel()`——这个 agent 属于正占用会话的另一条任务。
+     */
+    if (task.status === 'queued') {
+      task.cancelReason = reason
+      this.settle(task, 'cancelled')
+      await this.persistCritical()
+      return task
+    }
+    // 取消必须连后台活一起停（P0-2）：worker 回合被 cancel 之后，它起的
+    // dev server / subagent 仍在跑，而任务已经释放了并发位。此前这里只
+    // `agent.cancel()`，评估里 `jobs.kill` 的调用次数实测为 0。
+    // subagent 没有可验证的终止接口（docs/api-contracts.md §8），所以只终止
+    // jobs，剩下的明确记在 backgroundNote 里，不假装「干净地停了」。
+    const killed = await this.killBackground(task)
+    if (killed) {
+      task.backgroundKilled = killed
+      this.log(`${LOG_PREFIX} 取消任务 %s 时终止了 %d 个后台 job`, task.id, killed)
+    }
+    const hadSubagents = Number(task.background?.subagents) || 0
+    if (hadSubagents) {
+      task.backgroundNote = `取消时还有 ${hadSubagents} 个 subagent；插件没有可验证的终止接口，由宿主自行回收`
+      this.warn(`${LOG_PREFIX} 任务 %s 取消时仍有 %d 个 subagent，宿主需自行回收`, task.id, hadSubagents)
+    }
+    this.stopBackgroundWatch(task.id)
+    task.background = undefined
+    task.pendingTerminal = undefined
     const agent = this.ctx.agents.get(task.workerSessionId)
     if (agent) {
       try { agent.cancel({ kind: 'user' }, { keepInbox: false }) }
@@ -2006,7 +2945,7 @@ export class Dispatch {
     }
     task.cancelReason = reason
     this.settle(task, 'cancelled')
-    this.schedulePersist()
+    await this.persistCritical()
     return task
   }
 
@@ -2092,6 +3031,22 @@ export class Dispatch {
     // 会话不在了：换一个 worker 会话，把原始简报重投一遍。
     task.attempt = nextAttempt
     task.workerSessionId = `${WORKER_PREFIX}${task.id}-a${task.attempt}`
+    /**
+     * 换 attempt 会话 = 复用关系结束。
+     *
+     * `parentTaskId` 的含义是「这条任务的 workerSessionId 是来源任务的会话」。
+     * 现在会话换了号，它已经不成立。不清掉的话 `start()` 会继续走复用分支、
+     * 去 resolve 一条早就不存在的旧会话，任务直接 failed——而用户明明点的是
+     * 「重试」、期望换一条新会话从简报重来。`threadId` 保留：工作线还是同一条。
+     *
+     * 审计三件套（handoffSource / handoffReason / handoffReasonTruncated）一起清：
+     * 它们的不变式是「有 parentTaskId 才有交接来源」。只清 parentTaskId 会留下
+     * 「来源未知、但有一个理由」的孤儿字段，看板只能显示半条血缘。
+     */
+    task.parentTaskId = undefined
+    task.handoffSource = undefined
+    task.handoffReason = undefined
+    task.handoffReasonTruncated = undefined
     task.turnStartedAt = undefined
     task.lastText = ''
     // reopen 会自己把任务放进队列（且不会重复入队）——0.6.0 之前这里是
@@ -2128,6 +3083,8 @@ export class Dispatch {
     this.stopBackgroundWatch(task.id)
     task.background = undefined
     task.backgroundKilled = undefined
+    // 新一轮开始，上一轮被后台活推迟的终态不再作数：这一轮会有自己的结论。
+    task.pendingTerminal = undefined
     task.turnStartedAt = now()
     task.updatedAt = task.turnStartedAt
     this.schedulePersist()
@@ -2205,7 +3162,7 @@ export class Dispatch {
     this.retryCounts.delete(task.id)
     task.retryAt = undefined
     this.settle(task, 'failed')
-    this.schedulePersist()
+    await this.persistCritical()
     await this.relayFailure(task)
   }
 
@@ -2296,6 +3253,11 @@ export class Dispatch {
       title: task.title,
       status: task.status,
       session_id: task.workerSessionId,
+      // 复用血缘（plans/08 阶段 2）：只在真的复用出现，独立任务不凭空多字段。
+      // 与看板同名，工具返回值与看板对同一件事用同一套字段名。
+      ...(task.parentTaskId ? { handoff_from: task.parentTaskId } : {}),
+      ...(task.handoffSource ? { handoff_source: task.handoffSource } : {}),
+      ...(task.handoffReason ? { handoff_reason: task.handoffReason } : {}),
       ...(task.workspaceTitle ? { workspace: task.workspaceTitle } : {}),
       ...(task.hostWorkspaceTitle ? { host_workspace: task.hostWorkspaceTitle } : {}),
       ...(task.archivedAt ? { archived_at: task.archivedAt } : {}),
@@ -2406,7 +3368,252 @@ export class Dispatch {
     }
   }
 
+  // ---------------------------------------------------------------- 候选
+
+  /**
+   * `dispatch_candidates` 的实现：**只读候选 + 判定素材**。
+   *
+   * 这个方法的全部职责是**缩小范围**（本会话、已结算、时间窗内、同域）并把
+   * 能让模型判断「这是不是接着上一条」的素材摊开——标题、简报、最后一条报告的
+   * 摘要、终态、结束时点、线程、是否已有后继/活跃任务。**它不做语义判断**：
+   * 没有相似度、没有权重、没有阈值、没有推荐排序（排序只有「结算时间降序」
+   * 这一条确定性规则）。接不接由调用方（主会话的模型）显式传 `handoff_from` 决定。
+   *
+   * 为什么不在这里判定「像不像」：插件零运行时依赖、没有任何调用模型的通道，
+   * 账本里也没有代码/diff/意图；任何「插件自己判断」最终都只能退化成写死的
+   * 字符串匹配。误判代价不对称（错接会把旧结论、旧模型、旧权限一起带进新任务，
+   * 且基本不可逆；漏接只是多一条会话），所以判定权必须留在模型手里。
+   *
+   * 取数规则（与 plans/11 §3.4 逐条对齐）：
+   * 1. 范围：`table.ofSession(agent.id)`（只看本会话派出的任务，跨会话复用一律拒绝）；
+   * 2. 排除 cancelled / archived / 退休 / 未结算；退休记录不在活表，单独从
+   *    `this.retired` 计数（它的正文不搬出来，只让 `excluded.retired` 可回答
+   *    「为什么没有候选」）；
+   * 3. 时间窗：`settledAt ?? updatedAt` 距今 ≤ `days` 天（缺失时标 `updatedAt-fallback`）；
+   * 4. 同域：`sameDir(task.cwd, scope.cwd)`；给了 workspace 时还要求
+   *    `task.workspaceId` 一致（来源没有 id 时按 cwd 比，与 `#handoffSource()` 同一判据）；
+   *    `all_workspaces: true` 时跳过（返回 `scope.same_domain: false`）；
+   * 5. 排序：`settled_at` 降序，同刻按 `createdAt` 降序——**不按「像不像」排**；
+   * 6. 截断到 `limit`；`excluded` 按原因累加。
+   *
+   * 只读保证：本方法**不写账本、不建任务、不碰会话**。`reuse_check` 也只报告
+   * 事实（这条会话现在忙不忙），真正的校验仍然只在 `dispatch_launch` 里发生一次。
+   *
+   * @param {object} agent 调用者（主会话）
+   * @param {{limit?: number, days?: number, cwd?: string, workspace?: string, allWorkspaces?: boolean}} [input]
+   * @returns {Promise<object>} `{candidates, count, considered, excluded, scope, note}`
+   */
+  async candidates(agent, input = {}) {
+    const cfg = this.config
+    /** 取一个整型参数并夹到区间里：越界按边界处理，不做静默丢弃。 */
+    const clampInt = (value, fallback, min, max) => {
+      const raw = Number(value)
+      const base = Number.isFinite(raw) ? Math.trunc(raw) : Math.trunc(Number(fallback))
+      const safe = Number.isFinite(base) ? base : min
+      return Math.min(max, Math.max(min, safe))
+    }
+    const days = clampInt(input.days, cfg.handoffCandidatesDays, 1, 30)
+    const limit = clampInt(input.limit, cfg.handoffCandidatesLimit, 1, 10)
+    const allWorkspaces = input.allWorkspaces === true
+
+    // 圈定「同域」：显式参数 > 输入框里记住的派发目标 > 会话当前目录。
+    // 与 `launch()` 同一套优先级（显式参数压过记住的设置），否则候选范围
+    // 会和真正派发时落到的地方不一致。
+    const explicitCwd = typeof input.cwd === 'string' && input.cwd.trim() ? input.cwd.trim() : ''
+    const explicitWorkspace = typeof input.workspace === 'string' && input.workspace.trim()
+      ? input.workspace.trim()
+      : ''
+    const target = this.targetFor(agent.id)
+    const asked = explicitWorkspace ? await this.workspaces.resolve(explicitWorkspace) : undefined
+    if (explicitWorkspace && !asked) {
+      // 显式给了 workspace 却解析不到：**不静默退回全量**。那会让调用方以为
+      // 「这个工作区里没有候选」，其实它筛的是另一个目录。
+      throw fail('NOT_FOUND', `找不到工作区「${explicitWorkspace}」：先用 dispatch_workspaces 看有哪些，`
+        + '或去掉 workspace 参数按会话当前目录筛选')
+    }
+    const useTarget = !explicitCwd && !explicitWorkspace
+    const workspaceId = asked?.id ?? (useTarget ? target?.workspace_id : undefined)
+    const cwd = explicitCwd
+      || asked?.path
+      || (useTarget ? target?.path : '')
+      || (typeof this.sessions.cwdFor === 'function' ? this.sessions.cwdFor(agent, undefined) : '')
+      || ''
+    const source = explicitCwd || explicitWorkspace
+      ? 'explicit-args'
+      : target ? 'session-target' : 'session-cwd'
+    // `all_workspaces` 或确实圈不出范围时不按域过滤；`same_domain` 如实反映
+    // 「这一次到底有没有做同域筛选」，而不是假装筛过。
+    const hasDomain = !allWorkspaces && !!(workspaceId || cwd)
+
+    const inDomain = task => {
+      if (!hasDomain) return true
+      if (cwd && !sameDir(task.cwd, cwd)) return false
+      if (workspaceId) {
+        if (task.workspaceId) return task.workspaceId === workspaceId
+        // 旧账本没有 workspaceId：按目录比，与 `#handoffSource()` 的兜底判据一致。
+        return sameDir(task.cwd, asked?.path || cwd)
+      }
+      return true
+    }
+
+    const excluded = {
+      not_settled: 0,
+      cancelled: 0,
+      archived: 0,
+      retired: 0,
+      outside_window: 0,
+      other_domain: 0,
+    }
+    const live = this.table.ofSession(agent.id)
+    const retired = [...this.retired.values()].filter(record => record.parentSessionId === agent.id)
+
+    const cutoff = Date.now() - days * 24 * 3_600_000
+    const entries = []
+    for (const task of live) {
+      // 排除顺序 = 原因优先级：取消是用户明确收回，归档是只读冻结，
+      // 未结算不能当来源，最后才是窗口与同域。每条只记一个原因。
+      if (task.status === 'cancelled') { excluded.cancelled += 1; continue }
+      if (task.archivedAt) { excluded.archived += 1; continue }
+      if (!SETTLED.has(task.status)) { excluded.not_settled += 1; continue }
+      const settledAt = task.settledAt || task.updatedAt
+      const settledMs = Date.parse(settledAt ?? '')
+      if (!Number.isFinite(settledMs) || settledMs < cutoff) {
+        excluded.outside_window += 1
+        continue
+      }
+      if (!inDomain(task)) { excluded.other_domain += 1; continue }
+      entries.push({ task, settledAt, basis: task.settledAt ? TIME_BASIS.SETTLED : TIME_BASIS.FALLBACK })
+    }
+    // 退休记录：只计数，不参与候选（它的 brief / reports 已被 `#retire()` 丢弃，
+    // 拿不出「判定素材」，也不能当复用来源）。
+    excluded.retired += retired.length
+
+    entries.sort((a, b) => {
+      const bySettled = Date.parse(b.settledAt ?? '') - Date.parse(a.settledAt ?? '')
+      if (bySettled) return bySettled
+      return String(b.task.createdAt ?? '').localeCompare(String(a.task.createdAt ?? ''))
+    })
+
+    // 全部任务（含退休留痕）一次扫出后继关系：`parentTaskId` 是「谁接过我」的唯一来源。
+    const every = [...this.table.tasks.values(), ...this.retired.values()]
+    const successorsOf = id => {
+      const active = []
+      let settledCount = 0
+      for (const item of every) {
+        if (item.parentTaskId !== id) continue
+        if (SETTLED.has(item.status)) settledCount += 1
+        else if (active.length < 3) active.push({ task_id: item.id, status: item.status, title: item.title })
+      }
+      return { active, settled_count: settledCount }
+    }
+
+    const project = entry => {
+      const task = entry.task
+      const reports = Array.isArray(task.reports) ? task.reports : []
+      const last = reports.length ? reports.at(-1) : undefined
+      const briefText = String(task.brief ?? '')
+      const briefCap = Math.max(0, Number(cfg.handoffBriefChars) || 0)
+      const summaryCap = Math.max(0, Number(cfg.handoffReportSummaryChars) || 0)
+      const activeId = this.table.activeTaskId(task.workerSessionId)
+      // 会话忙不忙是**事实**，不是打分：`ok:true` 只表示「没有已知的会话级冲突」，
+      // 不等于「建议接」。校验的完整判据（模型/preset/工作区）依赖这次还没出现的
+      // launch 参数，所以只在 `dispatch_launch` 里跑；这里不复制第二套判据。
+      const busy = !!activeId
+      const settledMs = Date.parse(entry.settledAt ?? '')
+      return {
+        task_id: task.id,
+        title: task.title,
+        status: task.status,
+        settled_at: entry.settledAt ?? null,
+        settled_basis: entry.basis,
+        age_hours: Number.isFinite(settledMs)
+          ? Math.round(((Date.now() - settledMs) / 3_600_000) * 10) / 10
+          : null,
+        brief: clip(briefText, briefCap),
+        brief_chars: briefText.length,
+        ...(briefText.length > briefCap ? { brief_truncated_to: briefCap } : {}),
+        // 最后一条报告是「它做到了哪一步」最权威的素材：简报只说明要做什么，
+        // 摘要才说明做成了什么。没有报告时明确给 null，而不是空对象。
+        last_report: last
+          ? {
+              status: last.status ?? null,
+              at: last.at ?? null,
+              // `headline` 只在 worker 真的写了的时候出现，不补空串。
+              ...(last.headline ? { headline: last.headline } : {}),
+              summary: clip(last.summary, summaryCap),
+            }
+          : null,
+        report_count: reports.length,
+        // 有报告时不给 last_text：两份「结论」并排会让模型不知道信哪个。
+        last_text: reports.length ? null : (task.lastText ? clip(task.lastText, 600) : null),
+        error: task.error ? clip(task.error, 200) : null,
+        cancel_reason: task.cancelReason ? clip(task.cancelReason, 200) : null,
+        thread_id: task.threadId ?? null,
+        parent_task_id: task.parentTaskId ?? null,
+        workspace_id: task.workspaceId ?? null,
+        workspace_title: task.workspaceTitle ?? null,
+        host_workspace_id: task.hostWorkspaceId ?? null,
+        host_workspace_title: task.hostWorkspaceTitle ?? null,
+        cwd: task.cwd ?? null,
+        worker_session_id: task.workerSessionId ?? null,
+        model: task.model ?? null,
+        agent_preset: task.agentPreset ?? null,
+        permission_preset: task.permissionPreset ?? null,
+        group: task.group ?? null,
+        attempt: task.attempt ?? null,
+        created_at: task.createdAt ?? null,
+        session: { busy, active_task_id: activeId ?? null },
+        successors: successorsOf(task.id),
+        reuse_check: { ok: !busy, blocked_by: busy ? ['session-busy'] : [] },
+      }
+    }
+
+    const picked = entries.slice(0, limit)
+    return {
+      candidates: picked.map(project),
+      count: picked.length,
+      considered: live.length + retired.length,
+      excluded,
+      scope: {
+        same_domain: hasDomain,
+        workspace_id: workspaceId ?? null,
+        cwd: cwd || null,
+        days,
+        limit,
+        source,
+      },
+      note: '只读候选，接不接由你判断；这里没有分数也没有推荐。'
+        + '要接就 dispatch_launch({ handoff_from, handoff_reason })。',
+    }
+  }
+
   // ---------------------------------------------------------------- 落盘
+
+  /**
+   * 关键事实立即落盘：撤销待触发的防抖定时器，直接排进串行写盘链。
+   *
+   * 为什么需要它：0.8.x 只有 800ms 防抖。实测 4 条 `running` 里至少 1 条
+   * 已经 `dispatch_report done`——报告入库与结算都发生在内存里，进程恰好
+   * 在这个窗口被 kill，重启后读到的仍是 `running`，于是被 `restore()` 标成
+   * `interrupted`，完成率、并发位与看板状态全部不可信。
+   *
+   * **必须 `await`**：调用方全是 async 方法，等写完再返回，测试夹具删临时
+   * 目录时才不会和写盘抢文件句柄（Windows 上表现为 EBUSY）。若在这里用
+   * `void` 启动写盘，进程外的清理动作会与它并发——这本身就是「事实已落盘」
+   * 这个承诺的漏洞，不只是测试问题。
+   *
+   * `persist()` 内部是串行 promise 链，后一次一定在前一次写完之后，
+   * 不会互相覆盖；错误也在链内吞掉。卸载期间直接跳过——`dispose()` 会
+   * 自己 `await persist()` 冲刷最后一次。
+   */
+  async persistCritical() {
+    if (this.disposed) return
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer)
+      this.persistTimer = undefined
+    }
+    await this.persist()
+  }
 
   /** 800ms 防抖写盘：密集的状态变化只落一次。 */
   schedulePersist() {
@@ -2493,6 +3700,8 @@ export class Dispatch {
 
     try {
       let requeued = 0
+      let healed = 0
+      let resumedBackground = 0
       for (const item of state.tasks) {
         if (!item?.id || !item?.workerSessionId) continue
         const task = {
@@ -2511,6 +3720,36 @@ export class Dispatch {
            * 补出来的值只活在内存里，下次 persist 自然落盘——不做一次性迁移脚本。
            */
           threadId: typeof item.threadId === 'string' && item.threadId ? item.threadId : newThreadId(item.id),
+          /**
+           * 复用关系（plans/08 阶段 2）：老数据没有这个键 → 视为独立任务。
+           *
+           * 为什么不补一个「看起来合理」的值：`parentTaskId` 的含义是「这条任务的
+           * workerSessionId 是另一条任务的会话」。升级前的任务全部是 1:1，它们
+           * 本来就没有来源；补出来的任何值都会让一条独立任务假装成复用的产物，
+           * 并在线程/复用统计里被多算一次。
+           */
+          parentTaskId: typeof item.parentTaskId === 'string' && item.parentTaskId
+            ? item.parentTaskId
+            : undefined,
+          /**
+           * 依赖（PRD-02 §4.2 / §4.6）：`dependsOn` 随账本原样读回，重启后仍然生效。
+           *
+           * `blockedBy` / `blockedReason` 是**派生值**（只描述「此刻」谁挡着它），
+           * 这里一律清空、由 `#annotateDependencies()` 重算：沿用旧快照会让看板
+           * 说「在等一条已经不存在的任务」，而真实的等待原因在重启后早就变了。
+           */
+          dependsOn: Array.isArray(item.dependsOn)
+            ? item.dependsOn.filter(id => typeof id === 'string' && id)
+            : undefined,
+          blockedBy: undefined,
+          blockedReason: undefined,
+        }
+        // 血缘字段的不变式：没有来源任务就不该留下 handoffSource / handoffReason。
+        // 历史坏数据（或旧版本只写了一半）在这里归一，避免看板出现「来源未知但有理由」的半条记录。
+        if (!task.parentTaskId) {
+          task.handoffSource = undefined
+          task.handoffReason = undefined
+          task.handoffReasonTruncated = undefined
         }
         if (!SETTLED.has(task.status)) {
           /**
@@ -2526,6 +3765,47 @@ export class Dispatch {
             task.updatedAt = now()
             this.table.add(task)
             requeued += 1
+            continue
+          }
+          /**
+           * 后台活巡检随进程一起消失，但账本记着「还有活」（P0-3）。
+           *
+           * 两个可选服务都还没就绪时**不要**把这条事实抹掉：先原样重挂巡检，
+           * 等宿主服务可用后由 `watchBackground()` 自己判；否则一次重启
+           * 就会把「后台还在跑」悄悄改写成 interrupted。服务确实在、却查不到
+           * 活，说明活已经结束，清掉标记继续走下面的收敛。
+           */
+          if (task.background) {
+            const jobs = this.ctx.get('jobs')
+            const subagents = this.ctx.get('subagents')
+            const left = jobs || subagents ? await this.backgroundOfWork(task) : task.background
+            if (left) {
+              task.background = { ...left, since: task.background.since || now() }
+              task.updatedAt = now()
+              this.table.tasks.set(task.id, task)
+              this.pendingBackgroundWatchers.push(task.id)
+              resumedBackground += 1
+              continue
+            }
+            task.background = undefined
+          }
+          /**
+           * stale `running` 自愈：账本里已经有终态报告（或一条待结算的
+           * `pendingTerminal`），状态却还是 running——说明结算那次落盘丢了，
+           * 正是 800ms 防抖窗口内被 kill 的形状。按 worker 自己给的结论收敛，
+           * 而不是一律标 interrupted：那会把「已完成」算成「被中断」，
+           * 完成率与并发位同时失真（评估 §7 P1-7）。
+           */
+          const conclusion = task.pendingTerminal && TERMINAL_REPORT.has(task.pendingTerminal)
+            ? { status: task.pendingTerminal }
+            : [...(task.reports ?? [])].reverse().find(entry => TERMINAL_REPORT.has(entry?.status))
+          task.pendingTerminal = undefined
+          if (task.status === 'running' && conclusion) {
+            this.table.tasks.set(task.id, task)
+            this.table.transition(task, conclusion.status, {
+              force: !canTransition(task.status, conclusion.status),
+            })
+            healed += 1
             continue
           }
           /**
@@ -2554,6 +3834,8 @@ export class Dispatch {
         this.table.tasks.set(task.id, task)
       }
       if (requeued) this.log(`${LOG_PREFIX} 重启后重新入队 %d 个未启动的任务`, requeued)
+      if (resumedBackground) this.log(`${LOG_PREFIX} 重启后待重挂 %d 个后台活巡检`, resumedBackground)
+      if (healed) this.log(`${LOG_PREFIX} 重启后按账本里的终态报告纠正 %d 条 stale running`, healed)
       // P0-5：退休留痕读回 `this.retired`，**绝不当活任务恢复**。
       // 它们是「已经决定不再参与计算」的记录：塞回 table.tasks 会让它们
       // 重新给指标投票，等于没退休；而恢复时再跑一次 enforceLedgerCap 也没必要——
@@ -2583,11 +3865,47 @@ export class Dispatch {
       this.warn(`${LOG_PREFIX} 恢复历史状态失败: %s`, String(error))
       this.restoreError = String(error)
     }
+    /**
+     * PRD-02 §4.6：恢复收敛——重建完 `table` 与 `retired` 之后、**第一次 pump 之前**，
+     * 把「前置已经 interrupted / failed / 缺失」的后继按 §4.4 连带取消。
+     *
+     * `restoring` 挡住 `settle()` → `pump()` 的嵌套启动：此刻工具还没注册、工作区
+     * 还没 provision，启动 worker 比不启动危险得多。等 `apply()` 末尾那次 pump 用
+     * **同一份** `takeRunnable(blockedBy)` 判定接手，恢复期与运行期不会分叉。
+     */
+    this.restoring = true
+    try {
+      this.#convergeDependencies()
+    } finally {
+      this.restoring = false
+    }
     // P0-5：读回之后判一次上限（幂等，通常什么都不做）。这里判的是**活表**
     // 是否超限（配置被调小、换了更严的配置），而不是把刚读回的留痕再退休一遍
     // ——留痕从来没进过 `table.tasks`，天然不可能被二次退休。
     // 不在这里判的代价：上限要等到下一次结算才生效，期间 tasks.json 已经超了。
     this.enforceLedgerCap()
+    // 恢复本身就是一次状态变更（interrupted / stale 自愈 / 巡检待重挂），
+    // 必须固化，否则下次重启会对同一批任务重复判一次。
+    await this.persistCritical()
+  }
+
+  /**
+   * 恢复后的依赖收敛（PRD-02 §4.6）。
+   *
+   * 只做两件事，且都用**运行期同一份代码**：`#annotateDependencies()` 算出谁还在等、
+   * 谁等的东西已经没了；对「确定没成」的后继走 `#cancelDependents()`。
+   * 前置仍是 `queued`（也在恢复队列里）的任务保留等待，启动顺序由随后的 pump 保证。
+   *
+   * 为什么循环而不是单次：取消本身改变状态（B 被取消 → C 的「前置」从 queued 变成
+   * cancelled），所以取消完必须重算一遍。正常账本一轮就收敛；`#cancelDependents()`
+   * 返回 0（例如重入闸挡住了内层）时立即退出，不会空转。
+   */
+  #convergeDependencies() {
+    for (;;) {
+      const doomed = this.#annotateDependencies()
+      if (!doomed.length) return
+      if (!this.#cancelDependents(doomed)) return
+    }
   }
 
   /**
@@ -2694,6 +4012,15 @@ export class Dispatch {
       // 恰恰是事后回答「这条工作线怎么结束的」唯一还剩下的线索。缺了它，
       // 线程级统计会把这条任务算成一条孤儿线程（阶段 2/3 的线程视图直接用这个字段）。
       threadId: task.threadId,
+      // 复用关系跟着留痕走：与 threadId 同样处理。事后要回答「这条任务沿用的是
+      // 哪条任务的会话」（以及它的上下文从哪来），只有这个字段还留着；留 null
+      // 而不是 undefined，落盘后才分得清「独立任务」与「字段丢了」。
+      parentTaskId: task.parentTaskId ?? null,
+      // 交接原因的审计字段：退休之后仍要能回答「当时为什么接了上一条」。
+      // 它不参与任何判定，所以照原样搬走即可。
+      handoffSource: task.handoffSource ?? null,
+      handoffReason: task.handoffReason ?? null,
+      handoffReasonTruncated: task.handoffReasonTruncated ?? null,
     }
     // 走 `table.remove()` 而不是裸删：删除与**解绑活跃任务**必须是同一个动作
     // （见 TaskTable.remove 的注释）。裸删会留下指向不存在任务的绑定键，
@@ -2949,6 +4276,13 @@ export class Dispatch {
          */
         unreadInputs: [...this.table.tasks.values()]
           .filter(task => task.inputPendingAt && !task.inputReadAt && !task.inputUnknownAt).length,
+        /** 来源被降级成 user 的投递数（收件箱不可用时走了 prompt）。 */
+        degraded: [...this.table.tasks.values()]
+          .filter(task => task.delivery?.outcome === 'delivered-degraded').length,
+        /** 跨重启投递幂等的实际级别：有 flush 能力才可能是 strong。 */
+        durability: typeof this.ctx.get('sessionPersistence')?.flush === 'function' ? 'flush' : 'weak',
+        /** 已确认刷到持久化日志的投递数（弱级别部署里恒为 0 是正常现象）。 */
+        durableOk: [...this.table.tasks.values()].filter(task => task.delivery?.durable === true).length,
       },
       retry: {
         transient: !!this.config.retryTransient,
@@ -2960,6 +4294,14 @@ export class Dispatch {
         running: this.table.runningCount(),
         archived: [...this.table.tasks.values()].filter(task => task.archivedAt).length,
         maxWorkers: this.table.maxWorkers,
+      },
+      /** 后台活巡检：评估里「真实证据 0 条」的那一块，现在可以随时自查。 */
+      background: {
+        active: [...this.table.tasks.values()].filter(task => task.background).length,
+        watchers: this.backgroundTimers.size,
+        pendingRestore: this.pendingBackgroundWatchers.length,
+        killedJobs: this.backgroundKills,
+        deferredTerminals: [...this.table.tasks.values()].filter(task => task.pendingTerminal).length,
       },
       // P0-1：记忆治理口径。自检是唯一能一次性看到「账本 + 退休 + 待读 + 窗口」
       // 的地方，§七 第 6 条要求这五个数与账本实际值一致，就在这里对账。
@@ -3020,6 +4362,22 @@ export class Dispatch {
     this.sweepTimer.unref?.()
   }
 
+  /**
+   * 这条任务所在的会话上还有没有**未结算**的其它任务。
+   *
+   * 归档的安全判据（plans/08 §七.3）：`workspaceRegistry.archiveSession()` 收走的是
+   * 整条会话，复用之后它可能正被另一条任务使用。归档其中一条任务时若还有别的
+   * 未结算任务，**只标记任务、不动会话**——否则另一条正在跑的活会被一起冻住。
+   *
+   * 只看「未结算」，不看「同线程还有几条历史」：已结算的任务不再写会话，归档
+   * 它是安全的，没必要因此把整条线程的会话永远留着。
+   */
+  #hasActiveSibling(task) {
+    if (!task?.workerSessionId) return false
+    return this.table.tasksOfWorker(task.workerSessionId)
+      .some(other => other.id !== task.id && !SETTLED.has(other.status))
+  }
+
   /** 归档已结算且超过保留期的子会话；失败原因记在任务上，下一次巡检重试。 */
   async archiveStale() {
     if (this.disposed) return { scanned: 0, archived: 0, failed: 0 }
@@ -3032,18 +4390,35 @@ export class Dispatch {
       const at = Date.parse(task.updatedAt ?? '')
       if (!Number.isFinite(at) || at > cutoff) continue
       scanned += 1
-      const result = await this.workspaces.archiveSession(task.workerSessionId)
+      /**
+       * 会话还有别的未结算任务 → **只标记任务，不归档会话**。
+       *
+       * `archiveSession(stopActivity: true)` 会停掉整条会话的活动，而同会话的
+       * 另一条任务可能正在跑（plans/08 §三.2 的「归档拆线程」）。这里不调用底层，
+       * 并把原因写进 `archiveError`：用户看到的是「已归档 + 一句实话」，而不是
+       * 另一条任务莫名其妙被打断。
+       */
+      const shared = this.#hasActiveSibling(task)
+      const result = shared
+        ? { ok: false, error: `同会话还有其它未结算任务，本次只标记任务、未归档子会话（${task.workerSessionId}）` }
+        : await this.workspaces.archiveSession(task.workerSessionId)
+      const archivedAt = now()
+      task.archivedAt = archivedAt
+      // P0-4 归档冻结：归档是「只读」的开始，冻结时刻必须和归档时刻分开记。
+      // 为什么不用 retiredAt：退休是 P0-5 的「移出活表」，两件事的触发点、
+      // 后果、可见性都不同。把归档写成退休会让 `dispatch_inspect` 认为
+      // 任务已经不可查（其实还在活表里），也让 `memoryStats` 少算一条活任务。
+      task.frozenAt = archivedAt
       if (result.ok) {
-        const at = now()
-        task.archivedAt = at
-        // P0-4 归档冻结：归档是「只读」的开始，冻结时刻必须和归档时刻分开记。
-        // 为什么不用 retiredAt：退休是 P0-5 的「移出活表」，两件事的触发点、
-        // 后果、可见性都不同。把归档写成退休会让 `dispatch_inspect` 认为
-        // 任务已经不可查（其实还在活表里），也让 `memoryStats` 少算一条活任务。
-        task.frozenAt = at
         task.archiveError = undefined
         archived += 1
         this.log(`${LOG_PREFIX} 已归档子会话 %s（任务 %s）`, task.workerSessionId, task.id)
+      } else if (shared) {
+        // 安全检查导致的「跳过会话归档」不是失败：任务标记已经写下，另一条任务照常可用。
+        task.archiveError = result.error
+        archived += 1
+        this.log(`${LOG_PREFIX} 任务 %s 已冻结；同会话仍有活跃任务，未归档子会话 %s`,
+          task.id, task.workerSessionId)
       } else {
         task.archiveError = result.error
         failed += 1
@@ -3106,7 +4481,18 @@ export class Dispatch {
       }
     }
 
-    const result = await this.workspaces.archiveSession(task.workerSessionId)
+    /**
+     * 会话还有别的未结算任务时，**只冻结这条任务，不归档会话**。
+     *
+     * 与 `archiveStale()` 共用同一条安全判据（见 `#hasActiveSibling`）：底层
+     * `archiveSession()` 收走的是整条会话，复用之后另一条任务可能正在里面跑。
+     * 归档失败/跳过都必须留痕——`archiveError` 会让看板显示「已归档 + 原因」，
+     * 而不是假装干净成功。
+     */
+    const shared = this.#hasActiveSibling(task)
+    const result = shared
+      ? { ok: false, error: `同会话还有其它未结算任务，本次只标记任务、未归档子会话（${task.workerSessionId}）` }
+      : await this.workspaces.archiveSession(task.workerSessionId)
     const at = now()
     task.archivedAt = at
     // 与 `archiveStale()` 同一条不变量：归档一定同时写冻结时刻。
@@ -3119,6 +4505,7 @@ export class Dispatch {
     } else {
       // 决策 B：会话没了也要放行归档，但把原因留在任务上，看板会渲染成
       // 「归档失败：<原因>」——用户看到的是「已归档 + 一句实话」，不是假成功。
+      // `shared` 分支同样走这里：任务已冻结，只是会话被有意保留。
       task.archiveError = result.error
       this.warn(`${LOG_PREFIX} 任务 %s 已归档，但子会话 %s 归档失败: %s`,
         task.id, task.workerSessionId, result.error)
@@ -3161,6 +4548,7 @@ export class Dispatch {
     // 后台巡检同理：卸载后不该再有人去结算任务。
     for (const timer of this.backgroundTimers.values()) clearTimeout(timer)
     this.backgroundTimers.clear()
+    this.pendingBackgroundWatchers = []
     this.subagentOf.clear()
     this.sessions.dispose()
     await this.persist()

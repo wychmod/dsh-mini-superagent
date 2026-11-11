@@ -29,6 +29,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { createBoardHandler } from '../src/board.js'
+import { DEFAULTS } from '../src/constants.js'
 import { Dispatch } from '../src/dispatch.js'
 
 const BASE = '/dsh-mini-superagent/board'
@@ -179,9 +180,9 @@ test('决策 A：全部终态都能归档（done / cancelled 没有主操作也�
   })
 })
 
-test('归档不看保留期：刚更新的任务也能手动归档（区别于 archiveStale 的 24h 门槛）', async () => {
+test('归档不看保留期：刚更新的任务也能手动归档（区别于 archiveStale 的保留期门槛）', async () => {
   await withDispatch({ dispatch: { archiveAfterHours: 24 } }, async ({ d }) => {
-    // updatedAt 是 1 秒前，远没到 24 小时保留期。
+    // updatedAt 是 1 秒前，远没到保留期。
     const task = mkTask(d, 't-fresh', 'interrupted')
     const stale = await d.archiveStale()
     assert.equal(stale.archived, 0, '前置：巡检不会碰它——正是「只有重试会一直卡着」的根因')
@@ -189,6 +190,30 @@ test('归档不看保留期：刚更新的任务也能手动归档（区别于 a
     const result = await d.archiveTask('t-fresh')
     assert.equal(result.archived, true, '手动归档不该受保留期约束')
     assert.ok(task.archivedAt)
+  })
+})
+
+/**
+ * 保留期默认值钉在这里。
+ *
+ * 用户报的现象是「看板隔一天就空了」：默认 24 小时时，昨天结算的任务今天就被
+ * `archiveStale()` 收走，而看板「全部」chip 不含已归档任务。默认改成 168（7 天）
+ * 就是为了让「25 小时前结算」这种最常见的复查场景还留在看板上。
+ *
+ * 断的是**两条**：默认值本身（防静默改回 24）与 cutoff 的实际效果（防只改常量
+ * 却让比较方向写反）。只断默认值不够——`cutoff` 拼错时默认值仍然是 168。
+ */
+test('默认保留期 168 小时（7 天）：25 小时前结算的任务留在看板上，169 小时的才归档', async () => {
+  assert.equal(DEFAULTS.archiveAfterHours, 168, '默认保留期是 7 天，不是 24 小时')
+  await withDispatch({ dispatch: { archiveAfterHours: DEFAULTS.archiveAfterHours } }, async ({ d }) => {
+    const recent = mkTask(d, 't-recent', 'done', { updatedAt: iso(25 * 3_600_000) })
+    const stale = mkTask(d, 't-stale', 'done', { updatedAt: iso(169 * 3_600_000) })
+
+    const result = await d.archiveStale()
+
+    assert.equal(result.archived, 1, '只有超过 168 小时的那一条该被收走')
+    assert.equal(recent.archivedAt, undefined, '25 小时前结算的任务必须还在——它正是用户第二天要回来看的东西')
+    assert.ok(stale.archivedAt, '169 小时前结算的已经超出 7 天，照旧归档')
   })
 })
 

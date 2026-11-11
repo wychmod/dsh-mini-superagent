@@ -7,9 +7,9 @@
  *
  * - §七.1 归属正确：同一会话上有两个任务时，`dispatch_report` 记到**当前活跃**
  *   的那条，而不是最早那条（旧 `byWorker()` 扫全表返回第一个匹配，必错）。
- * - §七.2 取消隔离：取消 A 不会让 B 变成 `interrupted`。**本轮不改变取消语义**
- *   （见 `cancel()`），这里钉的是「已经发生的那个事实」——取消只结算被点的任务，
- *   同会话另一条不受影响；作为阶段 2 的输入，`cancel()` 仍会打断整条会话的回合。
+ * - §七.2 取消隔离：取消 A 不会让 B 变成 `interrupted`。阶段 2 起 `cancel()`
+ *   在**同会话还有未结算任务**时直接拒绝（取消的是整条会话的当前回合，会打断别人）；
+ *   这里钉的是「拒绝 + 状态不变 + 不调 agent.cancel」这条闸门。
  * - §七.3 归档安全：归档一条任务不让同会话的其它任务不可用。
  * - `threadId` 的向后兼容：老 `tasks.json`（没有这个键）读回来要能补出**同一个**
  *   派生值，既不报错、也不当成另一条线程。
@@ -299,10 +299,10 @@ test('§七.2 取消隔离：取消 A 不会让同会话的 B 变成 interrupted
   })
 })
 
-test('§七.2 取消的**当前**语义：同会话另一条任务不受状态污染，但会话回合确实被打断', async () => {
+test('§七.2 取消闸门：同会话还有未结算任务时，取消运行中的那条被拒且不碰会话', async () => {
   await withDispatch({}, async ({ d, host }) => {
     const a = mkTask('t-a', 'dispatch-shared', 'running')
-    const b = mkTask('t-b', 'dispatch-shared', 'running')
+    const b = mkTask('t-b', 'dispatch-shared', 'queued')
     d.table.add(a)
     d.table.add(b)
     let cancelled = 0
@@ -310,15 +310,41 @@ test('§七.2 取消的**当前**语义：同会话另一条任务不受状态�
     worker.cancel = () => { cancelled += 1 }
     host.agents.set('dispatch-shared', worker)
 
-    await d.cancel(a, '看板取消')
+    // plans/08 §八：`cancel()` 取消的是**整条会话的当前回合**。复用之后同会话可能
+    // 还有别的任务（这里 B 在排队），取消 A 会把 B 的会话回合一起打断。
+    // 所以必须拒绝并给原因，而不是静默打断别人。
+    await assert.rejects(
+      () => d.cancel(a, '看板取消'),
+      /同会话还有 1 个未结算任务[\s\S]*取消会打断它们的回合/,
+      '同会话有未结算任务时必须拒绝，并点名是哪一条',
+    )
+    assert.equal(a.status, 'running', '被拒的取消不能改状态')
+    assert.equal(b.status, 'queued', 'B 必须原样留在队列里')
+    assert.equal(cancelled, 0, '被拒时连 agent.cancel 都不能调用（那会打断整条会话）')
+    assert.ok(d.table.queue.includes('t-b'), 'B 不能被顺手移出队列')
 
-    // 本轮**不改**取消行为：它取消的是会话当前回合（`agent.cancel`），
-    // 所以同会话的 B 的**状态**不会被写成 interrupted —— 它只会因为
-    // `agent/disposed` / `onWorkerIdle` 之类的后续事件才可能结算（那是阶段 2 的事）。
-    assert.equal(cancelled, 1, '取消仍然会调一次 agent.cancel（本轮不改这个行为）')
+    // 出路：先取消排队中的 B（它还没占用会话回合），再取消 A。
+    await d.cancel(b, '先取消排队的')
+    assert.equal(b.status, 'cancelled')
+    await d.cancel(a, '看板取消')
     assert.equal(a.status, 'cancelled')
-    assert.equal(b.status, 'running', '取消 A 不得直接把 B 的状态改成 interrupted')
-    assert.equal(b.settledAt, undefined)
+    assert.equal(cancelled, 1, '只取消正在跑的那条时，才允许碰会话回合')
+  })
+})
+
+test('§七.2 取消闸门：同会话没有别的未结算任务时照常取消（不误伤单任务场景）', async () => {
+  await withDispatch({}, async ({ d, host }) => {
+    const task = mkTask('t-solo', 'dispatch-solo', 'running')
+    d.table.add(task)
+    let cancelled = 0
+    const worker = makeAgent('dispatch-solo')
+    worker.cancel = () => { cancelled += 1 }
+    host.agents.set('dispatch-solo', worker)
+
+    await d.cancel(task, '看板取消')
+
+    assert.equal(task.status, 'cancelled')
+    assert.equal(cancelled, 1)
   })
 })
 
