@@ -11,7 +11,7 @@
 但只保留派发这一件事：**没有** GitHub/飞书监听、没有工单与授权策略、没有数据库、没有构建步骤。
 纯 ESM，零运行时依赖。
 
-从 0.3.0 起附带一个常驻侧边栏的**任务看板**：Host 侧注册同源 HTTP 路由提供快照，浏览器侧是一个不打包、不编译的
+从 0.3.0 起附带一个常驻侧边栏的看板（本版更名「派发工作台」）：Host 侧注册同源 HTTP 路由提供快照，浏览器侧是一个不打包、不编译的
 ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直接取消/重试。它不占模型上下文，也不需要 agent 调工具。
 
 从 0.4.0 起有**工作区**：启动时准备一个默认工作区与固定主会话；每天一个【派发】工作区收拢子会话；
@@ -47,7 +47,7 @@ ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直�
 | DSH | `>=0.2.1-rc.2` | `package.json` 的 `engines.dsh` |
 | Node | `^22.19.0 \|\| >=24.0.0` | `package.json` 的 `engines.node` |
 | 依赖 / 构建 | 无 | `dependencies` 为空，`main` 直接指向 `src/index.js` |
-| 任务看板 | 仅 Web 形态 | 需要宿主 `webServer` 与浏览器页面；headless 形态没有看板，派发与工具照常 |
+| 派发工作台 | 仅 Web 形态 | 需要宿主 `webServer` 与浏览器页面；headless 形态没有看板，派发与工具照常 |
 
 实测环境：DSH `0.2.1-rc.5`，`desktop` profile。
 
@@ -75,12 +75,12 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.5.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.8.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
 `version` 是 `0.5.0` 说明跑的是这一版；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
-> **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「任务看板」图标。
+> **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
 
 > **迁移注意**：不要和旧插件 `dsh-dispatch` 同时安装。两者共有 8 个同名工具，同一全局层重复注册会直接抛错。
@@ -97,13 +97,14 @@ Copy-Item "$env:DSH_HOME\dsh-dispatch\tasks.json" "$env:DSH_HOME\dsh-mini-supera
 
 ---
 
-## 9 个工具
+## 10 个工具
 
 | 工具 | 谁用 | 做什么 |
 | --- | --- | --- |
-| `dispatch_launch` | 主会话 | 派发一个任务，立即返回 `task_id` + 子会话 id。可指定 `workspace`；并发位满时进 `queued`。**传 `continue_task_id` 则是续派**：不新建任务，把要求追加给已有子会话 |
+| `dispatch_launch` | 主会话 | 派发一个任务，立即返回 `task_id` + 子会话 id。可指定 `workspace`；并发位满时进 `queued`。**传 `continue_task_id` 则是续派**：不新建任务，把要求追加给已有子会话；**传 `handoff_from` 则是复用会话**：新建任务、沿用来源子会话 |
 | `dispatch_launch_many` | 主会话 | 一次派发 1–16 个互相独立的任务；整批结算后收到一条汇总 |
 | `dispatch_workspaces` | 主会话 / worker | 列出工作区（id、标题、路径、会话数）与当前工作区配置，供 `workspace` 参数使用 |
+| `dispatch_candidates` | 主会话 | **只读**候选：同域、已结算、最近的任务 + 判定素材（简报、最后报告摘要、终态、线程、后继）。**不打分、不推荐、不自动绑定**；接不接由模型判断 |
 | `dispatch_list` | 主会话 | 看本会话派出的任务与状态 |
 | `dispatch_inspect` | 主会话 | 看单个任务的详情：简报、最近报告、worker 最后输出 |
 | `dispatch_message` | 主会话 | 给子会话追问、纠偏、下发下一步；任务重新变 `running` |
@@ -200,12 +201,12 @@ worker 回合结束（`agent/status` → `idle`）时，如果它这一轮没给
 
 ---
 
-## 任务看板
+## 派发工作台
 
-Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panellist`，`order 60`）；点开是常驻主面板（`main` 槽），
+Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任务看板」，`id` 与路由均未变；`sidebar.panellist`，`order 60`）；点开是常驻主面板（`main` 槽），
 数据来自 Host 的同源 HTTP 路由 `GET /dsh-mini-superagent/board`，每 2 秒轮询一次。
-面板顶部有一条**平级切换条**：`任务看板 / 分析看板`，默认停在任务看板；
-切到分析看板时，原有任务看板的字段、入口与所有行内操作都不变。
+面板顶部有一条**平级切换条**：`派发工作台 / 分析看板`，默认停在派发工作台；
+切到分析看板时，原有派发工作台的字段、入口与所有行内操作都不变。
 
 分析看板读另一条只读路由 `GET /board/analytics`（全量账本，10 秒刷新），
 按时间范围 / 状态 / 负责人 / 工作区 / 批次筛选，展示任务总量、状态分布、完成率、超时代理、按天趋势与环比，
@@ -334,7 +335,7 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 ### 自动归档
 
 - 每 `archiveSweepMinutes`（默认 10 分钟，首次延迟 20 秒）巡检一次；
-- 把「已结算且 `updatedAt` 早于 `archiveAfterHours`（默认 24 小时）」的任务对应子会话
+- 把「已结算且 `updatedAt` 早于 `archiveAfterHours`（默认 168 小时 = 7 天）」的任务对应子会话
   `workspaceRegistry.archiveSession(id, {stopActivity:true})` 归档；
 - 成功记 `archivedAt`，失败记 `archiveError`（看板快照的 `archive_error` 可见），下次巡检重试；
 - 归档只收起会话列表，不动任务表、报告与看板；已取消任务也能归档；
@@ -380,6 +381,11 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 | --- | --- | --- |
 | `maxWorkers` | `6` | **全局**同时 `running` 的上限；超出的进 `queued`，有空位自动开始（按登记顺序） |
 | `maxTasksPerSession` | `64` | 每个主会话累计派发上限（防递归派发失控） |
+| `autoHandoff` | `false` | **只控制提示注入**：打开时提示里多一段「接续判断」，提醒模型派发前想一次「这条是不是接着上一条」。它**不会**让插件自动绑定——插件里没有相似度/阈值，接不接始终由模型判断；关掉后 `dispatch_candidates` / `handoff_from` 照常可用 |
+| `handoffCandidatesDays` | `7` | `dispatch_candidates` 的时间窗：只看最近 N 天**结算**的任务（与 `archiveAfterHours` 的 7 天对齐） |
+| `handoffCandidatesLimit` | `5` | `dispatch_candidates` 每次返回的候选上限（工具参数 1–10 可覆盖） |
+| `handoffBriefChars` | `600` | 候选里简报的截断长度（与 `dispatch_inspect` 的 2000 区分：候选是「扫一眼挑一个」） |
+| `handoffReportSummaryChars` | `600` | 候选里最后一条报告摘要的二次截断 |
 | `inheritWorkingDirectory` | `true` | 子会话继承主会话的工作目录（指定了 `workspace` 时以工作区路径为准） |
 | `permissionPreset` | `''` | 子会话权限预设。后台无人看管时建议 `danger-full-access`，否则可能卡在审批上 |
 | `stateDir` | `''` | 任务表落盘目录；空表示 `$DSH_HOME/dsh-mini-superagent`（`DSH_HOME` 未设时用 `~/.dsh`） |
@@ -388,7 +394,7 @@ Web 形态下，侧边栏会多一个「任务看板」图标（`sidebar.panelli
 | `workspaceRoot` | `''` | 工作区根；空表示 `<用户文档目录>/mini-superagent` |
 | `provisionDefaultWorkspace` | `true` | 启动时创建默认工作区与默认主会话（失败只记日志） |
 | `workerWorkspace` | `day` | **无目标时**的兜底：`day` = 当天【派发】工作区；`cwd` = 直接用任务 cwd。有目标时与它无关 |
-| `archiveAfterHours` | `24` | 子会话结束多少小时后自动归档；`0` 表示不归档 |
+| `archiveAfterHours` | `168` | 子会话结束多少小时后自动归档（7 天）；`0` 表示不归档。默认从 `24` 提到 `168`，避免看板「全部」隔一天就空 |
 | `archiveSweepMinutes` | `10` | 归档巡检间隔（分钟）；`0` 表示不巡检 |
 | `leadSessionId` | `mas-lead` | 默认主会话的固定 id；改值等于换一个新默认主会话 |
 | `restrictRouter` | `true` | 「必派发」的会话收窄 `write` / `edit`，改代码只能派下去（选回「不派发」立刻解锁，见「路由模式」） |
@@ -518,7 +524,7 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 - 会话仍挂在目标/【派发】工作区（侧边栏干净），真正读写的是任务目录；
 - 目录**不存在**时才跑一次 `prepareCommand`（典型：`git worktree add "$DSH_DISPATCH_DIR"`），
   已存在就跳过——否则重试会在同一个 checkout 上再 worktree 一次；
-- 命令在**父目录**执行，环境变量：`DSH_DISPATCH_DIR` / `_TASK` / `_TITLE` / `_WORKSPACE` / `_CWD`；
+- 命令在**父目录**执行，环境变量：`DSH_DISPATCH_DIR` / `DSH_DISPATCH_TASK` / `DSH_DISPATCH_TITLE` / `DSH_DISPATCH_WORKSPACE` / `DSH_DISPATCH_CWD`；
 - 失败即任务 `failed` 并回报原因，**不建子会话、不自动重试**（目录可能已被写了一半）。
 
 ---
@@ -564,9 +570,9 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
   `retiredDropped`（留痕列表本身超 `ledgerMaxRetired` 被丢弃的条数）**不落盘、重启归零**，它不是累计值。
 - **指标有窗口**：成功率 / 中位耗时 / 并行节省只算最近 `memoryWindowDays`（7）天 / `memoryWindowTasks`（200）条内的已结算任务，
   且排除已归档与已退休。拿它跟旧版本的数字比会不一致——先看卡片 hover 里的窗口口径。
-- **看板依赖 `webServer`**：headless 形态没有这个服务时不注册路由（日志会写「没有 webServer，跳过任务看板路由」），面板取不到数据；工具与派发不受影响。
+- **看板依赖 `webServer`**：headless 形态没有这个服务时不注册路由（日志会写「没有 webServer，跳过任务看板路由」——日志文案沿用既有字符串，未随展示名改动），面板取不到数据；工具与派发不受影响。
 - **看板最多返回 200 条**：计数按全量算，列表只截前 200；没有分页、没有历史归档。
-- **远程访问受限**：非回环地址只能通过同源页面看看板，远程 `curl` 会被 403；这是有意的（见「任务看板」的安全取舍）。
+- **远程访问受限**：非回环地址只能通过同源页面看看板，远程 `curl` 会被 403；这是有意的（见「派发工作台」的安全取舍）。
 - **重试有边界**：`running` / `queued` / `cancelled` 不能重试；重试沿用同一个任务 id，只把 `attempt` +1（会话无法恢复时换一个 worker 会话）。
 - **工作区目录必须可写**：`workspaceRegistry.create` 要求目录已存在，插件会先 `mkdir`；目录不可写时默认工作区创建失败（只记日志），
   显式指定 `workspace` 的派发会直接报错。没有 `workspaceRegistry` 时，`day` 模式退化为按任务 cwd 建会话。
@@ -605,7 +611,7 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 | 全量单测（`npm test`） | 0.3.0 | ✅ 32 pass / 0 fail（`tasks.test.js` 13 + `board.test.js` 19） |
 | 工作区自动准备 | 0.4.0 | ✅ `dispatch_workspaces` 返回默认工作区且 `sessions: 1`；磁盘上 `<workspaceRoot>` 已创建 |
 | 子会话住【派发】、活干在目标目录 | 0.4.0 | ✅ 子会话 `Get-Location` 返回目标工作区根（`…\Documents\mini-superagent`），而它的会话挂在【派发】工作区下 |
-| 自动归档 | 0.4.0 | ✅ 临时 `archiveAfterHours=0.001` / `archiveSweepMinutes=0.05`，约 20 秒后 4 个任务归档（`counts.archived: 4`）；`POST /board/archive` 200，再次调用返回 `scanned: 0`；配置已改回 24h / 10min |
+| 自动归档 | 0.4.0 | ✅ 临时 `archiveAfterHours=0.001` / `archiveSweepMinutes=0.05`，约 20 秒后 4 个任务归档（`counts.archived: 4`）；`POST /board/archive` 200，再次调用返回 `scanned: 0`；配置已改回 24h / 10min（0.4.0 当时的记录；0.9.0 起默认保留期是 168h） |
 | 看板 UI：归档视图 / 工作区筛选 / 批次聚合 / 跳转会话 | 0.5.0 | ⚠️ 仅代码审查；接口与快照由单测覆盖，浏览器渲染未验证 |
 | 输入框派发目标选择器、`@` 工作区 | 0.5.0 | ⚠️ 仅代码审查；`/board/target` 与 `targets` 快照有单测覆盖，界面未验证 |
 | 全量单测（`npm test`） | 0.5.0 | ✅ 50 pass / 0 fail（tasks 13 + board 26 + workspaces 11） |
@@ -636,11 +642,11 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 
 | 文件 | 内容 |
 | --- | --- |
-| [docs/tools.md](docs/tools.md) | 9 个工具的参数、返回、错误、何时用/何时别用 |
+| [docs/tools.md](docs/tools.md) | 10 个工具的参数、返回、错误、何时用/何时别用 |
 | [docs/architecture.md](docs/architecture.md) | 模块职责、数据流、设计取舍与依据 |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 排障表、日志前缀与恢复动作 |
 | [docs/workspaces.md](docs/workspaces.md) | 工作区模型、目录约定、解析规则、自动归档、限制与排障 |
-| [docs/board.md](docs/board.md) | 任务看板 + 分析数据看板：入口、面板结构、两条只读聚合接口、指标口径表、归档/工作区视图、跳转、重试、鉴权 |
+| [docs/board.md](docs/board.md) | 派发工作台 + 分析数据看板：入口、面板结构、两条只读聚合接口、指标口径表、归档/工作区视图、跳转、重试、鉴权 |
 | [docs/composer.md](docs/composer.md) | 输入框：派发目标选择器、`@` 工作区、chip 契约与降级、未验证清单 |
 | [docs/api-contracts.md](docs/api-contracts.md) | DSH 主机 API 契约取证（消息/Agent/事件/会话控制器/工具作用域） |
 | [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0、0.4.0、0.5.0 的差异 |
@@ -660,7 +666,7 @@ dsh-mini-superagent/
     store.js          # tasks.json 读写
     sessions.js       # DSH 适配：建会话、取 Agent、权限预设、提示注入、投递、切工作目录
     prompt.js         # 给模型的文本：工作方式提示 + worker 首条简报
-    tools.js          # 9 个工具定义
+    tools.js          # 10 个工具定义
     dispatch.js       # Dispatch 服务：launch/pump/settle/start/report/relay/message/cancel/retry/归档/targets
     board.js          # 看板 Host 半边：快照 + GET/POST 路由 + 同源校验
     workspaces.js     # 工作区：根/日期/安全目录名/解析/按需新建/归档
@@ -675,10 +681,10 @@ dsh-mini-superagent/
   LICENSE             # MIT
   docs/
     architecture.md   # 模块职责、数据流、设计取舍
-    tools.md          # 9 个工具的参数/返回/错误
+    tools.md          # 10 个工具的参数/返回/错误
     troubleshooting.md  # 排障表与日志前缀
     workspaces.md     # 工作区模型、解析、归档
-    board.md          # 任务看板：面板、接口、归档/工作区视图
+    board.md          # 派发工作台：面板、接口、归档/工作区视图
     composer.md       # 输入框派发目标与 @ 工作区
     api-contracts.md  # DSH 主机 API 契约取证
   CHANGELOG.md

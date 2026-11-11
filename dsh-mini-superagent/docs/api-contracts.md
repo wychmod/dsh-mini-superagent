@@ -308,7 +308,7 @@ export function deliver(target: Agent, key: string, text: string,
 |---|---|---|---|
 | 1 | `ContextFormed` 的逐字声明（asar 无 .d.ts，`MessageSourceMap` 投影里也没带它） | 类型报错 | 只用 `{kind, form:'relay'\|'notice', summary?}`；或本地 `as unknown as UserMessage` 强转（原型 `host.ts:37` 就这么干） |
 | 2 | `ctx.on(name, fn, {global:true})` 的精确语义 | 可能漏收其他 agent 的事件 | 在**根 ctx** 注册监听（原型实证可行）；必要时再加 `{global:true}` 并回归测试 |
-| 3 | `ctx.sessionPersistence.flush()` / `open(id,'read')` / `handle.read(offset,limit)` 的签名 | 跨重启幂等会挂 | 先只做"内存 + session 日志"级幂等（§7.2），把持久化幂等标 TODO；或改用 `subagents.startActivation` 的托管语义 |
+| 3 | `ctx.sessionPersistence.flush()` / `open(id,'read')` / `handle.read(offset,limit)` 的签名 | 跨重启幂等会挂 | 2026-11-10 已补**可选** `flush()` 屏障（`src/dispatch.js` 的 `#flushSessionPersistence()`）：能力探测 + try/catch 降级，结果记在 `task.delivery.durable` 与 `selfCheck().delivery.durability`。`open/read` 扫历史仍未做，真机签名仍需复核；弱幂等不假装强幂等 |
 | 4 | 省略 `agentOptions` 时 `ctx.agents.create` 的模型路由兜底 | worker 可能起不来/用错模型 | 一律显式传 `ctx.agentDefaultModel.currentSelection()`（官方控制器就是这么做，`:527-533`） |
 | 5 | `source.kind` 未知值在持久化/回放层是否被宽容 | 重启后可能读不出消息 | 先按 `{kind:'plugin', plugin:'dsh-dispatch'}` 旧形态起步（有历史先例），验证后再升级到专属 kind |
 | 6 | worker "完成 → 自动回报" 是否有现成钩子 | 需要自己实现 | **没有**。只有 `agent/status:'idle'` + 自己（用 taskId 关联）从 `agent.session` 里取最后一条 assistant 文本，然后 §7.2 投给父；或用 `subagents.startActivation().result` 这条现成通道 |

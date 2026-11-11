@@ -21,6 +21,16 @@
         reportOnTurnEnd: true
         # 投给 worker 的任务简报最大字符数，超出截断。
         maxBriefChars: 12000
+        # 接续判断：**只控制提示注入**，不是「让插件自动绑定」。
+        # 打开 = 提示里多一段「派发前先想一次这是不是接着上一条」；判定权仍在模型，
+        # dispatch_candidates / handoff_from 无论开关都可用。默认关：它改变的是模型行为。
+        autoHandoff: false
+        # 候选窗口（天）/ 每次上限 / 简报与最后报告摘要的截断长度。
+        # 窗口与 archiveAfterHours=168（7 天）对齐：更老的任务会被归档，而归档不能当复用来源。
+        handoffCandidatesDays: 7
+        handoffCandidatesLimit: 5
+        handoffBriefChars: 600
+        handoffReportSummaryChars: 600
 
         # ---- 容错 ----
         # worker 回合遇到瞬时故障（HTTP 408/429/5xx、连接被拒/重置、限流）时自动续跑。
@@ -49,7 +59,9 @@
         # 启用后每个任务得到 <root>/<标题>-<id后6位> 作为工作目录。
         taskDirRoot: ''
         # 任务目录不存在时在父目录执行一次的 prepare 命令，典型用法是 git worktree add。
-        # 环境变量：DSH_DISPATCH_DIR / _TASK / _TITLE / _WORKSPACE / _CWD。
+        # 环境变量（全名，见 src/prepare.js 的 prepareEnv）：
+        # DSH_DISPATCH_DIR / DSH_DISPATCH_TASK / DSH_DISPATCH_TITLE /
+        # DSH_DISPATCH_WORKSPACE / DSH_DISPATCH_CWD。
         # 失败即任务失败，不自动重试（目录可能已被写了一半）。
         prepareCommand: ''
         # prepare 命令超时（毫秒）。
@@ -83,7 +95,8 @@
         # 配成 target 会被当作 day 处理，不再报错。
         workerWorkspace: day
         # 子会话结束多少小时后自动归档；0 表示不归档。
-        archiveAfterHours: 24
+        # 168 = 7 天：24 小时会让看板「全部」隔一天就空，用户易误以为数据丢失。
+        archiveAfterHours: 168
         # 归档巡检间隔（分钟）；0 表示不巡检。
         archiveSweepMinutes: 10
         # 默认主会话的固定 id。

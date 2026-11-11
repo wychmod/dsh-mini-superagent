@@ -1,4 +1,4 @@
-# 9 个工具
+# 10 个工具
 
 全部工具注册在插件根 context，因此**对所有会话可见**。可调用性由 `execute` 里的判断决定，不靠注册作用域。
 
@@ -10,16 +10,17 @@
 - 参数用 snake_case（`agent_preset`、`permission_preset`、`create_workspace`），配置项用 camelCase（`maxWorkers`、`workspaceRoot`）。两套拼写别混。
 - `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` 只允许操作 `parentSessionId === 调用者 id` 的任务，跨会话访问直接报错。
 - 错误一律 `throw`，没有「部分成功」的返回值；`dispatch_launch_many` 是唯一会把单项失败收进结果数组的工具。
-- 9 个工具名是固定的（`src/tools.js` 的 `TOOL_NAMES`），不做别名。
+- 10 个工具名是固定的（`src/tools.js` 的 `TOOL_NAMES`），不做别名。
 
 ### 调用矩阵
 
 | 角色 | 应该调用 | 调了会怎样 |
 | --- | --- | --- |
-| 主会话（派发者） | `dispatch_launch` / `dispatch_launch_many` / `dispatch_workspaces` / `dispatch_list` / `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` / `dispatch_wait` | 正常 |
+| 主会话（派发者） | `dispatch_launch` / `dispatch_launch_many` / `dispatch_workspaces` / `dispatch_candidates` / `dispatch_list` / `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` / `dispatch_wait` | 正常 |
 | 主会话 | `dispatch_report` | 抛错：当前会话不属于任何派发任务 |
 | worker | `dispatch_report` | 正常 |
 | worker | `dispatch_workspaces` | 正常（只读，不要求 Agent，也不受任务归属限制） |
+| worker | `dispatch_candidates` | 正常（只读）；只看得到 worker 自己派出的任务（通常是空） |
 | worker | `dispatch_list` / `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` | 看不到父会话的任务；对父任务会报「不属于本会话」 |
 | worker | `dispatch_launch` | 不拦，会以 worker 自己为派发者新建任务；只受 `maxTasksPerSession` 限制。系统提示禁止这样做 |
 
@@ -73,12 +74,15 @@
 | `agent_preset` | string | 否 | 子会话 agent preset id；省略用部署默认 |
 | `permission_preset` | string | 否 | 子会话权限预设（如 `danger-full-access`）；省略用插件配置，再省略用 DSH 默认 |
 | `continue_task_id` | string | 否 | **续派**：把这个任务 id 的已有子会话接着用，只追加一条新要求（不新建任务）。不给 = 新派一个任务（默认行为，与旧版完全一致）。详见下文「续派」一节 |
+| `depends_on` | string[] | 否 | 前置任务 id，最多 8 个（`DEFAULTS.maxDependsOn`）；去重、去空，必须存在于活任务表**或退休留痕**，不能指向自己。语义见下文「依赖」一节：**任务开始前**判定，不是派发时判定 |
 
-`additionalProperties: false`：多传字段会被宿主拒绝。
+`additionalProperties: false`：多传字段会被宿主拒绝。新增的 `depends_on` 已声明在 properties 里；
+旧调用方不传它时行为与 0.8.x 逐字相同。
 
 ### 行为
 
 1. 校验本会话累计派发数，超过 `maxTasksPerSession`（默认 64）抛错。
+   传了 `depends_on` 时紧接着做依赖校验（见下节「依赖」）；**任一步失败都不会登记任务**。
 2. 给了 `workspace` 就先解析（id → 绝对路径 → 标题精确 → 标题包含）；解析不到且 `create_workspace !== false` 时按需新建，
    仍失败则抛错并列出已有工作区。没给 `workspace` 时用该会话的「派发目标」（输入框选择器/`@` 写入，见 [composer.md](composer.md)）；
    没有目标才沿用调用者目录。任务 `cwd` 取目标工作区路径。
@@ -107,6 +111,7 @@
 ```json
 {
   "task": { "task_id": "t-m0abc-1", "title": "重构 auth 模块", "status": "running", "session_id": "dispatch-t-m0abc-1", "...": "..." },
+  "depends_on": [],
   "note": "已入队/启动；接下来默认结束本轮，不要在本轮等它完成，报告会自己回来。"
 }
 ```
@@ -114,11 +119,44 @@
 返回的 `status` 是**返回瞬间**的状态：有空位时 `pump()` 已经同步占位，所以是 `running`；并发位满时是 `queued`。
 两种都代表任务已经派出去，别把 `queued` 当成失败或没派。
 
+`depends_on` 是**解析后**的前置 id 数组（去重、去空、保持声明顺序）；没有依赖时是空数组。
+
 ### 何时用 / 何时别用
 
 - 用：任务可独立完成，且主会话还有别的事可做。
 - 用：需要子会话保留上下文、后续还要追问。
-- 别用：任务之间有顺序依赖。先派 A，收到 A 的报告再派 B。
+- 用：任务之间有前后关系——传 `depends_on` 声明「我等谁」，不要再「先派 A、等报告回来再派 B」手搓两轮。
+- 别用：想要「前置失败自动重试前置」——没有这个能力（见「依赖」一节的非目标）。
+
+### 依赖：`depends_on`（PRD-02）
+
+```json
+dispatch_launch({ title: '补实现', brief: '…', depends_on: ['t-m0abc-1'] })
+```
+
+> 依赖在**任务开始前**判定，不是派发时判定。被依赖的任务没结算，这条任务会一直排队，
+> 不占 worker 并发位。前置失败/取消时，这条任务会被取消并标注原因，不会自动改派。
+
+判定规则（`src/dispatch.js` 的 `#blockedStateOf`）：
+
+| 前置状态 | 后继行为 |
+| --- | --- |
+| `done` | 满足，下一次 `pump()` 启动后继 |
+| `queued` / `running` | 等待，任务仍是 `queued`，`blocked_reason: 'running'` |
+| `failed` / `cancelled` / `interrupted` / `ended` / `blocked` | 连带取消，`cancel_reason: 'dependency_failed'`，`error_code: 'dispatch/dependency-failed'` |
+| 不在活表、退休留痕 `status === 'done'` | 满足（它做完了，只是被移出计算） |
+| 不在活表、退休留痕非 done 或不存在 | 连带取消，`cancel_reason: 'dependency_missing'`，`error_code: 'dispatch/dependency-missing'` |
+
+校验顺序（全部在 `table.add` 之前，失败不登记任务）：
+
+1. 形状（必须是字符串数组）→ `BAD_ARGS`；
+2. 去空 + 去重（保留首次出现顺序）；
+3. 数量超过 `maxDependsOn` → `BAD_ARGS`（**不静默截断**：少一条依赖是逻辑错误）；
+4. 不存在 → `UNKNOWN_DEPENDENCY`；自引用 → `BAD_ARGS`；
+5. 沿已有依赖边 DFS 查环（防御手工改过的账本）→ `DEPENDENCY_CYCLE`。
+
+非目标（与 PRD-02 §2 一致）：不做 DAG 可视化、不做跨批次编排、不做「前置失败自动重试前置」、
+不做「后继被取消后前置重跑自动复活后继」。`continue_task_id` 不新建任务，因此**不能**同时传 `depends_on`（会报错，不静默忽略）。
 
 ### 续派：`continue_task_id`（plans/08 阶段 1 · 模型 A）
 
@@ -191,17 +229,22 @@ dispatch_launch({ continue_task_id: 't-m0abc-1', title: '补一句', brief: '把
 
 ## dispatch_launch_many
 
-批量版 `dispatch_launch`，一次派 1–16 个互相独立的任务。
+批量版 `dispatch_launch`，一次派 1–16 个任务。默认并行；需要用 `depends_on` / `depends_on_index`
+声明先后顺序时，被等的任务结算后才启动。
 
 ### 参数
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `tasks` | array | 是 | 1–16 项；每项字段与 `dispatch_launch` 完全相同（`title` / `brief` 必填，可选 `cwd` / `workspace` / `create_workspace` / `model` / `agent_preset` / `permission_preset`） |
+| `tasks` | array | 是 | 1–16 项；每项字段与 `dispatch_launch` 相同（`title` / `brief` 必填，可选 `cwd` / `workspace` / `create_workspace` / `model` / `agent_preset` / `permission_preset`），另有两个批内依赖字段： |
+| `tasks[].depends_on` | string[] | 否 | 前置任务 id，最多 8 个；可引用本批前面已成功启动的任务，也可引用历史任务（规则同 `dispatch_launch`） |
+| `tasks[].depends_on_index` | number[] | 否 | 批内下标（0 起），只能指向**本批中排在自己前面**的 item；服务端在第 i 个 launch 成功后替换成真实 task id。指向自己 / 后面的项 / 越界 → `BAD_ARGS`，且该条不 launch |
 
 ### 行为
 
 - 顺序逐项调用 `launch`，每项单独 try/catch：某一项失败（比如撞上派发上限）不会中断其它项。
+- **批内依赖**：循环维护「位置 → 真实 task id」的映射。失败项占位为 `undefined`，所以后面的 item
+  用 `depends_on_index` 指向它时会解析不到 id，报 `UNKNOWN_DEPENDENCY`（PRD-02 §6），而不是错位指向别人。
 - 不是原子操作：前几项已经登记成功，后面某项失败时，前面的任务照常执行。
 - 整批任务共用一个 `group`（`g-<taskId>`）。等这一组全部结算后，插件给派发者发**一条**批次汇总，
   而不是 N 条流水；组内任一成员带 `groupClosed` 标记后不会重复汇总。
@@ -212,18 +255,21 @@ dispatch_launch({ continue_task_id: 't-m0abc-1', title: '补一句', brief: '把
 {
   "group": "g-t-m0abc-0",
   "launched": [
-    { "task_id": "t-m0abc-1", "title": "重构 auth 模块", "status": "running" },
-    { "title": "重构 billing 模块", "error": "Error: 本会话已派发 64 个任务，达到上限 64；请先收束旧任务" }
+    { "task_id": "t-m0abc-1", "title": "重构 auth 模块", "status": "running", "depends_on": [] },
+    { "title": "补实现", "status": "queued", "task_id": "t-m0abc-2", "depends_on": ["t-m0abc-1"] },
+    { "title": "重构 billing 模块", "error": "Error: …", "code": "dispatch/bad-args" }
   ],
   "note": "全部结算后会收到一条批次汇总。"
 }
 ```
 
-成功项有 `task_id` / `title` / `status`，失败项只有 `title` / `error`。
+成功项有 `task_id` / `title` / `status` / `depends_on`（解析后的前置 id）；失败项有 `title` / `error` / `code`
+（`code` 来自 `ERROR_CODES` 闭集，调用方不必解析中文）。
 
 ### 何时用 / 何时别用
 
 - 用：「把这 5 个模块分别重构」这类互不依赖的批量工作。
+- 用：「先改接口 → 再补实现 → 最后跑测试」：`depends_on_index: [0]` / `[1]`，不必先知道 id。
 - 别用：任务数超过 16，拆成多次调用。
 - 别用：想让这一批全部成功或全部不派——没有这种保证。
 
@@ -243,7 +289,7 @@ dispatch_launch({ continue_task_id: 't-m0abc-1', title: '补一句', brief: '把
 {
   "root": "C:\\Users\\…\\Documents\\mini-superagent",
   "worker_workspace": "day",
-  "archive_after_hours": 24,
+  "archive_after_hours": 168,
   "count": 3,
   "workspaces": [
     { "workspace_id": "ws-…", "title": "mini-superagent", "path": "C:\\Users\\…\\Documents\\mini-superagent", "sessions": 1 }
@@ -253,7 +299,7 @@ dispatch_launch({ continue_task_id: 't-m0abc-1', title: '补一句', brief: '把
 
 - `root`：工作区根（`workspaceRoot` 或默认值）。
 - `worker_workspace`：当前 `workerWorkspace` 配置（原始值；只影响无目标时的兜底）。
-- `archive_after_hours`：当前归档保留期。
+- `archive_after_hours`：当前归档保留期（默认 168 小时 = 7 天）。
 - `sessions`：该工作区的会话数，不是任务数。
 - 注册表不可用时返回 `count: 0`、空数组。
 
@@ -262,6 +308,113 @@ dispatch_launch({ continue_task_id: 't-m0abc-1', title: '补一句', brief: '把
 - 用：派发前确认目标工作区的 id / 标题 / 路径。
 - 用：排查「为什么子会话不在项目里」——先确认 `workspace` 或派发目标是否存在（有目标一定在目标里），再看 `worker_workspace`（它只管无目标时的兜底）。
 - 别用：它不是任务列表；看任务用 `dispatch_list` / 看板。
+
+---
+
+## dispatch_candidates
+
+**只读候选**：列出本会话派出的、已结算且仍在时间窗内的任务，并附上判断「这是不是接着上一条」所需的素材。
+
+**红线**：本工具只缩小范围、只给素材。它**不打分、不排序推荐、不自动绑定**——返回里没有 `score` / `rank` /
+`recommend` / `confidence` / `match` / `similarity` 这类键（`test/handoff-candidates.test.js` 的 G2 用例把守）。
+「这两条任务是不是同一件事的延续」是语义判断，只能由调用方（主会话的模型）做；要接就显式调用
+`dispatch_launch({ handoff_from, handoff_reason })`。
+
+### 参数
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `limit` | integer | 否 | `5` | 1–10，返回候选条数上限（越界夹到边界） |
+| `days` | integer | 否 | `7` | 1–30，只看最近 N 天**结算**的任务 |
+| `cwd` | string | 否 | 会话当前派发目标的路径，没有则会话当前目录 | 按目录圈定「同域」，比较不区分 Windows 大小写与斜杠 |
+| `workspace` | string | 否 | 会话当前派发目标 | 按工作区圈定；与 `cwd` 同时给时**两个都要满足** |
+| `all_workspaces` | boolean | 否 | `false` | `true` 时不按工作区/目录过滤（`scope.same_domain=false`）。跨目录候选**不能**当复用来源 |
+
+### 返回
+
+```jsonc
+{
+  "candidates": [
+    {
+      "task_id": "t-m0abc-1",
+      "title": "调研 Trae 功能差异",
+      "status": "done",                       // SETTLED：done/ended/failed/blocked/interrupted
+      "settled_at": "2026-11-11T07:30:00.000Z",
+      "settled_basis": "settledAt",           // 旧账本缺失时是 "updatedAt-fallback"
+      "age_hours": 6.2,
+      "brief": "……（≤ handoffBriefChars 字）……",
+      "brief_chars": 4213,                    // 简报原长，总是给
+      "brief_truncated_to": 600,              // 仅当被截时出现
+      "last_report": {                        // 无报告时是 null（不是 {}）
+        "status": "done",
+        "at": "2026-11-11T07:29:41.000Z",
+        "headline": "对照文档出好了，12 项差异", // worker 没写就没有这个键
+        "summary": "……（≤ handoffReportSummaryChars 字）……"
+      },
+      "report_count": 4,
+      "last_text": null,                      // 有报告时为 null（避免两份「结论」打架）
+      "error": null,                          // failed 的「为什么没成」（≤200 字）
+      "cancel_reason": null,
+      "thread_id": "thread-t-m0abc-1",
+      "parent_task_id": null,                 // 它自己接自谁
+      "workspace_id": "w-proj",
+      "workspace_title": "项目 A",
+      "host_workspace_id": "w-proj",
+      "host_workspace_title": "项目 A",
+      "cwd": "D:\\idea\\x",
+      "worker_session_id": "dispatch-t-m0abc-1",
+      "model": null,
+      "agent_preset": null,
+      "permission_preset": null,
+      "group": null,
+      "attempt": 1,
+      "created_at": "2026-11-11T05:00:00.000Z",
+      "session": { "busy": false, "active_task_id": null },
+      "successors": {                         // 已经接过它的任务（避免重复选同一条）
+        "active": [ { "task_id": "t-…", "status": "running", "title": "…" } ],
+        "settled_count": 1
+      },
+      "reuse_check": { "ok": true, "blocked_by": [] }
+    }
+  ],
+  "count": 1,
+  "considered": 12,                           // 参与筛选的任务总数（含被排除的）
+  "excluded": {                               // 让「为什么没有候选」可回答
+    "not_settled": 2,
+    "cancelled": 1,
+    "archived": 2,
+    "retired": 0,
+    "outside_window": 5,
+    "other_domain": 1
+  },
+  "scope": {
+    "same_domain": true,
+    "workspace_id": "w-proj",
+    "cwd": "D:\\idea\\x",
+    "days": 7,
+    "limit": 5,
+    "source": "session-target"                // explicit-args | session-target | session-cwd
+  },
+  "note": "只读候选，接不接由你判断；这里没有分数也没有推荐。要接就 dispatch_launch({ handoff_from, handoff_reason })。"
+}
+```
+
+- **取数规则**：只看本会话派出的任务；排除 `cancelled` / `archived` / 退休留痕 / 未结算；时间窗按
+  `settledAt`（缺失回退 `updatedAt` 并标 `settled_basis`）；排序只有「结算时间降序，同刻按创建时间」，
+  **不按「像不像」排**。
+- **`reuse_check` 只报告事实**：`ok:false` 的唯一常见原因是 `blocked_by: ["session-busy"]`——这条子会话上还有
+  running 任务，复用会与它抢同一回合。它**不含偏好**：`ok:true` 不等于「建议接」。真正会拒绝复用的校验
+  （模型 / preset / 工作区一致性等）只在 `dispatch_launch` 里跑，不在候选里复制第二套判据。
+- **退休记录只计数**：退休记录的正文（简报 / 报告）已被 `#retire()` 丢弃，拿不出判定素材，也不会出现在候选里；
+  `excluded.retired` 只回答「有多少条被退休挡掉了」。
+
+### 何时用 / 何时别用
+
+- 用：派发前不确定「这是不是接着某条已经做完的任务」时，先看一眼候选与素材——尤其是最后一条报告的 `summary`。
+- 用：用户说「接着刚才那个」但没给任务 id 时，用它把同域、最近的候选列出来再判断。
+- 别用：用户已经点名了具体任务 id —— 直接 `dispatch_launch({ handoff_from })`，候选不是派发的前置条件。
+- 别用：只想看进度 / 刚派了什么——用 `dispatch_list` / `dispatch_inspect`。
+- 拿不准时**倾向不接**：错接会把旧结论、旧模型、旧权限一起带进新任务，基本不可逆；漏接只是多一条会话。
 
 ---
 
@@ -523,6 +676,25 @@ worker 向派发者汇报。主会话不要调用。
 ```json
 { "recorded": true, "task_id": "t-m0abc-1", "status": "done", "admission": "direct" }
 ```
+
+**后台活会让「结算」延后**：worker 报 `done` 时若还挂着 shell job / subagent，
+报告照样入库、照样回流，但任务暂不释放并发位。此时返回里 `status` 仍是
+`running` 并多出 `deferred`：
+
+```json
+{
+  "recorded": true,
+  "task_id": "t-m0abc-1",
+  "status": "running",
+  "admission": "direct",
+  "deferred": true,
+  "note": "报告已记录；后台还有 job/subagent 在跑，任务等后台清空后再结算"
+}
+```
+
+后台清空后会按 worker **自己报的那个终态**结算（`blocked` 不会被改成 `done`），
+且不会再发「worker 没给结论」的兜底回报。这是为了避免显式 `dispatch_report`
+成为 `agent/status → idle` 那条后台活门禁的后门，详见 `docs/architecture.md` §24。
 
 只入库、不回流时（`progress` 的默认行为）：
 

@@ -4,6 +4,131 @@
 
 ## 未发布
 
+### 新增：批次依赖（`depends_on`，PRD-02）
+
+后一步可以等前一步：`dispatch_launch` 增 `depends_on`，`dispatch_launch_many` 的 item 增
+`depends_on` / `depends_on_index`（批内下标，服务端替换成真实 task id）。**依赖在任务开始前判定**，
+被等的任务没结算就一直排队，不占 `maxWorkers`；前置失败/取消时后继被**连带取消**并写
+`cancel_reason` / `error_code`，不会自动改派。
+
+- 不新增任务状态：等待仍是 `queued + blockedBy`，连带取消仍是 `cancelled`；`TRANSITIONS` /
+  `SETTLED` / 统计分母 / 看板状态色都没有动。
+- 任务新增 `dependsOn` / `blockedBy` / `blockedReason` / `cancelReason` / `errorCode`，随账本原样落盘；
+  重启后在第一次 `pump()` 之前做一次收敛（前置 `interrupted` / 缺失 → 后继取消），
+  不会出现「没等就开跑」。
+- 看板新增五个短字段（`depends_on` / `blocked_by` / `blocked_reason` / `cancel_reason` / `error_code`）；
+  任务行「依赖 2 / 等 A / 前置失败」、抽屉「前置：A、B」「当前等待：A（运行中）」「未执行原因：前置 A 失败」、
+  批次头「3 个成员 · 1 个等待前置 · 1 个未执行」。
+- 错误码新增 `UNKNOWN_DEPENDENCY` / `DEPENDENCY_CYCLE` / `DEPENDENCY_FAILED` / `DEPENDENCY_MISSING`；
+  配置新增 `maxDependsOn`（默认 8，超限报错、不静默截断）。
+- 兼容：不传依赖时任务形状与行为与 0.8.x 逐字相同（`takeRunnable` 的谓词默认恒真）。
+
+### 更名：任务看板 → 派发工作台（英文 `Dispatch Workbench`）
+
+用户拍板的**纯展示名**改动，不改任何内部标识：
+
+- 改的：`client/index.js` 的 `TEXT.title` / `TEXT_EN.title`、`sidebar.panellist` 注册时的
+  `label`，以及把它当产品名说的用户可见文案——分析视图切换条（`an.surfaceTasks`）、
+  切换条提示（`an.surfaceHint`）、加载提示（`an.loadingHint`）、错误态返回入口（`an.backTasks`）；
+  两个 `README.md`、`docs/board.md`、`preview/board-preview.template.html` 同步更名。
+- 不动的：路由 `/board*`、`BoardSnapshot` / `boardTask` 等字段、`createBoardHandler` /
+  `registerBoardRoutes`、`sidebar.panellist` 的 `id`（`dsh-mini-superagent.board`）、
+  `TEXT` / `TEXT_EN` 的键名与键集合、`dsh-sa-*` 类名、文件名（`docs/board.md`、`src/board.js`、
+  `preview/board-preview.*`）。本文件里 0.3.0 以来的历史记录保持原样（那是历史事实）。
+- 生效方式：**不需要重启宿主**——客户端半边是页面加载的模块，改写 `client/index.js` 只换模块
+  rev（`plans/03-client-graph.md` §3.5 已按 `rebuilt(id)` 实测口径写明）。刷新一次 GUI 页面
+  必定生效；宿主若接了客户端 HMR，也可能不刷新就换掉。
+
+### 变更：自动归档保留期 24 小时 → 168 小时（7 天）
+
+用户反馈「看板隔一天就空了」：`archiveAfterHours` 默认 24 小时，昨天结算的任务
+第二天就被 `archiveStale()` 归档，而看板「全部」chip 不含已归档任务。
+
+- `DEFAULTS.archiveAfterHours`（`src/constants.js`）与随包 `cordis.patch.yml`
+  同步改为 `168`；README / `docs/workspaces.md` / `docs/tools.md` / `docs/board.md`
+  里的默认值描述一并更新，0.4.0 的历史实测记录保留原值并加注。
+- 看板总览为空时新增提示「还有 N 条历史已归档，可在『已归档』查看」：N 取快照
+  已有的 `counts.archived`，不新增接口；`client/index.js` 的 `TEXT` / `TEXT_EN`
+  各加一条 `emptyArchivedHint`。
+- 这是 **bundle 配置层**的改动：配置在宿主启动时读取，运行中的进程不会自动重读，
+  因此需要重启宿主后 `dispatch_workspaces` 的 `archive_after_hours` 才会变成 168。
+
+### 修复：后台活生命周期、账本落盘与契约一致性（评估 P0）
+
+依据 `analysis/assessment-and-roadmap-2026-11-10.md` 的 P0 清单与
+`analysis/session-evaluation-2026-11-08.md` 的行为探针，一次修掉「代码在、
+语义没闭环」的几条。全部是修复，不新增功能。
+
+**后台活三条 P0（`src/dispatch.js` / `src/index.js`）**
+
+- **终态报告不再绕过门禁**：`dispatch_report(status:'done'|'blocked'|'failed')`
+  原先直接 `settle()`，只有 `onWorkerIdle()` 才查后台活。现在先记
+  `task.pendingTerminal` 并走 `handOffToBackground()`：有活就不结算，报告照常
+  入库回流，返回里多一个 `deferred:true`；巡检收尾时按 worker 自己报的终态
+  结算，不退化成 `done`，也不再发「没给结论」的兜底回报。
+- **取消会终止后台活**：`cancel()` 先 `await killBackground(task)` 再结算。
+  subagent 没有可验证的终止接口，明确记在 `task.backgroundNote` 并 warn，
+  不假装停干净了（此前 `jobs.kill` 实测调用 0 次）。
+- **重启接管巡检**：`restore()` 读到 `task.background` 时先问宿主还有没有活，
+  有就记进 `pendingBackgroundWatchers`；`apply()` 在 `pump()` 之后调
+  `resumeBackgroundWatches()` 重挂。两个可选服务尚未就绪时保留这条事实，
+  不把它抹成 `interrupted`。
+- **一行缺陷**：`killBackground()` 漏了 `await jobs.list(sessionId)`，
+  `Array.isArray(Promise)` 恒 false，一个 job 都杀不到却对外宣称已终止。
+- 新一轮开始时 `workerTurnStarted()` 清掉 `pendingTerminal`，避免上一轮的
+  结论串到下一轮。
+
+**账本与投递（`src/dispatch.js`）**
+
+- 新增 `persistCritical()`：清掉 800ms 防抖定时器并 `await persist()`。
+  结算、报告、派发登记、追问、取消、后台活变更、失败回合都等写完再返回——
+  既消除「已 `dispatch_report done` 却仍读到 `running`」的窗口，也避免
+  无人等待的写盘与调用方清理动作抢文件句柄（Windows 上表现为 EBUSY）。
+- `restore()` 用账本里已有的终态报告（或 `pendingTerminal`）纠正 stale
+  `running`，不再一律标成 `interrupted`；恢复结果本身也会立即落盘，
+  下次重启不会重复判一次。
+- 投递成功后尝试 `ctx.sessionPersistence.flush()` 作为可选持久化屏障，
+  结果记在 `task.delivery.durable`；拿不到服务或调用抛错就退回弱幂等，
+  只 warn 一次并由 `selfCheck().delivery.durability` 回显，绝不假装已持久化。
+- `selfCheck()` 新增 `background`（活跃数 / 巡检数 / 待重挂 / 终止 job 数 /
+  延迟终态数）与 `delivery.degraded`、`delivery.durableOk`。
+
+**契约与可维护性**
+
+- 新增 `ERROR_CODES` 闭集与 `fail()` / `codeOf()`（`src/constants.js`）：
+  9 个工具在 `registerTools()` 统一贴 `code`（中文 `message` 保持不变），
+  看板所有 `ok:false` 响应按 HTTP 状态自动带闭集 `code`。
+- 看板路由前缀收口到 `constants.js` 的 `BOARD_BASE`；浏览器半边
+  `client/index.js` 无法 import（不打包），改为由新增的
+  `test/contract-consistency.test.js` 在每次 `npm test` 时钉住两处逐字一致。
+- 修 4 处文档漂移：`prepareEnv` 的 5 个环境变量在 `cordis.patch.yml` /
+  README / 架构文档里写全名（不再用 `_TASK` 缩写）、`store.js` 注释不再声称
+  「任务表是辅助信息」、`tools.js` 头部改成「9 个工具」、README 的
+  `dispatch_list` 示例版本对齐 `0.8.0`；`CHANGELOG` 重复的 `0.5.2` 订正为
+  `0.5.3`（附订正说明）。
+- 同样的「一致性」变成 7 条可执行断言：路由前缀、示例版本、工具数量、
+  环境变量全名、store 口径、版本号唯一、错误码唯一。
+
+**文档**：`docs/tools.md` 补 `deferred` 返回形态，`docs/architecture.md` §24
+补这一轮四条修复的取舍。
+
+**验证**
+
+- `npm test` **476 条**（470 pass / 0 fail / 6 cancelled）。6 条 cancelled 是
+  `tasks.test.js` 既有的父子超时用例，基线即如此，与本轮无关；连续 5 轮结果一致。
+- 新增 `test/background-lifecycle.test.js` 7 条（终态报告延迟结算、按
+  pendingTerminal 收尾、取消终止 job、异步 `jobs.list` 生效、重启重挂巡检、
+  stale running 自愈、工具错误码）、`test/contract-consistency.test.js` 7 条。
+- `node scripts/client-smoke.mjs` **394 项全过**；`node --check` 覆盖全部
+  `src/*.js` 与 `test/*.js`。
+- `background.test.js` 两处固定 `sleep` 改轮询等条件：巡检收尾现在要等一次
+  真实写盘，慢盘/冷启动下 60ms 不够，此前会偶发失败。
+
+**本轮仍未做**（不在代码能力范围内，不假装完成）：真机视觉验收三关与只能
+目视的 6 项（需要宿主 GUI 与浏览器）；`sessionPersistence.flush()` 在本机
+仍属静态取证，真机签名需复核；配置 schema / 包内四层拆分 / TypeScript
+类型闸门属于下一阶段结构性改造。
+
 ### 修复：12 条口径与复活路径缺陷
 
 一次集中修复，主题是「**已结算的任务被复活时，上一轮的事实没有跟着失效**」，
@@ -681,7 +806,7 @@ P1 只动提示词这一层——机制不变，把**表达方式**补进主会�
   **没做**「任务结算后收走工作工具」：我们的 `dispatch_message` 允许续跑，收走会让续跑失效。
 - **每任务目录 + prepare 命令**（新增 `src/prepare.js`）：配 `taskDirRoot` 后每个任务得到
   `<root>/<标题安全名>-<id后6位>`；目录不存在时在**父目录**跑一次 `prepareCommand`
-  （环境变量 `DSH_DISPATCH_DIR` / `_TASK` / `_TITLE` / `_WORKSPACE` / `_CWD`），已存在则跳过。
+  （环境变量 `DSH_DISPATCH_DIR` / `DSH_DISPATCH_TASK` / `DSH_DISPATCH_TITLE` / `DSH_DISPATCH_WORKSPACE` / `DSH_DISPATCH_CWD`），已存在则跳过。
   之后 `task.cwd` 指向任务目录，会话仍挂在目标/【派发】工作区，由 `enterDirectory()` 切进去。
   失败即 `failed` + 回报，**不建子会话、不自动重试**（目录可能已被写了一半）。
 - 看板：任务卡新增 `task_dir` / `prepare_at` / `background` / `background_killed`，
@@ -964,7 +1089,10 @@ P1 只动提示词这一层——机制不变，把**表达方式**补进主会�
 - HTTP：`POST /board/target` 传 `""` 或 `"none"` 都返回 `{ok:true,target:null}`。
 - **未做视觉验收**：两处菜单的新首项与文案仍需真机目视。
 
-## 0.5.2 — 2026-11-06
+## 0.5.3 — 2026-11-06
+
+> 版本号订正：此段此前误记为 `0.5.2`，与本文件下一节重复。按倒序发布顺序
+> 它晚于 0.5.2、早于 0.6.0，故订正为 0.5.3；内容未改动。
 
 `@` 派发目标菜单里加一条常驻的「自动选择」，不用手动翻列表。
 

@@ -250,7 +250,7 @@ dispatch_launch({ workspace: "某项目", ... })
 {
   "root": "C:\\Users\\…\\Documents\\mini-superagent",
   "worker_workspace": "day",
-  "archive_after_hours": 24,
+  "archive_after_hours": 168,
   "count": 3,
   "workspaces": [
     { "workspace_id": "ws-…", "title": "mini-superagent", "path": "C:\\Users\\…\\Documents\\mini-superagent", "sessions": 1 }
@@ -271,7 +271,7 @@ dispatch_launch({ workspace: "某项目", ... })
 ### 规则
 
 - 巡检间隔 `archiveSweepMinutes`（默认 10 分钟），首次延迟 20 秒；`0` 表示不巡检。
-- 保留期 `archiveAfterHours`（默认 24 小时）；`0` 表示不自动归档（巡检也不会启动）。
+- 保留期 `archiveAfterHours`（默认 168 小时 = 7 天）；`0` 表示不自动归档（巡检也不会启动）。
 - 候选：任务已结算（`done / blocked / failed / cancelled / ended / interrupted`）、没有 `archivedAt`、
   `updatedAt` 早于 `now - archiveAfterHours`。
 - 动作：`workspaceRegistry.archiveSession(workerSessionId, { stopActivity: true })`。
@@ -298,7 +298,7 @@ dispatch_launch({ workspace: "某项目", ... })
 - 归档失败只在看板快照的 `archive_error` 里出现；`dispatch_list` / `dispatch_inspect` 的卡片不带这个字段。
 
 实测：把 `archiveAfterHours` 临时改成 `0.001`、`archiveSweepMinutes` 改成 `0.05`，约 20 秒后 4 个任务全部归档成功
-（`counts.archived: 4`）；随后配置已改回 24h / 10min。
+（`counts.archived: 4`）；随后配置已改回 24h / 10min（这是 0.4.0 当时的记录；0.9.0 起默认保留期是 168h）。
 
 ---
 
@@ -309,7 +309,7 @@ dispatch_launch({ workspace: "某项目", ... })
 | `workspaceRoot` | `''` | 工作区根；空表示 `<用户文档目录>/mini-superagent` |
 | `provisionDefaultWorkspace` | `true` | 启动时创建默认工作区与主会话；失败只记日志 |
 | `workerWorkspace` | `day` | **无目标时**的兜底：`day` = 当天【派发】工作区；`cwd` = 直接用任务 cwd。有目标时与它无关 |
-| `archiveAfterHours` | `24` | 结束多少小时后归档；`0` 不归档 |
+| `archiveAfterHours` | `168` | 结束多少小时后归档（7 天）；`0` 不归档 |
 | `archiveSweepMinutes` | `10` | 巡检间隔（分钟）；`0` 不巡检 |
 | `leadSessionId` | `mas-lead` | 默认主会话的固定 id |
 
