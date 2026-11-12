@@ -1918,6 +1918,30 @@ export class Dispatch {
     const summary = String(input.summary ?? '').trim()
     if (!summary) throw new Error('dispatch_report 需要 summary')
 
+    /**
+     * 撤回「假定死亡」（回归 t-mwcbmq2a-2：已完成的任务被显示成已中断）。
+     *
+     * `interrupted` 不是 worker 的结论，而是一条**推断**：`restore()` 按「进程重启
+     * ⇒ 没有活的 worker」把还没结算的 `running` 判死。插件**热重载**不满足这条前提
+     * ——重载只换插件实例，宿主的子会话与它正在跑的回合都还在；于是账本记着
+     * interrupted，worker 却继续干到几十分钟后才报 done。
+     *
+     * 这份报告本身就是「它没死」的证据：先撤回状态，再走下面的正常结算路径，
+     * worker 自己的结论（done / failed / …）才能落到账本上。不撤回的代价是实打实的：
+     * `TaskTable.settle()` 见到 `SETTLED` 直接返回 false，报告只能入库，
+     * 状态永远停在 interrupted——完成率、并发位、看板全错，后继还会被
+     * `#failDependents()` 连带取消（事故里那 20 分钟就是这种状态）。
+     *
+     * 只撤回 `interrupted`，别的终态都不碰：`done`/`blocked`/`failed`/`ended` 是
+     * 真实结论，`cancelled` 是用户意图（它在上面已经早退了），归档任务是只读冻结，
+     * 都不该被一条报告改写。
+     */
+    if (task.status === 'interrupted' && !task.archivedAt) {
+      this.table.transition(task, 'running', { force: true })
+      this.warn(`${LOG_PREFIX} 任务 %s 被标成 interrupted，但子会话 %s 仍在发报告：撤回死亡假定，按 worker 的结论收尾`,
+        task.id, task.workerSessionId)
+    }
+
     const entry = this.#admitEntry(status, input)
     /**
      * 计划（PRD-01 §4.2）：**只写 `task.plan`，不进 `entry`**。
@@ -2813,6 +2837,47 @@ export class Dispatch {
         + '请新派一个任务')
     }
 
+    /**
+     * 依赖准入：**还在等前置的排队任务不接受任何投递**（PRD-02 §4.3 的反向约束）。
+     *
+     * 为什么必须挡在这里：`dependsOn` 是调用方自己声明的顺序约束。被挡住的任务停在
+     * `queued`，`blockedBy` 非空；而 `message()` 下面的 `transition(force)` 会把它直接
+     * 改成 `running` 并摘出队列——用户看到的是「还在等 A，B 却开跑了」，声明好的先后
+     * 顺序被一条追问打乱。这不是「消息发错了」，是**约定本身失效了**：没有任何信号表明
+     * 调用方知道自己要插队。
+     *
+     * 为什么默认拒绝而不是收 `force` 参数：这里没有「用户明确要求插队」这条事实可以
+     * 依据（`dispatch_cancel` 才是用户表达「这条我不要了」的入口）。一个默认关闭的
+     * 开关在这里只会让模型在不知道自己在干什么的时候把它打开。
+     *
+     * 为什么用 `#blockedStateOf()` 现算而不是读 `task.blockedBy`：后者是 `pump()` 每轮
+     * 重算的派生快照，只在队列里刷新；现算保证「此刻到底等不等前置」是事实而不是
+     * 缓存，也不会因为前置刚结算、下一轮 pump 还没跑就把一条已经可以开始的任务拒掉。
+     *
+     * 复用的错误码是 `CONFLICT`：与同一文件里「已结算不能取消」「会话被其他任务占用」
+     * 同族，语义都是「当前状态不允许这个动作」。没有为它新造错误码——依赖相关的四个码
+     * （UNKNOWN_DEPENDENCY / DEPENDENCY_CYCLE / DEPENDENCY_FAILED / DEPENDENCY_MISSING）
+     * 描述的都是「依赖声明本身出了问题」，而这里声明是合法的，只是**还没轮到**。
+     *
+     * 三条入口共用这一道闸：`dispatch_message`、`dispatch_launch({continue_task_id})`
+     * 与看板的「续派」都经由本方法投递，所以文案里同时点明「追问与续派都会被挡」。
+     * （`dispatch_wait` 不经过 `message()`，它只是等结算，不受影响。）
+     */
+    if (task.status === 'queued') {
+      const verdict = this.#blockedStateOf(task)
+      if (verdict.blockedBy) {
+        const stateText = {
+          [BLOCK_REASONS.RUNNING]: '还在运行',
+          [BLOCK_REASONS.FAILED]: '已经以非 done 的终态结算',
+          [BLOCK_REASONS.MISSING]: '已不在账本里（退休留痕不是 done，或查不到）',
+        }[verdict.blockedReason] ?? '还没结算'
+        throw fail('CONFLICT', `任务 ${task.id} 还在等前置 ${verdict.blockedBy}（它${stateText}）：`
+          + '这条任务的 depends_on 还没满足，现在投递消息会把它直接变成 running，'
+          + '声明好的先后顺序就失效了。等前置结算后这条任务会自动开始；'
+          + '要放弃它，请用 dispatch_cancel 取消（追问与续派都是往子会话投消息，走的是同一条准入）')
+      }
+    }
+
     const agent = this.ctx.agents.get(task.workerSessionId)
     if (!agent) {
       // 会话可能被关掉了；先尝试恢复，恢复不了就明确报错，不要假装投递成功。
@@ -3680,7 +3745,36 @@ export class Dispatch {
   }
 
   /**
+   * 宿主里这条子会话是不是还活着、且正在干活。
+   *
+   * 只问 `ctx.agents` 这一个活引用（与 `message()`、`#resolveReusedAgent()` 同一口径）：
+   * 活引用本身就是「会话存在」的直接证据，不需要额外探测。宿主没装 agents 服务、
+   * 或查询抛错时一律返回 false —— 恢复流程不能因为一次探测失败把插件起不来，
+   * 那种情况下退回旧行为（一律标 interrupted）也是安全的。
+   *
+   * 为什么还要看 `status`：会被读到 `idle` 的会话活着但没在干活（重载之前那一轮
+   * 就结束了），没有回合会再给它送报告——留成 `running` 会永久占住一个并发位、
+   * 而且永远等不到结算。只有「活着且不是在 idle」才值得保留。宿主没暴露这个字段时
+   * （`undefined`）按「还活着」处理：宁可等那份迟到的报告，也不要重演这次的误判。
+   *
+   * 为什么需要它：`restore()` 的旧前提是「进程重启 ⇒ 没有活的 worker」，而插件
+   * **热重载**只换插件实例、不销毁宿主的子会话与它正在跑的回合（回归 t-mwcbmq2a-2）。
+   */
+  #liveWorker(sessionId) {
+    if (!sessionId) return false
+    try {
+      const agent = this.ctx.agents?.get?.(sessionId)
+      return !!agent && agent.status !== 'idle'
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * 启动时读回任务表与派发目标；进程之间没有活的 worker，所以未结算的一律标为 interrupted。
+   *
+   * 例外：插件热重载。`#liveWorker()` 能查到的子会话（热重载后仍然活着）保留
+   * `running`，不替它宣布死亡——详见下面恢复循环里的活会话兜底。
    *
    * 派发目标：不能再按 `workspace_id` 过滤——`auto` 目标没有 workspace_id，
    * 0.6.0 之前被这行过滤掉，导致用户设的「自动选择」每次重启都失效。
@@ -3702,6 +3796,10 @@ export class Dispatch {
       let requeued = 0
       let healed = 0
       let resumedBackground = 0
+      // 热重载：会话还活着、不能判死的 running 任务（见下面 `#liveWorker()` 那段）
+      let keptAlive = 0
+      // 被误判成 interrupted、但账本里有更晚的终态报告 —— 按 worker 的结论纠正的条数
+      let reconciled = 0
       for (const item of state.tasks) {
         if (!item?.id || !item?.workerSessionId) continue
         const task = {
@@ -3809,6 +3907,28 @@ export class Dispatch {
             continue
           }
           /**
+           * 活会话兜底（回归 t-mwcbmq2a-2）。上面每一条判据的前提都是「进程重启
+           * ⇒ 没有活的 worker」，而**插件热重载**不满足它：重载只换插件实例，
+           * 宿主的子会话与它正在跑的回合都还在。此时把它标成 `interrupted`，
+           * 等于在 worker 干活时替它宣布死亡——它后来那份 done 报告会被
+           * `TaskTable.settle()` 的幂等挡掉，账本永远停在「已中断」。
+           *
+           * 判据是「宿主里这条会话还在、而且不是在 idle」（与 `message()` 同一口径的
+           * `ctx.agents` 活引用，见 `#liveWorker()`）。真重启时它不在（会话随进程没了），
+           * 照旧走下面的 interrupted；活会话万一之后还是死了，`agent/disposed` 与
+           * `onWorkerIdle()` 这两条现成路径照样会收尾。
+           *
+           * 只对 `running` 生效：`queued` 带着上一轮 `startedAt` 的任务不在队列里，
+           * 保留它反而会让它卡死；那种情况仍按原逻辑收敛成 interrupted。
+           */
+          if (task.status === 'running' && this.#liveWorker(task.workerSessionId)) {
+            keptAlive += 1
+            this.log(`${LOG_PREFIX} 重启后任务 %s 的子会话 %s 仍然活着：保留 running，不标 interrupted`,
+              task.id, task.workerSessionId)
+            this.table.tasks.set(task.id, task)
+            continue
+          }
+          /**
            * 这里必须走正规入口，不能裸写 `task.status`（plans/09 P0）。
            *
            * 裸写的代价有两层：`interrupted` 在 `SETTLED` 里是终态，裸写不会写
@@ -3830,11 +3950,48 @@ export class Dispatch {
            * 唤醒），但重启恢复发生在启动阶段、还没有任何调用方在等，无需唤醒。
            */
           this.table.transition(task, 'interrupted', { force: !canTransition(task.status, 'interrupted') })
+        } else if (task.status === 'interrupted') {
+          /**
+           * 「假定死亡」被更晚的终态报告推翻（回归 t-mwcbmq2a-2 的存量修法）。
+           *
+           * `interrupted` 是推断，账本里的终态报告才是 worker 自己的结论。判据是
+           * **报告晚于 settledAt**：那才证明「我们宣布它死之后它其实还活着、还给了
+           * 结论」。只比「有没有终态报告」会误伤——前置被 retry 重开的任务会留着
+           * 上一轮的 done，那不是这一轮的事实。
+           *
+           * 纠正必须现在做，而不是留给「下一次报告」：任务已经收工，不会再有报告；
+           * 不纠正的话，一条已完成的任务会永久显示成「已中断」，完成率与后继判定
+           * 都跟着错。
+           */
+          const announcedAt = Date.parse(task.settledAt)
+          const late = Number.isFinite(announcedAt)
+            ? [...task.reports].reverse().find(entry => TERMINAL_REPORT.has(entry?.status)
+              && typeof entry.at === 'string' && Date.parse(entry.at) > announcedAt)
+            : undefined
+          if (late) {
+            /**
+             * 结算时刻用**报告自己的时刻**：误判那一笔（事故里是 16:20:08）比真实
+             * 收尾早了 20 分钟，沿用它会让完成时刻、按天趋势、占用时长一起前移。
+             * `#markSettled()` 幂等（见到已有值就不写），所以先写正确的值再 transition。
+             */
+            const announcedIso = task.settledAt
+            task.settledAt = late.at
+            // 先进表再 transition：`transition()` 的绑定维护会校验「这条任务在不在表里」，
+            // 顺序反了（先 transition 再进表）它会把这次状态变化当成别的任务的事。
+            this.table.tasks.set(task.id, task)
+            this.table.transition(task, late.status, { force: true })
+            this.warn(`${LOG_PREFIX} 任务 %s 被判成 interrupted（%s），但它在 %s 报了 %s：按 worker 的结论纠正`,
+              task.id, announcedIso, late.at, late.status)
+            reconciled += 1
+            continue
+          }
         }
         this.table.tasks.set(task.id, task)
       }
       if (requeued) this.log(`${LOG_PREFIX} 重启后重新入队 %d 个未启动的任务`, requeued)
       if (resumedBackground) this.log(`${LOG_PREFIX} 重启后待重挂 %d 个后台活巡检`, resumedBackground)
+      if (keptAlive) this.log(`${LOG_PREFIX} 重启后保留 %d 条活会话支撑的 running 任务`, keptAlive)
+      if (reconciled) this.warn(`${LOG_PREFIX} 重启后按晚到的终态报告纠正 %d 条误判的 interrupted`, reconciled)
       if (healed) this.log(`${LOG_PREFIX} 重启后按账本里的终态报告纠正 %d 条 stale running`, healed)
       // P0-5：退休留痕读回 `this.retired`，**绝不当活任务恢复**。
       // 它们是「已经决定不再参与计算」的记录：塞回 table.tasks 会让它们

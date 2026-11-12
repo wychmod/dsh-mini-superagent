@@ -55,6 +55,12 @@
 | `recent_reports` | array | 最近 5 条 `{at, status, headline?, summary, detail?, truncated?}` |
 | `last_worker_text` | string | worker 最后一条 assistant 文本，≤3000 字符 |
 
+> **计划的完整步骤不在 `card` / `detail` 里**：`dispatch_report` 的 `plan` 只写账本字段 `task.plan`
+> （连同 `plan_updated_at`），`card()` 与 `detail()` 都**不投影**它；看板快照只给 `plan_total` /
+> `plan_done` / `plan_current` 三个标量（见 [board.md](board.md)）。所以「想看全量计划走
+> `dispatch_inspect`」目前只是计划书里的说法，代码里没有落点——完整步骤只能读账本文件
+> （`<stateDir>/tasks.json` 的 `tasks[].plan`）。这是当前实现的缺口，不是客户端漏了渲染。
+
 ---
 
 ## dispatch_launch
@@ -508,9 +514,10 @@ dispatch_launch({ continue_task_id: 't-m0abc-1', title: '补一句', brief: '把
 ### 行为
 
 1. 任务已 `cancelled` → 直接抛错，不能复活。
-2. 找不到活的 worker Agent 时，尝试 `sessionController.resolveAgent` 恢复；恢复失败就抛错，不假装投递成功。
-3. 任务置 `running`，记录 `turnStartedAt`。
-4. 投递：`queue` 走 `followup`（目标空闲时唤醒它开新一轮）；`steer` 只在 worker 正在跑时 `steer` 当前回合，否则退化为 `followup`。
+2. 任务还在等前置（`depends_on` 没满足、`blockedBy` 非空、停在 `queued`）→ 抛 `dispatch/conflict`，不投递、状态保持 `queued`；等前置结算后它会自动开始，要放弃请用 `dispatch_cancel`。续派（`dispatch_launch({continue_task_id})` 与看板「续派」）走同一条准入，同样被挡。
+3. 找不到活的 worker Agent 时，尝试 `sessionController.resolveAgent` 恢复；恢复失败就抛错，不假装投递成功。
+4. 任务置 `running`，记录 `turnStartedAt`。
+5. 投递：`queue` 走 `followup`（目标空闲时唤醒它开新一轮）；`steer` 只在 worker 正在跑时 `steer` 当前回合，否则退化为 `followup`。
 
 ### 返回
 
@@ -620,6 +627,7 @@ worker 向派发者汇报。主会话不要调用。
 | `headline` | string | 否 | **一句话给用户看的结论，≤40 字**。不含任务 id、不含 `done`/`failed`/`blocked` 这类英文状态词、不重复任务名（外层「任务」行已经标了是哪条）。写「登录超时修好了，补了 3 个回归测试」，不要写「已完成开发工作」。省略时系统用「标题 + 状态」生成兜底句（**不会空着**），但兜底句只说得出成没成、说不出做成了什么。入库上限 120 字符（`HEADLINE_LEDGER_MAX`） |
 | `summary` | string | 是 | 3–6 行：做了什么、结果、需要主会话做什么（如有）。空字符串会报错；**入库上限 6000 字符**（`maxReportSummaryChars`） |
 | `detail` | string | 否 | 长详情：改动清单、验证命令与输出、遗留问题；**入库上限 4000 字符**（`maxReportDetailChars`）。**只进账本与 `dispatch_inspect`，不随报告回流** |
+| `plan` | array | 否 | **任务计划**（PRD-01）：`[{text, status}]`，数组顺序即执行顺序；`status ∈ pending \| doing \| done`（缺省 `pending`，未知值也按 `pending`），`text` 必填、空文案会被丢弃。**每次传都是整版替换**，不做增量合并、没有 step id。上限 `maxPlanSteps`（默认 12 步）/ `maxPlanStepChars`（默认 120 字）：步数或单步字数超限**截断不报错**，返回值 `plan_truncated: true`。只写 `task.plan`，**不进 `recent_reports`**；不参与投递 / 合并判定，因此不产生新的会话消息 |
 
 > `headline` 与 `summary` 分工不同：前者是**用户读的那一句**，后者是**主会话读的技术摘要**。
 > 两者都入库；回流给主会话的那份报告只带 `headline` + 压缩后的 `summary`（投影预算 800 字符），
@@ -629,14 +637,19 @@ worker 向派发者汇报。主会话不要调用。
 
 1. 找不到调用者对应的任务 → 抛错（说明它不是被派发的 worker）。
 2. 任务已 `cancelled` → 返回 `{recorded:false}`，不再回流。
-3. **入库即截断**（本版未发布，P0-3）：条目在写进 `task.reports` **之前**就按上面三个上限 `clip`，
+3. **入库即截断**（本版未发布，P0-3）：条目在写进 `task.reports` **之前**就按上面 `headline` / `summary` / `detail` 三个上限 `clip`，
    被截的条目记 `truncated: { headline?: 原始长度, summary: 原始长度, detail: 原始长度 }`（只在真被截时出现这个键）。
    0.8.x 只在**外发**时截，账本里存的是调用方给的原样长度——单任务体积由调用方决定是容量膨胀的根之一。
 4. 追加一条 `{at, status, headline?, summary, detail?, truncated?}` 到任务的报告列表（每任务最多 50 条，超出丢最早的）。
    **`headline` 缺省时库里不补兜底句**：兜底发生在投影层（`src/voice.js` 的 `headlineOf()`）。
    「worker 没写结论」与「系统替他编了一句」是两件不同的事实，混成一个字段就再也分不出来了。
 5. `done` / `blocked` / `failed` 会把任务结算为同名状态；`progress` 只记录，不结束任务。
-6. **准入分级**（本版未发布，P0-2）：决定这条报告要不要回流主会话。
+6. **计划**（PRD-01，本版未发布）：`input.plan` 在 `report()` 里交给 `normalizePlan()` 归一化
+   （整版替换 / 单行化 / 空文案丢弃 / 同文案最多 3 条 / 上限截断），再由 `#applyPlan()` 写 `task.plan` 与
+   `planUpdatedAt`。顺序是**先应用计划、再结算**；`queued` 任务与已结算任务一律拒绝（返回 `plan_accepted:false`），
+   所以终态报告自己那一版能被接受，结算之后迟到的计划不会把 `2/5` 写回去。内容完全相同视为幂等，
+   不刷新 `planUpdatedAt`、不额外写盘。计划**不进报告条目、不进投影**。
+7. **准入分级**（本版未发布，P0-2）：决定这条报告要不要回流主会话。
    - `done` / `blocked` / `failed` / `cancelled` → **恒 `direct`**（回流）；
    - 配置 `directReportStatuses` 点名的状态（默认 `blocked` / `failed`）→ `direct`；
    - 其余（含 `progress` 与未知状态）→ **`ledger`，只入库不回流**。
@@ -644,13 +657,13 @@ worker 向派发者汇报。主会话不要调用。
    > **终态硬直通，配置只能扩展、不能降级。** 把 `directReportStatuses` 清空**不会**让 `done` 静默——
    > 结论与「需要人处理」是主会话唯一必须知道的两类事。这条与直觉相反，别以为配了这个列表就能关掉 `done`。
 
-7. 回流主会话（仅 `direct` 命中时）：
+8. 回流主会话（仅 `direct` 命中时）：
    - `progress`：仅当主会话**正在跑**时并入下一步，不为了它唤醒空闲会话；
    - 其余：立即投递；主会话空闲时唤醒它；
    - 主会话已不在运行：只落任务表并记日志。
    - **批次成员例外**：`group` 非空的成员自己只入库，等整批结束时由批次汇总回流一条；
      但如果这一批已经汇总过、或任务被重开过，就等不到汇总了，此时它必须自己回流（否则彻底静默）。
-8. **回流文本是四段式**（本版未发布，plans/10 §四.2）。首行必须是任务短标签，
+9. **回流文本是四段式**（本版未发布，plans/10 §四.2）。首行必须是任务短标签，
    任务 id 只出现在末尾「细节」行：
 
    ```text
@@ -674,8 +687,23 @@ worker 向派发者汇报。主会话不要调用。
 ### 返回
 
 ```json
-{ "recorded": true, "task_id": "t-m0abc-1", "status": "done", "admission": "direct" }
+{
+  "recorded": true,
+  "task_id": "t-m0abc-1",
+  "status": "done",
+  "admission": "direct",
+  "plan_accepted": false,
+  "plan_truncated": false
+}
 ```
+
+`plan_accepted` / `plan_truncated` 是**计划的两个回执**（PRD-01 §4.2）：
+
+- `plan_accepted`：这一版计划有没有被写进账本。**没传 `plan` 时也是 `false`**——语义是「本条报告没有
+  一版计划被接受」，不是「计划被拒绝」；被终态冻结拒绝（任务已结算 / `queued`）时同样是 `false`。
+- `plan_truncated`：是否因超过 `maxPlanSteps` / `maxPlanStepChars` 被截断。截断**不报错**——
+  计划是汇报的附属信息，不能因为计划太长让结论回不来。
+- 任务已 `cancelled` 时返回 `recorded:false`，同样带这两个 `false`（没有可写的宿主）。
 
 **后台活会让「结算」延后**：worker 报 `done` 时若还挂着 shell job / subagent，
 报告照样入库、照样回流，但任务暂不释放并发位。此时返回里 `status` 仍是
@@ -741,6 +769,7 @@ worker 向派发者汇报。主会话不要调用。
 | `dispatch_report 只能由被派发的 worker 调用；当前会话不属于任何派发任务` | 主会话/无关会话调用 report | 主会话不要调 report |
 | `dispatch_report 需要 summary` | `summary` 为空 | 写 3–6 行摘要 |
 | `任务 <id> 已取消；请重新 dispatch_launch 一个新任务` | 对 `cancelled` 任务 `dispatch_message` | 重新派发 |
+| `任务 <id> 还在等前置 <dep>（它还在运行）：…`（code `dispatch/conflict`） | 对一条 `dependsOn` 还没满足、停在 `queued` 的任务 `dispatch_message` / 续派 | 等前置结算（它会自动开始），或用 `dispatch_cancel` 取消它 |
 | `无法解析子会话 <id>: <code>` | 建会话后 `resolveAgent` 失败，任务置 `failed`，原因在 `dispatch_inspect().error` | 看 code（如 `session/not-found`、`session/writer-held`）；修正后重新派发 |
 | `子会话 <id> 不可用：<code>` | worker 会话无法恢复（如 `session/not-found`） | 看 code；必要时重新派发该任务 |
 | `找不到工作区「<ref>」，且允许新建被关闭。现有：<标题>（<路径>）；…` | `workspace` 解析不到且 `create_workspace: false`；或宿主没有 `workspaceRegistry` | 用 `dispatch_workspaces` 取正确 id；去掉 `create_workspace: false`；或改用绝对路径 |

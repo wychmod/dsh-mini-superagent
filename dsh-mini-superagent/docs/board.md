@@ -223,6 +223,11 @@
 | `turn_started_at` | ISO 8601 | 本轮开始时间；没有在跑回合时字段缺失 |
 | `elapsed_ms` | number | 耗时。未结算：`started_at → 现在`（走表增长）；已结算：`started_at → updated_at`（冻结在结算时刻）。无 `started_at`、或已结算但 `updated_at` 不可解析时为 0 |
 | `report_count` | number | 报告条数（上限 50） |
+| `has_truncated` | boolean | 报告或简报被账本裁过；**只在真被裁时出现**（不输出恒为 false 的字段） |
+| `truncated_fields` | string[] | 被裁的段名，按 `summary` → `headline` → `detail` → `brief` 的顺序；与 `has_truncated` 同时出现。`brief` 表示落盘时被裁过的任务简报 |
+| `plan_total` | number | 计划总步数（PRD-01 §4.3）。**只有未结算且真有计划时**才出现这三个字段 |
+| `plan_done` | number | 已标 `done` 的步数，任务行据此显示 `2/5` |
+| `plan_current` | string | 当前步骤的**文案字符串**（不是 `{text,status}` 结构）：优先取 `doing`，没有就取第一条 `pending`；全 `done` 时是空串，不编「已完成」 |
 | `last_report` | object \| null | `{at, status, summary}`，没有报告时 `null` |
 | `last_text_preview` | string | worker 最后一段输出的前 500 字符 |
 | `input_pending_at` | ISO 8601 \| null | 「已投递未读」的投递时刻；**只在仍在 TTL 内时才有值**（超时被改写成 `input_unknown_at`） |
@@ -239,6 +244,19 @@
 > 客户端从同一份快照里按 id 查（任务行写「等 A」，抽屉写「当前等待：A（运行中）」）。
 > 2 秒轮询的体积因此不随依赖链长度放大。`blocked_*` 是派生值（重启后重算）；
 > `cancel_reason` / `error_code` 是终态事实（随账本落盘，重启后仍在）。
+
+> 计划三个字段（PRD-01 §4.3）同理只给**标量**，不下发步骤数组：200 条任务 × 12 步会把每次轮询的
+> payload 放大一个量级，而任务行只需要 `2/5`、抽屉只需要「当前步骤」那一句。
+> **已结算的任务不下发 `plan_*`**：显示优先级由宿主先做一层（终态 > 计划 > 报告数），
+> 否则一条 `done` 的任务还挂着「2/5」，最容易被当成 bug 报；计划本身仍留在账本里。
+> `plan_current` 是一句文案（空串表示没有当前步骤），客户端不必判空对象。
+> 注意：看板是**唯一**投影计划的地方，而且只有这三个标量；完整步骤数组没有任何接口读出
+> （`dispatch_inspect` 也不投影 `task.plan`），要读全量只能读账本文件。
+
+> `truncated_fields` 是 `has_truncated` 的细分，不是替代：只看布尔时，「详情被裁（4013 > 4000）」与
+> 「摘要被裁（6000+）」长得一模一样，界面只能一律写「摘要已截断」——而任务行展示的正是 `summary`。
+> 真实账本里被裁的条目**全部只裁了 `detail`**，于是每一行都在说一件没发生的事。字段名只有几个短串，
+> 不搬正文；旧宿主不给这个字段时按「摘要被裁」处理（与 0.8.x 的提示一致），不会突然少一个标记。
 
 ### POST 响应
 

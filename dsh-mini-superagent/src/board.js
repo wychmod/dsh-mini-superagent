@@ -42,6 +42,49 @@ const PREVIEW_CHARS = 500
 const WEIGHT = { running: 0, queued: 1 }
 
 /**
+ * 报告/简报里可能被账本裁掉的那几段，顺序就是展示面的顺序。
+ *
+ * 单独列出来的原因：`has_truncated` 只回答「有没有内容被裁」，而看板行展示的是
+ * `summary`。真实账本里被裁的**全部**是 `detail`（入库上限 4000，见 `constants.js`
+ * 的 `maxReportDetailChars`），摘要（上限 6000）一条都没被裁过——只给布尔时
+ * 客户端只能一律写「摘要已截断」，于是每一行都在说一件没发生的事。字段名跟着布尔
+ * 一起投影出去，客户端才有条件按段说人话（`summary` / `headline` / `detail` /
+ * `brief`，`brief` 指落盘时被裁过的任务简报）。
+ */
+const TRUNCATED_FIELDS = ['summary', 'headline', 'detail', 'brief']
+
+/**
+ * 一条任务「哪几段被账本裁过」（去重、按 `TRUNCATED_FIELDS` 的展示顺序）。
+ *
+ * 为什么不复用 `has_truncated` 的写法直接 `some(entry.truncated)`：那个真值判断
+ * 分不出「摘要有 6000 字被裁」和「详情有 4013 字被裁」，而这两件事对看板行来说
+ * 完全不同——摘要正是那一行展示的内容，详情只在 `dispatch_inspect` 里看得到。
+ *
+ * 形状兼容：账本里 `entry.truncated` 是 `{summary?: 原长, detail?: 原长, headline?: 原长}`
+ * （见 `Dispatch.#admitEntry()`）。手工改过的旧数据也可能只留一个真值；字段未知时
+ * 按 `summary` 计——客户端缺字段时本来也画成「摘要已截断」，不能因为形状不标准
+ * 就把标记整个丢掉。
+ *
+ * @param {object} task
+ * @returns {string[]} 例如 `['detail']`；没有截断时是空数组
+ */
+function truncatedFieldsOf(task) {
+  const hit = new Set()
+  const reports = Array.isArray(task.reports) ? task.reports : []
+  for (const entry of reports) {
+    const mark = entry?.truncated
+    if (mark && typeof mark === 'object') {
+      for (const key of Object.keys(mark)) if (TRUNCATED_FIELDS.includes(key)) hit.add(key)
+    } else if (mark) {
+      hit.add('summary')
+    }
+  }
+  // `briefTruncated` 是落盘时对超长简报的截断（记的是原始长度），与单条报告无关。
+  if (task.briefTruncated) hit.add('brief')
+  return TRUNCATED_FIELDS.filter(field => hit.has(field))
+}
+
+/**
  * 一条任务的「耗时」毫秒数。
  *
  * 已结算的任务必须量到**结算那一刻**，不能量到「现在」：后者会让一个
@@ -108,15 +151,20 @@ export function boardTask(task) {
    */
   const plan = SETTLED.has(task.status) ? undefined : planOf(task)
   /**
-   * 「有一条报告被截过」。
+   * 「有内容被截过」+「截的是哪几段」。
    *
    * 只给布尔，**不把正文搬上快照**：快照是每轮轮询都要重传的东西，把 6000 字
    * 的报告塞进来等于用带宽换一个小标记；要看正文的人走 `dispatch_inspect`。
    * 两个来源都要看：`truncated` 是报告条目入库时留的截断长度（P0-3），
    * `briefTruncated` 是落盘时对超长简报的截断标记——后者坏了会让
    * 「retry 重投的是残版简报」再次无声发生。
+   *
+   * `truncated_fields` 是这次补的第二个字段：光有布尔时，详情被裁（4013 > 4000）
+   * 与摘要被裁（6000+）长得一模一样，客户端只能把两者都写成「摘要已截断」。
+   * 字段名只有几个短串（`['detail']`），比正文便宜得多，却能让提示说真话。
    */
-  const hasTruncated = reports.some(entry => entry?.truncated) || !!task.briefTruncated
+  const truncatedFields = truncatedFieldsOf(task)
+  const hasTruncated = truncatedFields.length > 0
   /**
    * 「待读」的超时改写（P0-4）：`sweepMemory()` 把过期的 `inputPendingAt` 换成
    * `inputUnknownAt`，语义从「已投递未读」降级成「不知道读没读到」。
@@ -221,8 +269,8 @@ export function boardTask(task) {
      * 是两件事：归档的任务仍在表里（可取消归档），退休的已经移出账本。
      */
     ...(task.frozenAt ? { frozen_at: task.frozenAt } : {}),
-    // 报告被截断过：只给布尔做小标记（**不搬全文**，见上面的注释）。
-    ...(hasTruncated ? { has_truncated: true } : {}),
+    // 报告被截断过：给布尔做小标记（**不搬全文**），再给被裁的段名让提示说真话。
+    ...(hasTruncated ? { has_truncated: true, truncated_fields: truncatedFields } : {}),
     ...(task.error ? { error: String(task.error) } : {}),
     ...(task.archiveError ? { archive_error: String(task.archiveError) } : {}),
   }

@@ -205,6 +205,39 @@ test('P2 boardTask 没有被截过的报告时不输出 has_truncated', () => {
   assert.equal('has_truncated' in card, false, '一个恒为 false 的字段会让标记失去意义')
 })
 
+/**
+ * 「哪一段被截过」必须分开说，否则标记会变成一句**错的**话。
+ *
+ * 真实账本里被裁掉的几乎全是 `detail`（入库上限 4000），而看板行展示的是
+ * `summary`（上限 6000）。只判 `entry.truncated` 的真假时，「详情被裁」会被
+ * 渲染成「摘要已截断」——一条摘要完好无损的任务也会被告知摘要被截。这就是
+ * 用户报的「工作台所有任务都显示摘要已截断」：不是标记全为真，是标记说了
+ * 一件没发生的事。所以投影要多给一个字段名，客户端才有条件按段说人话。
+ */
+test('P2 boardTask 只裁了 detail 时说清楚被裁的是 detail，不冒充摘要', () => {
+  const card = boardTask(makeTask('a', {
+    reports: [{ at: '2026-01-01T00:00:02.000Z', status: 'done', summary: '摘要完好', detail: '详情被裁', truncated: { detail: 9876 } }],
+  }))
+  assert.equal(card.has_truncated, true, '确实有内容被裁，标记不能丢')
+  assert.deepEqual(card.truncated_fields, ['detail'], '被裁的是 detail，摘要没被裁过')
+})
+
+test('P2 boardTask 摘要真的被裁时 truncated_fields 含 summary（功能不能被修没）', () => {
+  const card = boardTask(makeTask('a', {
+    reports: [{ at: '2026-01-01T00:00:02.000Z', status: 'done', summary: '摘要被裁', truncated: { summary: 6000, detail: 4013 } }],
+  }))
+  assert.deepEqual(card.truncated_fields, ['summary', 'detail'])
+})
+
+test('P2 boardTask 简报截断记作 brief；完全没有截断时两个键都不出现', () => {
+  assert.deepEqual(boardTask(makeTask('a', { briefTruncated: 50000 })).truncated_fields, ['brief'])
+  const clean = boardTask(makeTask('b', {
+    reports: [{ at: '2026-01-01T00:00:01.000Z', status: 'done', summary: '正常' }],
+  }))
+  assert.equal('has_truncated' in clean, false)
+  assert.equal('truncated_fields' in clean, false, '没有截断就别多一个空数组给客户端判空')
+})
+
 test('P2 boardSnapshot 的 cards 带着上面三个新字段（端到端过一遍快照）', () => {
   const dispatch = fakeDispatch([
     makeTask('frozen', { status: 'done', frozenAt: '2026-01-02T00:00:00.000Z' }),

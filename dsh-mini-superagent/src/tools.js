@@ -484,7 +484,9 @@ export function toolDefinitions(dispatch) {
     {
       name: 'dispatch_message',
       description: '给某个任务的子会话追加一条消息：补充信息、修正方向、回答它的问题，或让它接着做下一步。'
-        + 'mode=queue 排到下一轮（子会话空闲时会唤醒它），mode=steer 并入当前回合的下一步。任务会重新变为 running。',
+        + 'mode=queue 排到下一轮（子会话空闲时会唤醒它），mode=steer 并入当前回合的下一步。任务会重新变为 running。'
+        + '任务还在等前置（depends_on 没满足、停在 queued）时直接报错：此时投递会把它变成 running，'
+        + '打乱声明好的先后顺序。等前置结算（它会自动开始），或先用 dispatch_cancel 取消它。',
       parameters: {
         type: 'object',
         properties: {
