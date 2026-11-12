@@ -245,7 +245,14 @@ globalThis.fetch = async (url, options) => {
       if (retiredMode === 'fail') return { ok: false, status: 500, async json() { return { ok: false, error: 'retired boom' } } }
       return { ok: true, status: 200, async json() { return retiredResponse } }
     }
-    return { ok: true, status: 200, async json() { return boardResponse } }
+    /*
+     * 每次 GET /board 都给一份**深拷贝**，而不是同一个 fixture 对象。
+     *
+     * 真实 HTTP 每次响应都是新解析出来的对象，快照引用必然变化；直接回同一个对象，
+     * 会让「拿到一份新快照」这件事在离线冒烟里隐形——客户端挂在 `[data]` 上的
+     * 逐轮比较（例如「计划已更新」的指纹）就再也不会重跑。
+     */
+    return { ok: true, status: 200, async json() { return JSON.parse(JSON.stringify(boardResponse)) } }
   }
   // apply() 末尾的「自报存活」：宿主只负责记录，这里一律 200，免得影响后续断言。
   if (url.endsWith('/client-ready')) {
@@ -354,6 +361,11 @@ function boardFixture() {
     generatedAt: new Date().toISOString(),
     concurrency: { running: 2, queued: 1, max: 6 },
     counts: { total: 10, running: 2, queued: 1, done: 4, blocked: 1, failed: 1, cancelled: 1, ended: 0, interrupted: 0, archived: 3, retired: 2 },
+    /*
+     * 宿主 `boardSnapshot()` 投影的真实归档巡检小时数（默认 = 168 = 7 天）。
+     * 工具栏那颗按钮的悬浮提示按它拼句子——写成别的数字，提示就会和实际行为对不上。
+     */
+    archive_after_hours: 168,
     // 记忆治理快照：窗口口径 + 退休数 + 被丢弃的退休记录数（plans/07 P0-1 / P0-5）。
     memory: {
       window: { days: WINDOW_DAYS, tasks: 200 },
@@ -1315,6 +1327,155 @@ update(panel)
 check('子会话打不开时给出可读提示', text(panel.tree).includes('打不开子会话 dispatch-t-run-1：not-listed'))
 uiWorkspace.openSession = realOpenSession
 unmount(panel)
+
+/* ═════════════════════ 归档按钮改名 + 提示 / 计划已更新 ═════════════════════ */
+
+/*
+ * 这一段钉三件事：
+ * 1. 工具栏归档按钮改名「立即归档超时会话」，且 title / aria-label 都在；
+ * 2. 提示里的时长来自**快照的真实配置**（`archive_after_hours`），不是写死的 168；
+ *    字段缺失（旧宿主）时退化成不带数字的说法，不许出现 undefined / NaN / 「0 小时」；
+ * 3. PRD-01 §6「计划已更新」：计划指纹变了、且任务仍在跑，才亮一次标记，
+ *    并在**下一次轮询**（拿到的还是同一份计划）自动消失。
+ */
+console.log('\n归档按钮改名与提示 / 计划已更新')
+
+/** 这一段用的小快照：一条在跑的任务带着计划（`extra` 用来加/去掉 archive_after_hours）。 */
+function planFixture(extra) {
+  return Object.assign({
+    version: '1.0.0',
+    generatedAt: new Date().toISOString(),
+    concurrency: { running: 1, queued: 0, max: 6 },
+    counts: { total: 1, running: 1, queued: 0, done: 0, blocked: 0, failed: 0, cancelled: 0, ended: 0, interrupted: 0, archived: 0, retired: 0 },
+    memory: {
+      window: { days: WINDOW_DAYS, tasks: 200 },
+      ledger: { tasks: 1, retired: 0, archived: 0, retiredDropped: 0, capPerTask: { summary: 6000, detail: 4000 } },
+    },
+    workspaces: WORKSPACES,
+    targets: {},
+    tasks: [
+      { task_id: 't-plan-1', title: '会改计划的任务', status: 'running', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', worker_session_id: 'dispatch-t-plan-1', elapsed_ms: 1000, report_count: 0, plan_total: 5, plan_done: 2, plan_current: '第一个步骤' },
+    ],
+  }, extra || {})
+}
+
+/**
+ * 工具栏那颗归档按钮。
+ *
+ * 按 `aria-label` 找而不是按文案找：行内的单条「归档」按钮也叫「归档」，按文案会撞；
+ * 而且这里要同时验证「aria-label 与可见文案一致」，正好用它当锚点。
+ */
+const ARCHIVE_LABELS = ['立即归档超时会话', '再次点击确认归档超时会话']
+const archiveButtonOf = (root) => buttonsOf(root.tree)
+  .find((item) => ARCHIVE_LABELS.includes(item.props['aria-label']))
+
+/**
+ * 等下一次真实的 2 秒轮询（`GET /board` 数量增加）再重绘。
+ *
+ * 看板是纯轮询驱动的：计划指纹比较挂在「新快照到了」这一刻，没有别的推进方式。
+ * 不用假定时器，是因为这里要验证的正是「轮询本身能否驱动它」。
+ */
+async function nextPoll(root) {
+  const before = boardSnapshotRequests().length
+  const deadline = Date.now() + 3000
+  while (boardSnapshotRequests().length === before && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  await tick()
+  await tick()
+  update(root)
+}
+
+boardResponse = planFixture({ archive_after_hours: 168 })
+const archivePanel = mount(panelReg.component)
+await tick()
+await tick()
+update(archivePanel)
+
+const toolbarArchiveBtn = archiveButtonOf(archivePanel)
+check('工具栏归档按钮改名为「立即归档超时会话」',
+  Boolean(toolbarArchiveBtn) && text(toolbarArchiveBtn).trim() === '立即归档超时会话',
+  toolbarArchiveBtn ? text(toolbarArchiveBtn).trim() : '没找到按钮')
+check('归档按钮的 title 写清「归档什么 + 多久算超时」，数字来自快照配置',
+  Boolean(toolbarArchiveBtn)
+    && toolbarArchiveBtn.props.title.includes('已结算')
+    && toolbarArchiveBtn.props.title.includes('168 小时（7 天）')
+    && toolbarArchiveBtn.props.title.includes('已归档'),
+  toolbarArchiveBtn ? String(toolbarArchiveBtn.props.title) : '没找到按钮')
+check('归档按钮的 aria-label 与可见文案一致（读屏能读）',
+  Boolean(toolbarArchiveBtn) && toolbarArchiveBtn.props['aria-label'] === '立即归档超时会话'
+    && text(toolbarArchiveBtn).trim() === toolbarArchiveBtn.props['aria-label'],
+  toolbarArchiveBtn ? `${text(toolbarArchiveBtn).trim()} / ${toolbarArchiveBtn.props['aria-label']}` : '没找到按钮')
+
+// 第一次点击只是进确认态：文案要能对上「再点一次才会归档超时会话」。
+toolbarArchiveBtn.props.onClick()
+update(archivePanel)
+const confirmBtn = archiveButtonOf(archivePanel)
+check('第一次点击进入「再次点击确认归档超时会话」',
+  Boolean(confirmBtn) && text(confirmBtn).trim() === '再次点击确认归档超时会话'
+    && confirmBtn.props['aria-label'] === '再次点击确认归档超时会话',
+  confirmBtn ? `${text(confirmBtn).trim()} / ${confirmBtn.props['aria-label']}` : '没找到按钮')
+check('确认态仍带着同一条时长说明（hover 不丢信息）',
+  Boolean(confirmBtn) && confirmBtn.props.title.includes('168 小时（7 天）'),
+  confirmBtn ? String(confirmBtn.props.title) : '没找到按钮')
+unmount(archivePanel)
+
+/* 旧宿主没有 `archive_after_hours`：提示必须退化，不许拼出 undefined / 「0 小时」。 */
+boardResponse = planFixture()
+const legacyPanel = mount(panelReg.component)
+await tick()
+await tick()
+update(legacyPanel)
+const legacyBtn = archiveButtonOf(legacyPanel)
+check('快照没有 archive_after_hours（旧宿主）：提示退化成不带数字的说法',
+  Boolean(legacyBtn) && legacyBtn.props.title === '归档长期未更新的已结算任务；归档后从「全部」移到「已归档」',
+  legacyBtn ? String(legacyBtn.props.title) : '没找到按钮')
+check('降级提示里没有 undefined / NaN /「0 小时」',
+  Boolean(legacyBtn) && !/undefined|NaN|0 小时/.test(legacyBtn.props.title),
+  legacyBtn ? String(legacyBtn.props.title) : '没找到按钮')
+unmount(legacyPanel)
+
+/*
+ * 「计划已更新」：必须**同一个面板跨两次轮询**才能比较（指纹只活在面板的 ref 里），
+ * 所以这里挂着不卸载，改掉 fixture 里的计划再等下一次轮询。
+ */
+boardResponse = planFixture({ archive_after_hours: 168 })
+const planPanel = mount(panelReg.component)
+await tick()
+await tick()
+update(planPanel)
+const planPanelText = () => text(planPanel.tree)
+const planMarks = () => findAll(planPanel.tree, (item) => item.props && item.props['data-plan-updated'])
+check('第一次看到计划不亮「计划已更新」（那是初次见到，不是改了计划）',
+  planMarks().length === 0 && planPanelText().includes('2/5'),
+  planPanelText().replace(/\s+/g, ' ').slice(0, 160))
+
+// 计划从 2/5 改成 3/5（当前步骤也换了）：下一次轮询应当亮一次。
+boardResponse = planFixture({ archive_after_hours: 168 })
+boardResponse.tasks[0].plan_done = 3
+boardResponse.tasks[0].plan_current = '第二个步骤'
+await nextPoll(planPanel)
+// 真实 React 里 effect 里的 setState 会立刻重渲染；离线桩不会，补一次重绘等价于那一帧。
+update(planPanel)
+const marksAfterChange = planMarks()
+check('计划变了 → 这一行出现「计划已更新」',
+  marksAfterChange.length === 1 && text(marksAfterChange[0]).trim() === '计划已更新',
+  JSON.stringify(marksAfterChange.map((item) => text(item).trim())))
+check('「计划已更新」带 hover 说明（当前快照 + 新进度）',
+  marksAfterChange.length === 1
+    && marksAfterChange[0].props.title.includes('3/5')
+    && marksAfterChange[0].props.title.includes('当前快照'),
+  marksAfterChange.length === 1 ? String(marksAfterChange[0].props.title) : '没有标记')
+check('同一行仍然显示新的计划进度 3/5（标记不是替代品）',
+  planPanelText().includes('3/5'), planPanelText().replace(/\s+/g, ' ').slice(0, 160))
+
+// 下一次轮询拿到的是同一份计划：标记自己消失（策略 = 下次轮询消失，不是定时器）。
+await nextPoll(planPanel)
+update(planPanel)
+check('下一次轮询仍是同一份计划 → 标记消失（一次轮询的短提示，不常驻）',
+  planMarks().length === 0 && planPanelText().includes('3/5'),
+  JSON.stringify(planMarks().map((item) => text(item).trim())))
+unmount(planPanel)
 
 /* ═════════════════════ P0-4 状态徽标：冻结 / 未读未知 / 截断 ═════════════════════ */
 
@@ -2615,11 +2776,11 @@ check('done 行没有主操作但有归档（终态也能被收走）',
 /* 两步确认：第一次点击只进确认态，**不发请求**。 */
 const archivePosts = () => requests.filter((item) => item.method === 'POST' && item.url.endsWith('/archive-task'))
 const beforeAsk = archivePosts().length
-const archiveBtn = () => {
+const rowArchiveBtn = () => {
   const row = arcRowOf(arcBtnPanel.tree, '失败任务')
   return buttonsOf(row).find((item) => text(item).includes('归档'))
 }
-archiveBtn().props.onClick({ stopPropagation() {} })
+rowArchiveBtn().props.onClick({ stopPropagation() {} })
 update(arcBtnPanel)
 check('第一次点归档只进确认态、不发请求',
   archivePosts().length === beforeAsk
@@ -2628,7 +2789,7 @@ check('第一次点归档只进确认态、不发请求',
 
 /* 第二次点击才真的发，且打到单条路由。 */
 postReply = { ok: true, archived: true }
-archiveBtn().props.onClick({ stopPropagation() {} })
+rowArchiveBtn().props.onClick({ stopPropagation() {} })
 await tick()
 await tick()
 update(arcBtnPanel)
@@ -2648,9 +2809,9 @@ check('干净归档的提示条说「已归档」',
 /* 决策 B：宿主回 reason 时要明说「归档了，但子会话没归档成功」。 */
 postReply = { ok: true, archived: true, reason: '会话已不存在' }
 // 归档成功后确认态会复位，所以这一轮仍然要点两次：第一次进确认态，第二次才发。
-archiveBtn().props.onClick({ stopPropagation() {} })
+rowArchiveBtn().props.onClick({ stopPropagation() {} })
 update(arcBtnPanel)
-archiveBtn().props.onClick({ stopPropagation() {} })
+rowArchiveBtn().props.onClick({ stopPropagation() {} })
 await tick()
 await tick()
 update(arcBtnPanel)

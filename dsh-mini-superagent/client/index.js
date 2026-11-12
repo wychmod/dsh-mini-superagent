@@ -89,6 +89,16 @@ window.__ModuleLoader__.load({
       'plan.currentLabel': '当前步骤',
       'plan.tagHint': '计划 {done}/{total}',
       /*
+       * 「计划已更新」（PRD-01 §6）：worker 第二次带**不同的**计划时亮一次短标记。
+       *
+       * 为什么只在行内亮、不进账本：这是给盯着看板的人一次「它改主意了」的提示，
+       * 不是任务事实。写进账本会让每次 plan 变更多一条持久记录（还要落盘、还要
+       * 在抽屉里占位），而重开页面时旧指纹会把它再放一遍——那是在重放历史。
+       * 提示里点明「计划标签是当前快照」，因为标记消失后 2/5 仍然在那里，别让人以为丢了。
+       */
+      'plan.updatedTag': '计划已更新',
+      'plan.updatedHint': '子会话刚提交了一份不同的计划（{done}/{total}）；这里显示的是当前快照，旧的计划不会留在看板上',
+      /*
        * 批次依赖（PRD-02 §4.5）：任务行标签 / 抽屉 / 批次头三处共用这一组文案。
        *
        * - `dep.tag` = 「依赖 2」，`dep.waiting` = 「等 A」，`dep.failedTag` = 「前置失败」；
@@ -140,8 +150,17 @@ window.__ModuleLoader__.load({
       archivedTag: '已归档',
       archivedHint: '该子会话已归档，不可直接打开；请在会话列表里取消归档后再查看',
       archiveErrorPrefix: '归档失败：',
-      archiveNow: '立即归档',
-      archiveConfirm: '确认归档',
+      /*
+       * 工具栏那颗按钮：文案要说清「归档的是**超时**的那些会话」，否则
+       * 「立即归档」看起来像「把我现在看到的东西都归档掉」。
+       * 悬浮提示里的时长来自快照的 `archive_after_hours`（真实配置），拿不到就用
+       * 不带数字的 `archiveNowHintUnknown`——不许拼出「undefined 小时」。
+       */
+      archiveNow: '立即归档超时会话',
+      archiveNowHint: '归档「已结算且超过 {hours} 小时（{days} 天）没有更新」的任务；归档后从「全部」移到「已归档」',
+      archiveNowHintHours: '归档「已结算且超过 {hours} 小时没有更新」的任务；归档后从「全部」移到「已归档」',
+      archiveNowHintUnknown: '归档长期未更新的已结算任务；归档后从「全部」移到「已归档」',
+      archiveConfirm: '再次点击确认归档超时会话',
       archiveRunning: '归档中…',
       archiveDone: '归档巡检：扫描 {scanned}，归档 {archived}，失败 {failed}',
       archiveTask: '归档',
@@ -660,6 +679,8 @@ window.__ModuleLoader__.load({
       'plan.ratio': 'Plan {done}/{total}',
       'plan.currentLabel': 'Current step',
       'plan.tagHint': 'Plan {done}/{total}',
+      'plan.updatedTag': 'Plan updated',
+      'plan.updatedHint': 'The worker just submitted a different plan ({done}/{total}); this is the current snapshot, the old plan is not kept on the board',
       /* 与上面 TEXT 的 dep.* 一一对应；缺一条英文界面下会退回中文。 */
       'dep.tag': 'needs {n}',
       'dep.waiting': 'waiting for {title}',
@@ -702,8 +723,11 @@ window.__ModuleLoader__.load({
       archivedTag: 'Archived',
       archivedHint: 'That worker session is archived and cannot be opened; unarchive it in the session list first',
       archiveErrorPrefix: 'Archive failed: ',
-      archiveNow: 'Archive now',
-      archiveConfirm: 'Confirm archive',
+      archiveNow: 'Archive stale sessions',
+      archiveNowHint: 'Archives settled tasks with no update for over {hours} hours ({days} days); archived tasks move from "All" to "Archived"',
+      archiveNowHintHours: 'Archives settled tasks with no update for over {hours} hours; archived tasks move from "All" to "Archived"',
+      archiveNowHintUnknown: 'Archives settled tasks that have not been updated for a long time; archived tasks move from "All" to "Archived"',
+      archiveConfirm: 'Click again to archive stale sessions',
       archiveRunning: 'Archiving…',
       archiveDone: 'Archive sweep: scanned {scanned}, archived {archived}, failed {failed}',
       archiveTask: 'Archive',
@@ -1490,6 +1514,28 @@ window.__ModuleLoader__.load({
         : null
       if (!cap || typeof cap !== 'object') return 0
       return Math.max(0, num(cap.detail, 0))
+    }
+
+    /**
+     * 「立即归档超时会话」的悬浮提示。
+     *
+     * 时长来自快照的 `archive_after_hours`（宿主真实配置，见 `src/board.js`）。
+     * 为什么不能写死 168：配置改成别的值、或把巡检关掉（0 = 不自动归档）之后，
+     * 一句「超过 168 小时」就变成了假话，而用户正是拿这句话去理解那颗按钮做了什么。
+     *
+     * 三种取值对应三种说法：
+     * - 有值且是整天 → 「超过 168 小时（7 天）」；
+     * - 有值但不是整天 → 只说小时（取整成天会差出一截，宁可不给天数）；
+     * - 0 / 缺失（旧宿主没这个字段）→ 不带数字的说法，**绝不**拼出 undefined。
+     *
+     * @param {number|undefined} hours 快照里的 `archive_after_hours`
+     * @returns {string} 可直接放进 title / aria-label 的一句话
+     */
+    function archiveHintOf(hours) {
+      const value = num(hours, 0)
+      if (!(value > 0)) return tr('archiveNowHintUnknown')
+      if (value % 24 === 0) return fill(tr('archiveNowHint'), { hours: value, days: value / 24 })
+      return fill(tr('archiveNowHintHours'), { hours: value })
     }
 
     /**
@@ -2503,6 +2549,16 @@ window.__ModuleLoader__.load({
 .dsh-sa-tag-frozen {
   background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
   color: var(--dsw-alias-state-warn-primary, #b45309);
+}
+/*
+ * 「计划已更新」：与「2/5」并排的一次性提示，所以比计划标签**弱一档**——
+ * 它说的是「你刚才看到的数字变了」，不是一个新的状态。用信息蓝保持与计划标签
+ * 同一色系（同一件事），但只加虚线边框，不加重底色：亮 2 秒就走，不该抢过步骤数。
+ */
+.dsh-sa-tag-plan-updated {
+  background: var(--dsw-alias-state-info-surface, rgba(37,99,235,.08));
+  color: var(--dsw-alias-state-info-primary, #2563eb);
+  border: 1px dashed var(--dsw-alias-state-info-primary, #2563eb);
 }
 /*
  * 依赖标签（PRD-02 §4.5）：
@@ -4148,6 +4204,14 @@ window.__ModuleLoader__.load({
         ? fill(tr('plan.tagHint'), { done: planDone, total: planTotal }) + ' · ' + planCurrent
         : fill(tr('plan.tagHint'), { done: planDone, total: planTotal })
       /*
+       * 「计划已更新」标记（PRD-01 §6）。指纹比较在 `BoardPanel` 里做（它是唯一
+       * 能跨轮询记住「上一次看到的是什么」的地方），这一行只负责画。
+       * 与计划标签同生命周期（`planVisible`）：计划标签都不显示了（任务结算 / 归档），
+       * 再挂一个「刚更新过」只会让人以为还有下一步。
+       */
+      const planJustUpdated = planVisible && Boolean(props.planUpdated)
+      const planUpdatedHint = fill(tr('plan.updatedHint'), { done: planDone, total: planTotal })
+      /*
        * 依赖标签（PRD-02 §4.5）。三种形态互斥，按信息量从高到低只放一个：
        *
        *   前置失败（被连带取消）> 等 A（被挡）> 依赖 2（有依赖但此刻没被挡）
@@ -4378,13 +4442,14 @@ window.__ModuleLoader__.load({
        * - **二次确认**：归档是写操作，会话会被冻成只读（`archivedSessionIds`），
        *   误触的代价是「一条任务从待办区消失」。第一次点击只进确认态，
        *   4 秒内没再点自动退回（`confirmArchive` 状态由面板统一管，与工具栏
-       *   「立即归档」共用同一套 4 秒过期逻辑）。
+       *   「立即归档超时会话」共用同一套 4 秒过期逻辑）。
        * - **走 `/archive-task` 而不是 `/archive`**：后者是**巡检**——不读 body、
        *   按保留期扫全表、回 `{scanned, archived, failed}`。拿它做单条归档会
        *   把别的超期任务一起扫走，而用户点的是「这一条」。
        * - **文案用 `archiveTaskConfirm` 而不是 `archiveConfirm`**：后者是工具栏
-       *   「立即归档」巡检的确认词（「确认归档」），两条路文案要能分清到底在确认
-       *   哪一件事。同一个 `archiveTask` 词干不能复用，否则读屏里也分不出来。
+       *   「立即归档超时会话」巡检的确认词（「再次点击确认归档超时会话」），两条路
+       *   文案要能分清到底在确认哪一件事。同一个 `archiveTask` 词干不能复用，
+       *   否则读屏里也分不出来。
        */
       const archiving = busyKind === 'archive'
       // 确认态由面板统一持有（`archiveAsk` 是「哪一行在等确认」的 task_id），
@@ -4554,6 +4619,20 @@ window.__ModuleLoader__.load({
                 'data-plan': planDone + '/' + planTotal,
               },
               planDone + '/' + planTotal,
+            )
+          : null,
+        planJustUpdated
+          ? h(
+              'span',
+              {
+                key: 'plan-updated',
+                className: 'dsh-sa-tag dsh-sa-tag-plan-updated',
+                title: planUpdatedHint,
+                'aria-label': planUpdatedHint,
+                // 观测口径：冒烟与排障直接读这个属性，不必按文字找。
+                'data-plan-updated': planDone + '/' + planTotal,
+              },
+              tr('plan.updatedTag'),
             )
           : null,
         depTag,
@@ -6871,9 +6950,22 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState({})
       const [generation, setGeneration] = useState(0)
       const [now, setNow] = useState(function () { return Date.now() })
-      /** 立即归档的两步确认：0 空闲，1 等待确认。 */
+      /** 立即归档超时会话的两步确认：0 空闲，1 等待确认。 */
       const [archiveStage, setArchiveStage] = useState(0)
       const [archiving, setArchiving] = useState(false)
+      /**
+       * 「计划已更新」（PRD-01 §6）：worker 第二次带**不同的**计划时，这一行亮一次短标记。
+       *
+       * 两份本地状态，都**不入账本**（PRD 明确要求：这是看板的瞬时提示，不是任务事实）：
+       * - `planSeen`：task_id → 上一次看到的计划指纹（`总步数|已完成|当前步骤`）。
+       *   放 ref 而不是 state：它只用来做前后比较，改它不该触发渲染；
+       * - `planUpdated`：本次要点亮的 task_id 集合。放 state 才会驱动渲染。
+       *
+       * 为什么 `TaskCard` 自己不能做这件事：它是无 hook 的展示组件，每 2 秒轮询都
+       * 重建一次，没有任何地方能记住「上一次的计划长什么样」。
+       */
+      const planSeen = useRef({})
+      const [planUpdated, setPlanUpdated] = useState({})
       /**
        * 行内归档的两步确认：存的是「正在等确认的 task_id」。
        *
@@ -7326,7 +7418,7 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      /* 立即归档：会真的归档会话，不是预览，所以走两步确认。 */
+      /* 立即归档超时会话：会真的归档会话，不是预览，所以走两步确认。 */
       const runArchive = useCallback(async function () {
         if (archiving) return
         setArchiveStage(0)
@@ -7418,6 +7510,54 @@ window.__ModuleLoader__.load({
         if (task && typeof task.task_id === 'string' && task.task_id) depTitles[task.task_id] = task.title
       }
       const counts = data && data.counts ? data.counts : {}
+      /*
+       * 「计划已更新」的判定（PRD-01 §6）。
+       *
+       * 每次拿到新快照都比一次指纹（`总步数|已完成|当前步骤`）：
+       * - 只跟踪 `queued` / `running`：终态不再计划，「已更新」对一条做完的任务没有意义；
+       * - **第一次见到某条任务不点亮**：那只是「我第一次看到它的计划」，不是「它改了计划」；
+       * - 指纹变了才点亮，`data` 换成同一份计划时清空 —— 所以标记的生命周期
+       *   是**一次轮询**（约 2 秒），而不是定时器。
+       *
+       * 为什么用「下次轮询消失」而不是 setTimeout：看板每 2 秒本来就会重渲染一次，
+       * 蹭这趟车不需要额外定时器（面板卸载 / 切视图时也没有待清理的 timer），
+       * 而且它天然与「新快照到了」对齐——不会出现「标记还在，但计划已经又变了一次」。
+       */
+      useEffect(function () {
+        if (!data) return
+        const seen = {}
+        const changed = []
+        for (const task of allTasks) {
+          if (!task || typeof task.task_id !== 'string' || !task.task_id) continue
+          if (task.status !== 'queued' && task.status !== 'running') continue
+          const total = num(task.plan_total, 0)
+          if (total <= 0) continue
+          const done = num(task.plan_done, 0)
+          const current = typeof task.plan_current === 'string' ? task.plan_current : ''
+          const fingerprint = total + '|' + done + '|' + current
+          seen[task.task_id] = fingerprint
+          const previous = planSeen.current[task.task_id]
+          if (typeof previous === 'string' && previous !== fingerprint) changed.push(task.task_id)
+        }
+        planSeen.current = seen
+        if (!changed.length) {
+          // 这一轮没人需要点亮：把上一轮的清掉（策略就是「下次轮询消失」）。
+          // 返回同一个对象时空集不算变化，避免每次轮询都白触发一次渲染。
+          setPlanUpdated(function (current) { return Object.keys(current).length ? {} : current })
+          return
+        }
+        const next = {}
+        for (const id of changed) next[id] = true
+        setPlanUpdated(next)
+      }, [data])
+
+      /*
+       * 工具栏那颗「立即归档超时会话」的悬浮提示。
+       * 时长取快照的 `archive_after_hours`（宿主真实配置）；旧宿主没这个字段时是 0，
+       * 退化成不带数字的说法（见 `archiveHintOf`）。
+       */
+      const archiveHint = archiveHintOf(data ? data.archive_after_hours : 0)
+
       const concurrency = data && data.concurrency ? data.concurrency : {}
       const workspaces = data && Array.isArray(data.workspaces)
         ? data.workspaces.filter(function (item) { return item && typeof item.id === 'string' })
@@ -7644,6 +7784,11 @@ window.__ModuleLoader__.load({
           continueHandlers: continueHandlers,
           // 依赖短名表（PRD-02 §4.5）：行标签要说「等 A」「前置 A 失败」。
           depTitles: depTitles,
+          /*
+           * 「计划已更新」：这一行的计划指纹刚和上一轮不同（见上面的 effect）。
+           * 传布尔而不是从 map 里现查：`TaskCard` 是纯展示组件，行只关心自己亮不亮。
+           */
+          planUpdated: Boolean(planUpdated[task.task_id]),
           handlers: handlers,
         })
       }
@@ -8144,7 +8289,16 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'dsh-sa-btn' + (archiveStage === 1 ? ' dsh-sa-btn-confirm' : ''),
               disabled: archiving,
-              title: archiveStage === 1 ? tr('archiveConfirm') : tr('archiveNow'),
+              /*
+               * hover 里放「归档的是什么、多久算超时」这份**说明**，不放按钮自己的名字：
+               * 名字已经在按钮上（`archiveNow` / `archiveConfirm`），悬停时更该看到的是
+               * 「点下去会发生什么、影响哪些任务」。`aria-label` 放当前动作名，
+               * 读屏用户听到的是「立即归档超时会话」而不是一整句说明。
+               */
+              title: archiveHint,
+              'aria-label': archiving
+                ? tr('archiveRunning')
+                : archiveStage === 1 ? tr('archiveConfirm') : tr('archiveNow'),
               onClick: function () {
                 if (archiving) return
                 if (archiveStage === 0) {
