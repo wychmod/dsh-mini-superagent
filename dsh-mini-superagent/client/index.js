@@ -189,6 +189,12 @@ window.__ModuleLoader__.load({
       truncatedTag: '摘要已截断',
       truncatedHint: '原文更长，账本只保留前 {n} 字；完整正文请用 dispatch_inspect 查看',
       truncatedHintNoLimit: '原文更长，账本只保留了开头一段；完整正文请用 dispatch_inspect 查看',
+      /*
+       * 只有 `detail` 被裁时的说法。真实账本里被裁的几乎全是 detail（入库上限 4000），
+       * 而这一行展示的 summary（上限 6000）是完整的——再喊「摘要已截断」就是在说假话。
+       * 提示语仍沿用 truncatedHint（只换上限数字）：「账本只保留前 N 字」对哪一段都成立。
+       */
+      truncatedTagDetail: '详情已截断',
       'sec.attention': '需要你处理',
       'sec.attentionEmpty': '没有需要你处理的任务',
       'sec.active': '在跑与排队',
@@ -730,6 +736,7 @@ window.__ModuleLoader__.load({
       truncatedTag: 'truncated',
       truncatedHint: 'The original is longer; the ledger keeps only the first {n} characters. Use dispatch_inspect for the full text',
       truncatedHintNoLimit: 'The original is longer; the ledger keeps only the opening part. Use dispatch_inspect for the full text',
+      truncatedTagDetail: 'detail truncated',
       'sec.attention': 'Needs you',
       'sec.attentionEmpty': 'Nothing needs you right now',
       'sec.active': 'Running and queued',
@@ -1468,6 +1475,21 @@ window.__ModuleLoader__.load({
         : null
       if (!cap || typeof cap !== 'object') return 0
       return Math.max(0, num(cap.summary, 0))
+    }
+
+    /**
+     * 报告 `detail` 的账本上限（字数），来自 `memory.ledger.capPerTask.detail`。
+     *
+     * 为什么单列：被裁的段不同，「前 N 字」里的 N 也不同。账本实际裁掉的是
+     * `detail`（上限 4000）时提示却写「前 6000 字」，等于把另一个上限安到它头上——
+     * 用户拿着这个数去数正文，永远对不上。拿不到就返回 0，退化成不带数字的说法。
+     */
+    function detailCapOf(memory) {
+      const cap = memory && typeof memory === 'object' && memory.ledger && typeof memory.ledger === 'object'
+        ? memory.ledger.capPerTask
+        : null
+      if (!cap || typeof cap !== 'object') return 0
+      return Math.max(0, num(cap.detail, 0))
     }
 
     /**
@@ -4204,9 +4226,20 @@ window.__ModuleLoader__.load({
        * 「摘要已截断」：宿主只给布尔（`has_truncated`），正文不出快照。
        * 上限数值来自 memory 块（`ledger.capPerTask.summary`），拿不到就退化成
        * 不带数字的说法——**不要**编一个「前 6000 字」出来。
+       *
+       * `truncated_fields`（新宿主才有）说明被裁的是哪一段：真实账本里被裁的几乎都是
+       * `detail`，而这一行展示的 summary 是完整的。只有 summary / headline / brief
+       * 被裁时才能说「摘要已截断」，否则说「详情已截断」——旧宿主不给字段名时按摘要
+       * 处理（与 0.8.x 的行为一致，不能让旧宿主突然少一个标记）。
        */
+      const truncatedFields = Array.isArray(task.truncated_fields)
+        ? task.truncated_fields.filter((field) => typeof field === 'string')
+        : []
       const truncated = Boolean(task.has_truncated)
+      const summaryTruncated = truncatedFields.length === 0
+        || truncatedFields.some((field) => field === 'summary' || field === 'headline' || field === 'brief')
       const summaryCap = num(props.summaryCap, 0)
+      const detailCap = num(props.detailCap, 0)
       /*
        * 归档行**不可点**。根因不在这一行，而在宿主的导航策略：`uiWorkspace.openSession`
        * 会把主视图换成那个会话，而 ui-workspace 的 `watchNavigation` 里有一条
@@ -4245,14 +4278,58 @@ window.__ModuleLoader__.load({
         // hover 里明确写「只读冻结、续跑会失败」，那是 frozen 想要的断言。
         + (frozenAt ? '\n' + tr('frozenHint') : '')
 
-      /** 整行可点（按钮除外）：打开这个任务的子会话。 */
+      /*
+       * 行内交互控件的选择器（第二层闸）。
+       *
+       * 行本身整体可点，行里却可以长控件（按钮、输入框、链接）。凡 target 落在这些
+       * 元素里的事件都不是「想打开这一行」；`data-no-row-click` 是给将来新加的自定义
+       * 控件留的显式逃生标记，不必再回来改这份选择器。
+       */
+      const ROW_CONTROL_SELECTOR = 'input, textarea, button, select, a, [contenteditable], [data-no-row-click]'
+
+      /**
+       * target 是否落在行内控件里（第二层闸，防复发）。
+       *
+       * 为什么用 `closest()`：事件目标可能是控件内部的子节点（例如按钮里的 span），
+       * 直接与元素比对会漏；`closest` 一次就能判断「这个目标在控件内部」。
+       * `target === currentTarget` 必须放行——那是行自己（键盘 Tab 到行上 / 点行空白处），
+       * 否则 `closest` 会顺着祖先找到 aria/tooltip 一类外层标记，把正常打开也挡了。
+       */
+      function insideRowControl(event) {
+        const target = event && event.target
+        if (!target || target === event.currentTarget) return false
+        if (typeof target.closest !== 'function') return false
+        return Boolean(target.closest(ROW_CONTROL_SELECTOR))
+      }
+
+      /**
+       * 整行可点（行内控件除外）：打开这个任务的子会话。
+       *
+       * 第一层闸在控件自己身上（`stopRowBubble`），这里是第二层：键盘、脚本
+       * `dispatchEvent`、将来忘了拦冒泡的新控件都可能绕过第一层，这一层才防复发。
+       */
       function activate(event) {
         if (!clickable) return
+        if (insideRowControl(event)) return
         if (event) {
           if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return
           if (event.preventDefault) event.preventDefault()
         }
         props.handlers.open(task)
+      }
+
+      /**
+       * 行内控件的冒泡闸门（第一层）。
+       *
+       * 续派输入行是行的子节点：在输入框上按下/点一下，click 会冒到行的 onClick，
+       * 触发「打开子会话」——用户看到的就是「输入框刚展开，点进去页面就跳走了」。
+       * 按钮各自的 onClick 已有 stopPropagation，输入框当时**只拦了 input/keydown，
+       * 漏了 mousedown 与 click**，于是这个缺陷只在输入框上出现。
+       *
+       * **绝不调 preventDefault**：默认行为正是「聚焦 + 落光标」，拦掉就真打不了字了。
+       */
+      function stopRowBubble(event) {
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
       }
 
       /*
@@ -4366,7 +4443,20 @@ window.__ModuleLoader__.load({
       const continueRow = continueOpen
         ? h(
             'div',
-            { key: 'continue-row', className: 'dsh-sa-continue' },
+            {
+              key: 'continue-row',
+              className: 'dsh-sa-continue',
+              /*
+               * 行可点，行内控件必须阻断冒泡，否则点输入框会跳走（第一层闸）。
+               * 拦 mousedown 与 click：有的交互把「按下」当成行的激活时机，
+               * 只拦 click 会漏掉。两者都**不** preventDefault——输入框要靠默认行为
+               * 聚焦并落下光标。keydown 由输入框自己的 onKeyDown 拦（Enter/Esc 也在那边）。
+               * `data-no-row-click` 供第二层闸（`insideRowControl`）识别这个容器。
+               */
+              'data-no-row-click': 'true',
+              onMouseDown: stopRowBubble,
+              onClick: stopRowBubble,
+            },
             h('input', {
               key: 'input',
               type: 'text',
@@ -4382,6 +4472,7 @@ window.__ModuleLoader__.load({
               },
               onKeyDown: function (event) {
                 if (!event) return
+                // Enter/Esc 也不能冒到行上：行的 onKeyDown 认 Enter 为「打开会话」。
                 if (event.stopPropagation) event.stopPropagation()
                 if (event.key === 'Enter') props.continueHandlers.submit(task)
                 else if (event.key === 'Escape') props.continueHandlers.toggle(task)
@@ -4422,12 +4513,15 @@ window.__ModuleLoader__.load({
         : null
 
       /*
-       * 截断标记：宿主只投影布尔 `has_truncated`（一位小标记，不搬正文）。
-       * 有上限数值就写「前 N 字」，没有就退化成不带数字的说法。
+       * 截断标记：宿主只投影布尔 `has_truncated`（一位小标记，不搬正文）与被裁的段名
+       * `truncated_fields`。有上限数值就写「前 N 字」，没有就退化成不带数字的说法；
+       * N 取**被裁那一段**的上限（详情走 detail，其余走 summary），
+       * 否则提示里的数字和账本实际裁掉的长度对不上。
        * 它跟报告数 / 摘要放在同一行，因为「被切掉的是哪段」正是那一行的内容。
        */
-      const truncHint = summaryCap > 0
-        ? fill(tr('truncatedHint'), { n: summaryCap })
+      const truncCap = summaryTruncated ? summaryCap : detailCap
+      const truncHint = truncCap > 0
+        ? fill(tr('truncatedHint'), { n: truncCap })
         : tr('truncatedHintNoLimit')
       const truncMark = truncated
         ? h(
@@ -4438,8 +4532,10 @@ window.__ModuleLoader__.load({
               title: truncHint,
               'aria-label': truncHint,
               'data-truncated': 'true',
+              // 观测口径：哪一段被裁，冒烟与排障直接读这个属性。
+              'data-truncated-scope': summaryTruncated ? 'summary' : 'detail',
             },
-            tr('truncatedTag'),
+            tr(summaryTruncated ? 'truncatedTag' : 'truncatedTagDetail'),
           )
         : null
 
@@ -7531,9 +7627,10 @@ window.__ModuleLoader__.load({
           baseline: stats.average,
           now: now,
           fetchedAt: fetchedAt,
-          // 截断提示里的「前 N 字」来自 memory.ledger.capPerTask.summary；
+          // 截断提示里的「前 N 字」来自 memory.ledger.capPerTask.{summary,detail}；
           // 宿主没给就是 0，行内退化成不带数字的说法。
           summaryCap: summaryCapOf(memory),
+          detailCap: detailCapOf(memory),
           busy: busy,
           /*
            * 行内归档的「哪一行在等确认」。只传这一个字符串而不是一个查询函数：

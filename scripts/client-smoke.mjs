@@ -413,6 +413,37 @@ function statusBadgeFixture() {
   }
 }
 
+/**
+ * 截断标记的**分段** fixture（`truncated_fields`）。
+ *
+ * 旧版宿主只给 `has_truncated` 一个布尔，客户端只能说「摘要已截断」。但真实账本里
+ * 被裁掉的几乎全是 `detail`（入库上限 4000），摘要本身（上限 6000）完好无损——
+ * 于是看板上出现了「摘要已截断」这句话本身是假的。宿主现在额外汇出
+ * `truncated_fields`，客户端必须按段改口，这就是用户报的「所有任务都显示摘要已截断」
+ * 的离线证据。
+ *
+ * 另起一份 fixture 的理由同 `statusBadgeFixture()`：上面那份的断言已经把
+ * 「截断标记全局只出现一次」钉死了，往里加行会连带改坏无关断言。
+ */
+function truncationScopeFixture() {
+  return {
+    version: '0.9.0',
+    generatedAt: new Date().toISOString(),
+    concurrency: { running: 0, queued: 0, max: 6 },
+    counts: { total: 2, running: 0, queued: 0, done: 2, blocked: 0, failed: 0, cancelled: 0, ended: 0, interrupted: 0, archived: 0, retired: 0 },
+    memory: {
+      window: { days: WINDOW_DAYS, tasks: 200 },
+      ledger: { tasks: 2, retired: 0, archived: 0, retiredDropped: 0, capPerTask: { summary: 6000, detail: 4000 } },
+    },
+    workspaces: WORKSPACES,
+    targets: {},
+    tasks: [
+      { task_id: 't-scope-d', title: '仅详情被截', status: 'done', attempt: 1, workspace_id: 'ws-1', workspace_title: '主工作区', worker_session_id: 'dispatch-t-scope-d', elapsed_ms: 1000, report_count: 1, last_report: { summary: '摘要完好无损' }, has_truncated: true, truncated_fields: ['detail'], updated_at: hoursAgo(3) },
+      { task_id: 't-scope-s', title: '摘要真被截', status: 'done', attempt: 1, workspace_id: 'ws-2', workspace_title: '副工作区', worker_session_id: 'dispatch-t-scope-s', elapsed_ms: 1200, report_count: 1, last_report: { summary: '被裁过的摘要' }, has_truncated: true, truncated_fields: ['summary'], updated_at: hoursAgo(4) },
+    ],
+  }
+}
+
 /** 退休记录 fixture：倒序由宿主保证，客户端只负责渲染。 */
 function retiredFixture() {
   return {
@@ -1389,6 +1420,46 @@ check('没有 memory 块时不编造上限数字（退化成不带 n 的说法�
   noCapMarks.length === 1 && !/\d/.test(String(noCapMarks[0].props.title)) && String(noCapMarks[0].props.title).includes('dispatch_inspect'),
   noCapMarks.length ? String(noCapMarks[0].props.title) : 'mark missing')
 unmount(noCapPanel)
+boardResponse = boardFixture()
+
+/*
+ * 分段：`truncated_fields` 说了「哪一段被裁」，客户端就不能一律说「摘要已截断」。
+ * 真实账本里 32 条被裁条目**全部**只裁了 detail、summary 一条都没被裁过；继续喊
+ * 「摘要已截断」等于每一行都在说一件没发生的事。
+ */
+console.log('\n截断标记分段：详情被裁 ≠ 摘要被裁')
+/** 一行里所有截断标记的可见文本（标记的类是 `dsh-sa-truncated`，不在 `dsh-sa-tag` 里）。 */
+const truncMarksOfRow = (row) => (row ? findAll(row, (item) => item.props && item.props['data-truncated'] === 'true') : [])
+function marksText(row) {
+  return truncMarksOfRow(row).map((item) => text(item).trim())
+}
+boardResponse = truncationScopeFixture()
+const scopePanel = mount(panelReg.component)
+await tick()
+await tick()
+update(scopePanel)
+
+const detailRow = rowByTitle(scopePanel.tree, '仅详情被截')
+const detailTexts = marksText(detailRow)
+check('truncated_fields: [detail] → 该行说「详情已截断」',
+  detailTexts.length === 1 && detailTexts[0] === '详情已截断', detailTexts.length ? JSON.stringify(detailTexts) : 'mark missing')
+check('truncated_fields: [detail] → 该行**不**说「摘要已截断」（摘要完好，不能替它认罪）',
+  Boolean(detailRow) && !text(detailRow).includes('摘要已截断'), detailRow ? 'row found' : 'row missing')
+const detailMark = truncMarksOfRow(detailRow)[0]
+check('详情被裁的 hover 用**详情**上限（4000 字）',
+  Boolean(detailMark) && String(detailMark.props.title).includes('4000'),
+  detailMark ? String(detailMark.props.title) : 'mark missing')
+
+const summaryRow = rowByTitle(scopePanel.tree, '摘要真被截')
+const summaryTexts = marksText(summaryRow)
+check('truncated_fields: [summary] → 该行仍说「摘要已截断」（功能不能被修没）',
+  summaryTexts.length === 1 && summaryTexts[0] === '摘要已截断',
+  summaryTexts.length ? JSON.stringify(summaryTexts) : 'mark missing')
+const summaryMark = truncMarksOfRow(summaryRow)[0]
+check('摘要被裁的 hover 仍用摘要上限（6000 字）',
+  Boolean(summaryMark) && String(summaryMark.props.title).includes('6000'),
+  summaryMark ? String(summaryMark.props.title) : 'mark missing')
+unmount(scopePanel)
 boardResponse = boardFixture()
 
 /* ═════════════════════ 降级：宿主没提供 memory 块 ═════════════════════ */
@@ -2643,6 +2714,85 @@ update(contPanel)
 check('输入框回写草稿（面板持有，不落在展示组件里）',
   contInput().props.value === typed, JSON.stringify(contInput().props.value))
 
+/*
+ * 回归：点续派输入框**不能**「跳去真实会话」（用户报的原始缺陷）。
+ *
+ * 成因：任务行整体可点（onClick → openWorker → uiWorkspace.openSession），而续派
+ * 输入行是行的子节点。输入框当时只拦了 onInput / onKeyDown，**漏了 mousedown 与
+ * click**，于是在输入框里点一下，click 冒泡到行上 → 主视图换成那个子会话 → 输入框
+ * 自然也没法打字了。「续派」按钮能用，是因为它自己的 onClick 已经 stopPropagation。
+ *
+ * 两层闸分别断言：
+ * 1. 输入行容器自己拦 mousedown/click（第一层，控件级的默认动作，防同类新控件）；
+ * 2. 事件即使绕过第一层直抵行处理，target 落在输入框里也不能打开会话（第二层，
+ *    防脚本 dispatchEvent / 将来忘拦冒泡的控件复发）。
+ */
+const openedBeforeContinueInput = opened.length
+const contBox = () => findAll(contPanel.tree, (item) => hasClass(item, 'dsh-sa-continue'))[0]
+check('续派输入行容器存在且带 data-no-row-click（第二层闸的显式标记）',
+  Boolean(contBox()) && contBox().props['data-no-row-click'] === 'true',
+  contBox() ? JSON.stringify(contBox().props['data-no-row-click']) : 'container missing')
+
+const bubbled = []
+const eventAt = (type, target) => ({
+  type,
+  target,
+  currentTarget: { tagName: 'DIV' },
+  stopPropagation() { bubbled.push('stopped:' + type) },
+  preventDefault() { bubbled.push('prevented:' + type) },
+})
+// 模拟「点在 input 内部」：closest 命中控件选择器。
+const inputTarget = { tagName: 'INPUT', closest: (selector) => (selector.includes('input') ? { tagName: 'INPUT' } : null) }
+const inputContainer = contBox()
+if (inputContainer) {
+  inputContainer.props.onMouseDown(eventAt('mousedown', inputTarget))
+  inputContainer.props.onClick(eventAt('click', inputTarget))
+}
+check('输入行容器拦下 mousedown 与 click 的冒泡（行处理收不到这两个事件）',
+  bubbled.includes('stopped:mousedown') && bubbled.includes('stopped:click'), JSON.stringify(bubbled))
+check('拦冒泡时不调 preventDefault（否则输入框拿不到焦点、打不了字）',
+  !bubbled.some((item) => item.startsWith('prevented:')), JSON.stringify(bubbled))
+
+/* 输入框本身仍然可用：默认行为没被拦，onInput 能改写草稿。 */
+const probe = '还能继续打字'
+contInput().props.onInput({ target: { value: probe }, stopPropagation() {} })
+update(contPanel)
+check('输入框仍能接收输入（value 随草稿变化，说明焦点没被抢走）',
+  contInput().props.value === probe, JSON.stringify(contInput().props.value))
+// 还原成下面的提交用例要用的草稿。
+contInput().props.onInput({ target: { value: typed }, stopPropagation() {} })
+update(contPanel)
+
+/*
+ * 第二层闸：绕过容器，直接把「点在输入框里」的事件交给行的 onClick。
+ * 期望：一次 openSession 都没有，而且不把这次点击当成行点击（不 preventDefault）。
+ */
+const openedBeforeRowGuard = opened.length
+const guardCalls = []
+const rowEvent = (target) => ({
+  type: 'click',
+  target,
+  currentTarget: { tagName: 'DIV' },
+  stopPropagation() {},
+  preventDefault() { guardCalls.push('prevented') },
+})
+contRowOf('完成的任务').props.onClick(rowEvent(inputTarget))
+await tick()
+check('事件绕过容器直抵行处理时，closest 守卫也拦住（0 次 openSession）',
+  opened.length === openedBeforeRowGuard,
+  `新增 ${opened.length - openedBeforeRowGuard} 次（${JSON.stringify(opened.slice(openedBeforeRowGuard))}）`)
+check('守卫命中时不再 preventDefault（点输入框不被误判成行点击）',
+  guardCalls.length === 0, JSON.stringify(guardCalls))
+
+/* 反向对照：同一行的空白处点击必须照常打开，证明守卫没有写得太宽。 */
+const openedBeforePlainRow = opened.length
+contRowOf('完成的任务').props.onClick(rowEvent({ tagName: 'DIV', closest: () => null }))
+await tick()
+check('对照：点任务行空白处仍然打开子会话（守卫没有误伤正常打开）',
+  opened.length === openedBeforePlainRow + 1 && opened[opened.length - 1] === 'dispatch-t-done-5',
+  JSON.stringify(opened.slice(openedBeforePlainRow)))
+
+
 postReply = { ok: true, task: { task_id: 't-done-5', status: 'running' } }
 findAll(contPanel.tree, (item) => item.props && item.props['data-continue-send'] === 't-done-5')[0]
   .props.onClick({ stopPropagation() {} })
@@ -2677,6 +2827,43 @@ check('续派被拒时提示条带出原因（不静默吞掉用户写的话）'
   text(contPanel.tree).slice(-280))
 check('续派失败后输入框仍然开着、草稿还在',
   Boolean(findAll(contPanel.tree, (item) => item.props && item.props['data-continue-input'] === 't-done-5')[0]))
+
+/*
+ * 键盘可达性：输入框里的 Enter 提交、Esc 收起，而且两个键都必须 stopPropagation。
+ * 行的 onKeyDown 把 Enter 当成「打开这一行」——不拦的话，按 Enter 发续派的同时会
+ * 跳到子会话，等于把刚才那个「点输入框跳走」的缺陷换了个触发方式。
+ */
+const openedBeforeKeys = opened.length
+const beforeEnterPost = retryPosts().length
+const stoppedKeys = []
+const keyEvent = (key) => ({
+  key,
+  type: 'keydown',
+  stopPropagation() { stoppedKeys.push(key) },
+})
+contInput().props.onInput({ target: { value: '用 Enter 发' }, stopPropagation() {} })
+update(contPanel)
+contInput().props.onKeyDown(keyEvent('Enter'))
+await tick()
+await tick()
+update(contPanel)
+check('输入框里按 Enter：停止冒泡、提交续派、不打开会话',
+  stoppedKeys.includes('Enter') && retryPosts().length === beforeEnterPost + 1
+    && JSON.parse(retryPosts().at(-1).body).message === '用 Enter 发'
+    && opened.length === openedBeforeKeys,
+  `posts ${beforeEnterPost} → ${retryPosts().length} / opened +${opened.length - openedBeforeKeys}`)
+
+check('输入框里按 Esc：停止冒泡并收起输入框（不打开会话）',
+  (() => {
+    if (!contInput()) return false
+    contInput().props.onKeyDown(keyEvent('Escape'))
+    update(contPanel)
+    return stoppedKeys.includes('Escape')
+      && !findAll(contPanel.tree, (item) => item.props && item.props['data-continue-input'] === 't-done-5')[0]
+      && opened.length === openedBeforeKeys
+  })(),
+  `stopped ${JSON.stringify(stoppedKeys)} / opened +${opened.length - openedBeforeKeys}`)
+
 unmount(contPanel)
 postReply = { ok: true, target: null }
 
