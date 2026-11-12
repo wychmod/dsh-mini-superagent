@@ -1,0 +1,41 @@
+# 最小 CI：语法检查 + 单元测试 + 客户端离线渲染冒烟。
+#
+# 与本地 `cd dsh-mini-superagent && npm run check` 跑的是同三条命令，顺序也一致：
+# 先拦住「文件根本解析不了」，再跑断言，最后跑客户端渲染冒烟。
+# 不执行 `npm ci`：本包零运行时依赖，也没有 lockfile，直接调 node 更稳。
+# 不用 `continue-on-error`：首次接入若暴露既有失败，应该修失败，而不是让闸门装成绿的。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # package.json 在 dsh-mini-superagent/ 下，所有命令都在包目录里跑，
+        # 与本地 `cd dsh-mini-superagent` 之后的执行环境一致。
+        working-directory: dsh-mini-superagent
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          # 对齐 package.json 的 engines.node（^22.19.0 || >=24）取 22 这条线。
+          node-version: '22'
+          # 不配 cache：本包没有 lockfile，setup-node 的 npm 缓存会因找不到 lockfile 失败。
+
+      - name: 语法检查
+        run: node scripts/check-syntax.mjs
+
+      - name: 单元测试
+        run: node --test
+
+      - name: 客户端离线渲染冒烟
+        # client-smoke.mjs 在仓库根 scripts/ 下（不在包目录），所以路径要上跳一层。
+        run: node ../scripts/client-smoke.mjs

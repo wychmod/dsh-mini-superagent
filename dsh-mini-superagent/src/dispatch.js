@@ -20,7 +20,7 @@ import {
 import { FORCED_HINT, ROUTER_LOCKED, SOFT_HINT, handoffPrompt, withHandoffJudge, workerPrompt } from './prompt.js'
 import { prepareEnv, runPrepare, taskDirectory } from './prepare.js'
 import { SessionGateway } from './sessions.js'
-import { readState, writeState } from './store.js'
+import { isLedgerVersionError, readState, writeState } from './store.js'
 import { TaskTable, canTransition, clip, lastAssistantText, oneLine } from './tasks.js'
 import { TOOL_NAMES } from './tools.js'
 import { batchText, failureText, idleText, reportText } from './voice.js'
@@ -231,6 +231,18 @@ export class Dispatch {
     this.hintBaseline = new Map()
     /** 任务 id → 已用掉的瞬时故障续跑次数；成功报告或回合正常结束时清零。 */
     this.retryCounts = new Map()
+    /**
+     * 任务 id → **首次**进入瞬时故障续跑的 ISO 时间（A6 / PRD §10.3）。
+     *
+     * 为什么必须与 `retryCounts` 共用**同一套**生命周期：两张表回答的是同一个问题的
+     * 两半——「这条任务现在还在续跑吗、从什么时候开始的」。凡是「退出续跑」的出口，
+     * 都只会发生一次（成功报告的入库、`failTurn()` 的结算、插件卸载的清空），
+     * 漏掉任何一处，另一张表就留下一条**再也没人来删**的孤儿键：它不属于任何已结算
+     * 的任务，`sweepMemory()` 也不会碰它，插件跑几天就是一条只增不减的内存
+     * （PRD §10.8 点名过这个风险）。所以三处清理点全部收进 `#forgetRetry()` /
+     * 同一个 `clear()` 里，不允许分头写。
+     */
+    this.retrySince = new Map()
     /** 待触发的续跑定时器，卸载时统一清掉。 */
     this.retryTimers = new Set()
     /** worker 的 subagent：agent id → 它所属的 worker 会话 id（只用于记账与清理）。 */
@@ -1983,7 +1995,9 @@ export class Dispatch {
     task.lastReportAt = entry.at
     task.updatedAt = entry.at
     // 报告能到就说明这一轮活过来了：瞬时续跑的计数清零，下次再 5xx 重新从头数。
-    this.retryCounts.delete(task.id)
+    // 起点（`retrySince`）必须同时清（A6 清理点 1）——否则「已经好了」的任务会留着
+    // 一条永远没人删的孤儿键，计数表却是空的。见 `#forgetRetry()`。
+    this.#forgetRetry(task)
     task.retryAt = undefined
     // 记下「本回合已经给过终态报告」，供 onWorkerIdle 判断要不要补一条。
     // 用标记而不是时间戳比较，是因为 turnStartedAt 会被每一步 running 刷新。
@@ -3194,6 +3208,60 @@ export class Dispatch {
   }
 
   /**
+   * 「续跑健康度」的投影源（A6 / PRD §10.3）：次数、起点、最近一次错误。
+   *
+   * 三个值都来自 `Dispatch` 的内存（`retryCounts` / `retrySince` / `task.retryAt`），
+   * 返回 `undefined` 表示**此刻不在续跑**——这是唯一的「不输出」判据，调用方不需要
+   * 自己判 `attempts > 0`。
+   *
+   * 为什么 `last_error` 单独记而不是复用 `card().error`：`task.error` 只在
+   * `failTurn()`（放弃 / 非瞬时故障）与启动、目录准备失败时写，语义是**结算原因**。
+   * 续跑中的任务还没结算，若为了展示去写 `task.error`，「还在重试」就会长得跟
+   * 「已经失败」一样，看板上分不出来（PRD §10.5 的 [TBD] 项，结论：需要补）。
+   */
+  #retryHealthOf(task) {
+    const attempts = this.retryCounts.get(task.id) ?? 0
+    if (attempts <= 0) return undefined
+    const since = this.retrySince.get(task.id)
+    return {
+      attempts,
+      ...(since ? { since } : {}),
+      // 下一次续跑还没安排（`resumeAfterError()` 投递成功后清掉了）时不写空串：
+      // 空串会被前端当成「有一刻叫空」，省略才是「这一刻不存在」。
+      ...(task.retryAt ? { last_at: task.retryAt } : {}),
+      ...(task.retryError ? { last_error: task.retryError } : {}),
+    }
+  }
+
+  /**
+   * 把派生快照刷到任务对象上：`task.retryHealth`（`undefined` = 未续跑）。
+   *
+   * 为什么要挂到任务上，而不是给 `boardTask()` 加参数：看板快照是 `boardTask(task)`
+   * 这个纯函数的产物（单测直接喂任务对象、内部多处调用），加参数会把它变成
+   * 「必须拿到 Dispatch 才能算」的东西。把算好的三个标量挂在任务上，签名一字不动
+   * （PRD §10.4 的推荐做法）。代价是派生值必须跟着源一起变，所以计数或
+   * `retryAt` 一变就调这里。
+   */
+  #syncRetryHealth(task) {
+    task.retryHealth = this.#retryHealthOf(task)
+  }
+
+  /**
+   * 让一条任务彻底退出「续跑中」：次数、起点、派生快照、最近错误**一起**清。
+   *
+   * 为什么收成一个动作而不是在各调用点分别写两行 `delete`：`retryCounts` 与
+   * `retrySince` 是同一件事的两半，分头写就一定会有人漏掉一半——漏掉的那一张表
+   * 会留下永远没人删的孤儿键（PRD §10.8 的长期内存增长就是这么来的）。
+   * 三个清理点（报告入库、`failTurn()`、卸载）全部走这里，改顺序也改不坏。
+   */
+  #forgetRetry(task) {
+    this.retryCounts.delete(task.id)
+    this.retrySince.delete(task.id)
+    task.retryError = undefined
+    this.#syncRetryHealth(task)
+  }
+
+  /**
    * worker 的回合抛错（宿主 `agent/error`）。
    *
    * 分两类，**不再一律当作「回合结束」**：
@@ -3221,11 +3289,17 @@ export class Dispatch {
       return
     }
     this.retryCounts.set(task.id, tries + 1)
+    // 只在**首次**进入续跑时记起点：第二次及以后的退避不该刷新它，否则看板上
+    // 「自 HH:mm 起」会随着每一次失败往后跳，永远指不出这一轮是从什么时候开始的。
+    if (tries === 0) this.retrySince.set(task.id, now())
     const delay = Math.max(0, Number(delays[tries]) || 0)
     const reason = oneLine(String(error?.message ?? error), 160)
     this.warn(`${LOG_PREFIX} 任务 %s 的 worker 遇到瞬时故障（%s），%d ms 后续跑（第 %d/%d 次）`,
       task.id, reason, delay, tries + 1, delays.length)
     task.retryAt = new Date(Date.now() + delay).toISOString()
+    // 最近一次瞬时错误（A6）：与 `task.error` 分开记，后者是结算原因（见 `#retryHealthOf`）。
+    task.retryError = oneLine(String(error?.message ?? error), 300)
+    this.#syncRetryHealth(task)
     task.updatedAt = now()
     this.schedulePersist()
 
@@ -3249,6 +3323,9 @@ export class Dispatch {
         { mode: 'queue', wake: true },
       )
       task.retryAt = undefined
+      // 投递成功 = 下一次续跑已经安排掉了，`last_at` 随之消失；次数与起点**不清**
+      //（这一轮还没结束，`retry_health` 仍要如实说「已经续跑过 N 次」）。
+      this.#syncRetryHealth(task)
       task.updatedAt = now()
       this.schedulePersist()
     } catch (error) {
@@ -3262,7 +3339,8 @@ export class Dispatch {
     if (SETTLED.has(task.status)) return
     const reason = oneLine(String(error?.message ?? error ?? '未知错误'), 300)
     task.error = note ? `${note}：${reason}` : reason
-    this.retryCounts.delete(task.id)
+    // 结算成 failed 之后就没有「续跑中」这回事了：次数与起点一起清（A6 清理点 2）。
+    this.#forgetRetry(task)
     task.retryAt = undefined
     this.settle(task, 'failed')
     await this.persistCritical()
@@ -3351,6 +3429,37 @@ export class Dispatch {
     // 要给活任务与退休记录用（`detail()` 也走它）。所以这里先归一，
     // 不去要求调用方保证字段齐——否则「查一个退休任务」会直接抛 TypeError。
     const reports = Array.isArray(task.reports) ? task.reports : []
+    /**
+     * 依赖（PRD §6.3 的 A2）。两件事都直接读账本上**已有的**字段，不在这里重算：
+     *
+     * - `depends_on` 读 `task.dependsOn`。`[]` 是**恒定输出**（PRD §6.3 的例外）：
+     *   表示「已检查过，确实没有依赖」，调用方不必再判属性存在。
+     * - `blocked_by` 读 `task.blockedBy`——它是 pump/annotate 维护的派生值，语义是
+     *   「此刻第一个没满足的前置」。投影层再写一遍依赖判定，就会在看板与工具之间
+     *   出现两套「谁在挡着」的算法，迟早给出不同答案；这里只做类型包装。
+     *
+     * 为什么工具面用数组而看板仍是标量：PRD §6.3 字段表把 `blocked_by` 定为
+     * `string[]`（工具面一次看全「在等谁」），看板为 2 秒轮询的体积仍只发第一个。
+     * 第 0 项就是看板那个值，字段名逐字一致，没有第二套拼写。
+     *
+     * **这里绝不能放 `plan`。** `card()` 同时服务 `dispatch_list` 与 `dispatch_inspect`，
+     * 把步骤数组塞进列表会让返回体膨胀数倍（PRD §6.8 点名的坑）。计划只在
+     * `detail()` 里给——`dispatch_list` 要的是「一眼看多少条」，不是每条的执行细节。
+     */
+    const dependsOn = Array.isArray(task.dependsOn)
+      // 上限与看板同一口径（`DEFAULTS.maxDependsOn`）：准入已经卡过，这里再 slice
+      // 一次只是防手工改账本把列表返回体撑大。
+      ? task.dependsOn.filter(id => typeof id === 'string' && id).slice(0, DEFAULTS.maxDependsOn)
+      : []
+    const blockedBy = task.blockedBy ? [task.blockedBy] : []
+    /**
+     * 重试健康度（A6 / PRD §10.3）：`attempts > 0` 才有，`undefined` 时整块不输出。
+     *
+     * 现算而不是读 `task.retryHealth`：`card()` 是工具面的投影（`dispatch_list` /
+     * `dispatch_inspect`），它跑在 Dispatch 里、拿得到真值；`task.retryHealth`
+     * 那个快照是给拿不到计数的 `boardTask()` 用的，两者同一份算法（`#retryHealthOf`）。
+     */
+    const retryHealth = this.#retryHealthOf(task)
     return {
       task_id: task.id,
       title: task.title,
@@ -3387,11 +3496,26 @@ export class Dispatch {
       ...(task.inputReadAt ? { input_read_at: task.inputReadAt } : {}),
       ...(task.inputUnknownAt && !task.inputReadAt ? { input_unknown_at: task.inputUnknownAt } : {}),
       ...(task.retryAt ? { retry_at: task.retryAt } : {}),
+      /**
+       * A6：重试了几次、从什么时候开始（`{attempts, since?, last_at?, last_error?}`）。
+       *
+       * 与 `report_delivery`（投递重试：报告有没有送到主会话）是**两件完全不同的事**，
+       * 字段名刻意不共享、也不合并成一块：把两者放在一起展示，用户会以为
+       * 「重试 2 次」的意思是「报告没送到」，而实际是模型/连接瞬时故障（PRD §10.8）。
+       * 最近错误不在这里重复一份 `card().error` 意义上的「结算原因」，理由见
+       * `#retryHealthOf()`。
+       */
+      ...(retryHealth ? { retry_health: retryHealth } : {}),
       ...(task.taskDir ? { task_dir: task.taskDir } : {}),
       ...(task.prepareAt ? { prepare_at: task.prepareAt } : {}),
       // 后台活：回合结束了但 job/subagent 还在跑，任务仍占着并发位。
       ...(task.background ? { background: task.background } : {}),
       ...(task.backgroundKilled ? { background_killed: task.backgroundKilled } : {}),
+      // 依赖（PRD §6.3）：两个短字段，列表里就能看出「这条在等谁」。
+      // 其余依赖字段（blocked_reason / cancel_reason / error_code）留在 `detail()`：
+      // 列表只需要「有没有在等、等谁」，原因这类排查信息走显式查询。
+      depends_on: dependsOn,
+      ...(blockedBy.length ? { blocked_by: blockedBy } : {}),
     }
   }
 
@@ -3402,6 +3526,29 @@ export class Dispatch {
     // `Array.isArray` 全 false，输出自然退化成只剩留痕字段。
     // 这样 `dispatch_inspect` 的调用方不必为「退休」写第二条组装路径。
     const reports = Array.isArray(task.reports) ? task.reports : []
+    /**
+     * 计划（PRD §6.3）：全量步骤**只在这里**给，`card()` 里没有。
+     *
+     * 为什么已结算任务照样返回：看板不下发 `plan_*` 是为了省 2 秒轮询的带宽
+     * （终态 > 计划，PRD-01 §4.3），而 `dispatch_inspect` 是显式查询，不适用那条
+     * 取舍——「完了，但它当时分了几步、哪步没做」恰恰是事后最想查的事。
+     *
+     * 边界（PRD §6.5）：`task.plan` 不是数组、或任一步缺 `text`，整份按空计划处理
+     * （不输出 `plan`）。不输出「半份计划」是刻意的：一个只有 status 没有正文的
+     * 步骤会让调用方以为「这步没写文案」，而实际是账本坏了——两种事实不该长得一样。
+     * 截断不在这里标记：入库时已经截到上限，能存下来的部分就是全部事实，
+     * 截断标记走报告回执的 `plan_truncated`。
+     */
+    let plan
+    if (Array.isArray(task.plan) && task.plan.length
+      && task.plan.every(step => step && typeof step.text === 'string' && step.text)) {
+      plan = task.plan.map(step => ({
+        text: step.text,
+        // 与 `normalizePlan()` 同一口径：未知状态按 pending（缺省按未开始），
+        // 不把脏值原样透出去让调用方自己猜区间。
+        status: PLAN_STATUSES.has(step.status) ? step.status : 'pending',
+      }))
+    }
     return {
       ...this.card(task),
       brief: clip(task.brief, 2000),
@@ -3409,6 +3556,15 @@ export class Dispatch {
       ...(task.briefTruncated ? { brief_truncated_to: task.brief.length } : {}),
       ...(reports.length ? { recent_reports: reports.slice(-5) } : {}),
       ...(task.lastText ? { last_worker_text: clip(task.lastText, 3000) } : {}),
+      // 计划（详情独有）：步骤数组只在这里出现。
+      ...(plan ? { plan } : {}),
+      // 依赖的排查字段（PRD §6.3）。`depends_on` / `blocked_by` 已经由 `card()`
+      // 投影过，这里只补三个「出过这件事才有」的可选键；空值不输出，避免详情里
+      // 堆一排空数组/空串。字段名与看板逐字一致（`blocked_reason` / `cancel_reason`
+      // / `error_code`），不新造驼峰别名。
+      ...(task.blockedReason ? { blocked_reason: task.blockedReason } : {}),
+      ...(task.cancelReason ? { cancel_reason: task.cancelReason } : {}),
+      ...(task.errorCode ? { error_code: task.errorCode } : {}),
       // P0-4：归档是「只读冻结」，冻结时刻要能在详情里看到。
       // 注意归档与退休是两件事：归档 = 会话收了（任务还在表里，可取消归档）；
       // 退休 = 任务记录移出活表（只在 retired 留痕）。所以归档用 frozenAt，
@@ -3824,6 +3980,21 @@ export class Dispatch {
     try {
       state = await readState(this.stateFile)
     } catch (error) {
+      /**
+       * 账本版本不兼容（A4）：**重新抛出**，让 `apply()` 失败、插件不加载
+       * （fail-closed）。
+       *
+       * 为什么不能像「文件损坏」那样 warn 后拿空表继续：空表 + 下一次 `persist()`
+       * 会把「插件读不懂的那份账本」整文件覆盖掉。用户升级插件后账本已经没了，
+       * 那才是不可逆的损失。拒绝加载只让工具暂时消失，账本还在原地。
+       *
+       * 为什么先 warn 再抛：`selfCheck()` / 看板都随插件未加载而不可用，
+       * 启动日志是唯一出口；异常栈由宿主打印，但可能被静默跳过，所以这里主动留一条。
+       */
+      if (isLedgerVersionError(error)) {
+        this.warn(`${LOG_PREFIX} %s`, String(error?.message ?? error))
+        throw error
+      }
       // 主文件与备份都不可用：明确报出来，不要静默拿空表继续跑。
       this.warn(`${LOG_PREFIX} 读取历史状态失败（文件已损坏且无可用备份）：%s`, String(error))
       this.restoreError = String(error)
@@ -3879,6 +4050,16 @@ export class Dispatch {
             : undefined,
           blockedBy: undefined,
           blockedReason: undefined,
+          /**
+           * A6：重试健康度是**纯内存**的派生值（PRD §10.4「不落盘；重启后归零」）。
+           *
+           * `#writeOnce()` 是对任务对象做 `{...task}`，所以续跑中的任务确实会把
+           * `retryHealth` 写进账本；重启后计数表是空的，若照抄这份快照，看板就会
+           * 显示一条「重试 2 次」而真实次数是 0。读回时一律丢掉这两项，
+           * 让「重启后不再显示 retry_health」由**数据源头**保证，而不是靠渲染层判空。
+           */
+          retryHealth: undefined,
+          retryError: undefined,
         }
         // 血缘字段的不变式：没有来源任务就不该留下 handoffSource / handoffReason。
         // 历史坏数据（或旧版本只写了一半）在这里归一，避免看板出现「来源未知但有理由」的半条记录。
@@ -4053,6 +4234,19 @@ export class Dispatch {
       if (state.recovered === 'bak') {
         this.warn(`${LOG_PREFIX} 主状态文件损坏，已从备份 %s.bak 恢复`, this.stateFile)
         this.restoreError = 'recovered-from-bak'
+      }
+      /**
+       * 无 `version` 的极旧账本（A4）：按现有「缺字段按空读」正常启动，
+       * 只在 `restoreError` 与日志里留一条 warn。
+       *
+       * 为什么不拦：它没有「未来格式」的覆盖风险——缺字段本身就说明是旧版写的，
+       * 现有 `normalize()` 能完整解释；拦下来只会让老用户升级即不可用。
+       * 不写 `missingVersion` 进账本：这是读取期的一次性提示，不是任务数据。
+       */
+      if (state.missingVersion) {
+        const note = '账本缺少 version，按旧格式读取'
+        this.warn(`${LOG_PREFIX} %s`, note)
+        this.restoreError = this.restoreError ? `${this.restoreError}; ${note}` : note
       }
       this.log(`${LOG_PREFIX} 读回 %d 个历史任务、%d 个退休留痕、%d 个派发目标（%s）`,
         this.table.tasks.size, retiredCount, this.targets.size, this.stateFile)
@@ -4740,6 +4934,9 @@ export class Dispatch {
     for (const timer of this.retryTimers) clearTimeout(timer)
     this.retryTimers.clear()
     this.retryCounts.clear()
+    // A6 清理点 3：起点表跟着计数一起清。卸载后这个实例就该「什么都没在续跑」，
+    // 单清计数会让 `retrySince` 原地留着全部键（PRD §10.8 点名的那处泄露）。
+    this.retrySince.clear()
     // 后台巡检同理：卸载后不该再有人去结算任务。
     for (const timer of this.backgroundTimers.values()) clearTimeout(timer)
     this.backgroundTimers.clear()

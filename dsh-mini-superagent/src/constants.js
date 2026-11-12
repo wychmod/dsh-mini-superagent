@@ -7,7 +7,7 @@
 export const NAME = 'dsh-mini-superagent'
 
 /** 插件版本，会出现在 dispatch_list 与看板快照里，便于确认“跑的是哪一版”。 */
-export const VERSION = '0.9.0'
+export const VERSION = '0.9.1'
 
 /** 日志前缀。 */
 export const LOG_PREFIX = `${NAME}:`
@@ -96,6 +96,35 @@ export const VOICE_SECTION = {
 
 /** 状态文件在 $DSH_HOME 下的目录名。 */
 export const STATE_DIR = NAME
+
+/**
+ * 账本（tasks.json）的文件结构版本。
+ *
+ * 它有两个用途，必须**只有一份定义**：
+ * - `writeState()` 把 `version: FILE_VERSION` 写进文件；
+ * - `readState()` 读回时用它判「这个账本是不是比插件还新」，过新即 fail-closed。
+ *
+ * 4（本版）：新增 `retired` 数组。旧文件（3 及更早）没有这个键，
+ * `normalize()` 按空数组读——**不迁移、不报错**，因为退休留痕丢了只影响
+ * 「它为什么消失」这一条可查性，不该让升级后的插件起不来。
+ *
+ * 放在 `constants.js` 而不是 `store.js`：版本上限与可读下限是一对，必须挨着；
+ * 分居两处时最容易出现的错误是「写 5 读 4」这种半升级状态。
+ */
+export const FILE_VERSION = 4
+
+/**
+ * 当前插件**能读**的最旧账本版本。
+ *
+ * 取 3（PRD §15 拍板 Q3）：v3 只差 `retired` 一个键，而「缺字段按空读」已经覆盖，
+ * 所以 0.7.x 用户可以直接升级到本版；取 4 会把他们挡在门外，等于用一次格式校验
+ * 制造一次不可升级。
+ *
+ * 低于它的账本字段形状已经无法按现有 `normalize()` 解释（v1/v2），继续读会让
+ * 每条任务都缺关键字段、并在下一次写盘时被「看起来正常」的空壳覆盖——
+ * 那比直接拒绝启动更难排查。
+ */
+export const OLDEST_FILE_VERSION = 3
 
 /**
  * 派发目标的「自动」标记值。

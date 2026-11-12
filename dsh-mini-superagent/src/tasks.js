@@ -499,6 +499,11 @@ export class TaskTable {
   /**
    * 等一组任务全部结算；超时后按当前状态返回。
    *
+   * 返回值是 `{ timedOut, tasks }`，不是裸数组。
+   * 为什么必须区分：调用方（`dispatch_wait`）以前无法判断「真的等到了」还是「等满了，
+   * 任务还在 running」，只能自己逐条看 `status` 反推——而 `status` 在两种情况下
+   * 都可能是 running。`timedOut` 把这条信息从「猜」变成「读」。
+   *
    * 三个坑，都在 0.7.0 修掉：
    * 1. **重复 id**：`settle` 用 `Set` 去重 `finishOne`，但 `remaining` 按数组长度计，
    *    所以 `waitFor([a, a])` 里 a 结算一次后 `remaining` 还是 1，必须等满超时才返回。
@@ -508,6 +513,9 @@ export class TaskTable {
    * 3. **`unref()` 依赖外部事件循环**：定时器 `unref` 后，若事件循环里没有
    *    别的活，超时永不触发。插件进程常驻所以线上不显形，但这是隐性耦合；
    *    保留 `unref`（避免拖住进程退出），同时保证清理逻辑在 resolve 路径上。
+   *
+   * @returns {Promise<{ timedOut: boolean, tasks: object[] }>} `timedOut` 为 true
+   *   表示本次因超时返回，`tasks` 里可能仍有未结算任务；为 false 表示全部结算。
    */
   waitFor(tasks, timeoutMs) {
     // 按 id 去重：同一个任务出现两次时 remaining 只该减一次。
@@ -519,12 +527,22 @@ export class TaskTable {
       unique.push(task)
     }
     const pending = unique.filter(task => !SETTLED.has(task.status))
-    if (!pending.length) return Promise.resolve(tasks)
+    // 没有要等的任务属于「已全部结算」，不是超时：立刻返回，timedOut 必须为 false。
+    // 注意 `tasks` 原样返回（含重复项），调用方传入什么就拿到什么。
+    if (!pending.length) return Promise.resolve({ timedOut: false, tasks })
 
     return new Promise(resolve => {
       let done = false
-      /** 收尾：停表、摘掉全部 waiters、resolve。任何路径都只走一次。 */
-      const finish = () => {
+      /**
+       * 收尾：停表、摘掉全部 waiters、resolve。任何路径都只走一次。
+       *
+       * `source` 只用来决定 `timedOut`：它不改变收尾动作，也不引入第二条清理路径。
+       * `done` 守卫必须在写 `timedOut` 与任何清理之前——「计数归零」与「定时器触发」
+       * 是两个独立事件，二者都可能先到（甚至同一 tick 里先后到达），
+       * 清理跑两次会重复 resolve（Promise 虽然幂等忽略，但语义已经错了），
+       * 更糟的是第二次会去 delete 已经被删掉的 waiter 引用，掩盖真正的泄漏。
+       */
+      const finish = source => {
         if (done) return
         done = true
         clearTimeout(timer)
@@ -534,16 +552,16 @@ export class TaskTable {
           set.delete(finishOne)
           if (!set.size) this.waiters.delete(task.id)
         }
-        resolve(tasks)
+        resolve({ timedOut: source === 'timeout', tasks })
       }
-      const timer = setTimeout(finish, timeoutMs)
+      const timer = setTimeout(() => finish('timeout'), timeoutMs)
       timer.unref?.()
 
       let remaining = pending.length
       const finishOne = () => {
         remaining -= 1
         if (remaining > 0) return
-        finish()
+        finish('settled')
       }
 
       for (const task of pending) {

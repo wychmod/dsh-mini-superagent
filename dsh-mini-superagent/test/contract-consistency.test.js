@@ -38,6 +38,51 @@ test('README 的 dispatch_list 示例版本与 constants.VERSION 一致', async 
   )
 })
 
+/**
+ * 仓库根 README 的门槛：用户第一眼看到的是它，而它此前**不在任何断言里**。
+ *
+ * 上面的断言读 `README.md`，经 `read()` 解析到包内的 `dsh-mini-superagent/README.md`；
+ * 仓库根那份是另一份文件。于是它就漂了：一处写「9 个 `dispatch_*` 工具」、另一处写
+ * 「10 个工具」，版本停在 0.8.0，而 `package.json` 与 `constants.VERSION` 已经是 0.9.0。
+ *
+ * 这里只钉**两个对外数字**（工具数、包版本），不钉措辞：根 README 与包内 README
+ * 允许说法不同，但数字必须与代码同源。
+ */
+test('根 README 的工具数与版本号与代码一致', async () => {
+  // 测试文件在 test/ 下，包根是 `../`，仓库根还要再上两级。
+  const rootReadme = await readFile(new URL('../../README.md', import.meta.url), 'utf8')
+
+  /*
+   * 匹配「确认 N 个 `dispatch_*` 工具」这一句，并强制**恰好一处**。
+   * 故意只认这一种写法：将来根 README 改成表格或英文，正则匹配不到时
+   * assert 会失败（不是 skip、不是「找不到就放过」），逼维护者连同断言一起改——
+   * 否则闸门会在文档改版那天悄悄失效。
+   */
+  const toolCounts = [...rootReadme.matchAll(/(\d+)\s*个\s*`dispatch_\*`\s*工具/g)]
+  assert.equal(toolCounts.length, 1,
+    '仓库根 README 应恰好有一句「N 个 `dispatch_*` 工具」；'
+    + '若改成了表格/英文等表述，请同步改本断言的正则，不要改成条件跳过')
+  assert.equal(Number(toolCounts[0][1]), TOOL_NAMES.length,
+    `仓库根 README 写的是「${toolCounts[0][1]} 个 \`dispatch_*\` 工具」，`
+    + `而 src/tools.js 的 TOOL_NAMES 有 ${TOOL_NAMES.length} 个：改工具数时请同步改仓库根 `
+    + 'README「快速安装」引用的那句话，以及「插件速览」里的工具清单')
+
+  /*
+   * 版本：`package.json` 与 `constants.VERSION` 必须同值。根 README 采用 Q1=C 的写法
+   * （「当前工作区版本 X；已发布版本以 CHANGELOG 为准」），所以两件事都要能对上：
+   * 数字对得上，且保留「工作区版本 / 已发布版本」的区分。
+   */
+  const pkg = JSON.parse(await read('package.json'))
+  assert.equal(pkg.version, VERSION,
+    `package.json 的 version 是 ${pkg.version}，src/constants.js 的 VERSION 是 ${VERSION}：`
+    + '发版时两个都要改，并同步仓库根 README「仓库内容」表里的版本写法')
+  assert.ok(rootReadme.includes(`当前工作区版本 ${VERSION}`),
+    `仓库根 README 的「仓库内容」表应写「当前工作区版本 ${VERSION}」（当前版本号来自 src/constants.js）；`
+    + '不要把这句话删成裸版本号，也不要把版本号留旧')
+  assert.ok(rootReadme.includes('已发布版本以') && rootReadme.includes('CHANGELOG'),
+    '仓库根 README 的版本写法要同时表达「当前工作区版本」与「已发布版本以 CHANGELOG 为准」（PRD Q1=C）')
+})
+
 test('tools.js 头部声明的工具数与 TOOL_NAMES 一致', async () => {
   const tools = await read('src/tools.js')
   const match = tools.match(/^ \* (\d+) 个工具的模型可见定义/m)

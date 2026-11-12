@@ -53,6 +53,14 @@ window.__ModuleLoader__.load({
     const POLL_MS = 2000
     /** 「耗时」走表的间隔。 */
     const TICK_MS = 1000
+    /**
+     * 「计划已更新」徽标的展示窗口（PRD §11.3 建议 6 秒 = 3 个轮询周期；评审 Q7 拍板 6 秒）。
+     *
+     * 写成 `POLL_MS * 3` 而不是 `6000`：这个窗口的语义是「让用户看到 3 次轮询」，
+     * 不是「刚好 6 秒」。将来把 `POLL_MS` 调快或调慢时，窗口必须跟着变——写成魔法
+     * 数字的话，`POLL_MS` 一改，徽标就会变成「一闪而过」或「赖着不走」（PRD §11.8）。
+     */
+    const PLAN_NOTICE_MS = POLL_MS * 3
     /** Client locale 命名空间。 */
     const LOCALE_NS = 'dsh-mini-superagent.board'
     /**
@@ -83,6 +91,16 @@ window.__ModuleLoader__.load({
       'status.interrupted': '已中断',
       attemptPrefix: '第',
       attemptSuffix: '次',
+      /*
+       * 重试健康度（A6 / PRD §10.3）：`retry_health.attempts` 是「因瞬时故障续跑了几次」。
+       *
+       * 为什么不复用 `attemptPrefix/Suffix`：那个标签显示的是 `attempt`——**换过几次
+       * worker 会话**（会话没了才 +1）。两个数字相等是巧合，不相等是常态；把
+       * 「重试 2 次」写进 attempt 标签，等于让用户以为换过两次会话。
+       * 同理也不与投递重试（报告没送到）共用文案。
+       */
+      retryTag: '重试 {n} 次',
+      retrySinceHint: '自 {time} 起',
       reports: '报告',
       /*
        * 任务级计划（PRD-01 §4.3）。看板只显示「做了几步 / 共几步」与当前步骤一句，
@@ -653,6 +671,8 @@ window.__ModuleLoader__.load({
       'status.interrupted': 'Interrupted',
       attemptPrefix: 'attempt ',
       attemptSuffix: '',
+      retryTag: 'retried {n}×',
+      retrySinceHint: 'since {time}',
       reports: 'reports',
       /* 与上面 TEXT 的 plan.* 一一对应；缺一条英文界面就会退回中文。 */
       'plan.label': 'Plan',
@@ -1305,6 +1325,20 @@ window.__ModuleLoader__.load({
       } catch (error) {
         return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0')
       }
+    }
+
+    /**
+     * 只到分钟的 HH:mm（A6 的「自 HH:mm 起」用）。
+     *
+     * 为什么不复用 `formatClock()`：它给的是带秒的本地时间串（「最后更新 23:57:01」），
+     * 而「这轮重试从什么时候开始」秒没有意义，多两位只会让 title 更难扫。
+     * 也不用 `toLocaleTimeString()` 再截断——那要看宿主的面板语言，截出来可能是
+     * 「11:57」配 AM/PM；这里直接按本地时区补零，输出稳定可断言。
+     */
+    function formatClockShort(stamp) {
+      const date = new Date(stamp)
+      if (Number.isNaN(date.getTime())) return ''
+      return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0')
     }
 
     /** 报告摘要的第一行（跳过空行）。 */
@@ -2458,6 +2492,15 @@ window.__ModuleLoader__.load({
 .dsh-sa-tag-unread {
   background: var(--dsw-alias-state-info-surface, rgba(37,99,235,.12));
   color: var(--dsw-alias-state-info-primary, #2563eb);
+}
+/*
+ * 「重试 N 次」（A6）：瞬时故障正在自动续跑。
+ * 用警示色但它**不是错误**（任务还在 running，也还没放弃），所以不上红；
+ * 与「后台收尾」同色系，但靠文字区分，不靠颜色独立表意。
+ */
+.dsh-sa-tag-retry {
+  background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
+  color: var(--dsw-alias-state-warn-primary, #b45309);
 }
 /*
  * 「未读未知」：既不是「待读」（那是在等它读），也不是「已读」。
@@ -4148,6 +4191,40 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「重试 N 次」标签（A6 / PRD §10.3）：任务卡与历史行**共用一份**渲染。
+     *
+     * 宿主只在这一刻真在续跑时下发 `retry_health`，所以这里不判状态：结算后对象
+     * 消失、标签自然消失，不会留下历史次数（`retryCounts` 是纯内存的）。
+     *
+     * 为什么不与 `attempt` 标签合流：`attempt` 是「换过几次 worker 会话」，
+     * `retry_health.attempts` 是「同一会话里因瞬时故障续跑了几次」。两个数字相等
+     * 是巧合，不相等是常态；合在一起会让「第 2 次」看起来像「重试了 2 次」。
+     * 也不与投递重试（`report_delivery`，报告没送到）共用文案或并排展示。
+     */
+    function retryTagOf(row) {
+      const health = row && row.retry_health && typeof row.retry_health === 'object' ? row.retry_health : null
+      const retryAttempts = health ? num(health.attempts, 0) : 0
+      if (retryAttempts <= 0) return null
+      /*
+       * 先在本地算好「几点起的」，再决定要不要给 title：没有起点时 `fill` 会拼出
+       * 一个空的「自  起」，比没有提示更让人困惑。
+       */
+      const retrySinceAt = health && health.since ? formatClockShort(health.since) : ''
+      const retryTagProps = {
+        key: 'retry',
+        className: 'dsh-sa-tag dsh-sa-tag-retry',
+        // 观测口径：冒烟与排障直接读这个属性，不必按文字找。
+        'data-retry-health': String(retryAttempts),
+      }
+      if (retrySinceAt) {
+        const title = fill(tr('retrySinceHint'), { time: retrySinceAt })
+        retryTagProps.title = title
+        retryTagProps['aria-label'] = title
+      }
+      return h('span', retryTagProps, fill(tr('retryTag'), { n: retryAttempts }))
+    }
+
+    /**
      * 一条任务卡。
      *
      * 三种密度共用一个组件：
@@ -4572,6 +4649,8 @@ window.__ModuleLoader__.load({
         attempt > 1
           ? h('span', { key: 'attempt', className: 'dsh-sa-tag' }, tr('attemptPrefix') + attempt + tr('attemptSuffix'))
           : null,
+        // 「重试 N 次」（A6）：宿主只在这一刻真在续跑时下发 `retry_health`。
+        retryTagOf(task),
         planVisible
           ? h(
               'span',
@@ -5611,6 +5690,14 @@ window.__ModuleLoader__.load({
         blocked_reason: retired ? null : (typeof record.blocked_reason === 'string' ? record.blocked_reason : null),
         cancel_reason: retired ? null : (typeof record.cancel_reason === 'string' ? record.cancel_reason : null),
         error_code: retired ? null : (typeof record.error_code === 'string' ? record.error_code : null),
+        /*
+         * 计划（PRD-01 §4.3 / A7 §11.3）：抽屉里也要能说「计划 2/5」与「计划已更新」。
+         * 与依赖字段同一个理由——这里是**白名单**归一，不补的话计划块在抽屉里
+         * 永远是空的（`planTotal = 0`），而历史是唯一能打开抽屉的地方。
+         */
+        plan_total: retired ? 0 : num(record.plan_total, 0),
+        plan_done: retired ? 0 : num(record.plan_done, 0),
+        plan_current: retired ? '' : (typeof record.plan_current === 'string' ? record.plan_current : ''),
         // 退休留痕只剩最后一条摘要：账本封顶的目的就是让写放大有上界。
         summary: retired && typeof record.summary === 'string' ? record.summary : '',
       }
@@ -6000,6 +6087,14 @@ window.__ModuleLoader__.load({
       const planCurrent = typeof row.plan_current === 'string' ? row.plan_current : ''
       if ((row.status === 'queued' || row.status === 'running') && planTotal > 0) {
         reportLines.push(kv('plan', tr('plan.label'), fill(tr('plan.ratio'), { done: planDone, total: planTotal })))
+        /*
+         * 「计划已更新」在抽屉里单独占一行（PRD §11.3）：行徽标只在列表里看得到，
+         * 而用户点开抽屉时视线已经离开列表——同一件事不再说一次，就等于没提示。
+         * 只在任务行也显示计划时才可能出现（`planTotal > 0` 且未结算），与行内一致。
+         */
+        if (props.planUpdated) {
+          reportLines.push(kv('plan-updated', tr('plan.label'), tr('plan.updatedTag')))
+        }
         if (planCurrent) reportLines.push(kv('plan-current', tr('plan.currentLabel'), planCurrent))
       }
       reportLines.push(kv('count', tr('drawer.reportCount'), String(num(row.report_count, 0))))
@@ -6338,6 +6433,8 @@ window.__ModuleLoader__.load({
               now: props.now,
               // 依赖短名表（PRD-02 §4.5）：抽屉里的「前置：A、B」按 id 查标题。
               depTitles: props.depTitles,
+              // 「计划已更新」在抽屉里也要说一次（PRD §11.3：抽屉打开时同样显示）。
+              planUpdated: Boolean(props.drawerPlanUpdated),
               onClose: props.onCloseDrawer,
               onCopy: props.onCopy,
               onOpen: props.onOpen,
@@ -6878,18 +6975,30 @@ window.__ModuleLoader__.load({
       const [archiveStage, setArchiveStage] = useState(0)
       const [archiving, setArchiving] = useState(false)
       /**
-       * 「计划已更新」（PRD-01 §6）：worker 第二次带**不同的**计划时，这一行亮一次短标记。
+       * 「计划已更新」（PRD-01 §6 / PRD §11.3）：worker 提交**不同的**计划时，这一行亮一次短徽标。
        *
-       * 两份本地状态，都**不入账本**（PRD 明确要求：这是看板的瞬时提示，不是任务事实）：
-       * - `planSeen`：task_id → 上一次看到的计划指纹（`总步数|已完成|当前步骤`）。
+       * 两张表，都**不入账本**（PRD 明确要求：这是看板的瞬时提示，不是任务事实）：
+       * - `lastPlan`：task_id → 上一轮看到的计划三元组 `{total, done, current}`。
        *   放 ref 而不是 state：它只用来做前后比较，改它不该触发渲染；
-       * - `planUpdated`：本次要点亮的 task_id 集合。放 state 才会驱动渲染。
+       * - `planNotice`：task_id → 「这一轮该亮的时刻」（毫秒戳）。放 state 才会驱动渲染。
+       *
+       * 为什么存时刻而不是存「亮/不亮」：徽标要活满 `PLAN_NOTICE_MS`（6 秒 = 3 个轮询
+       * 周期），「还亮不亮」是**时刻差**判断。只存布尔的话，下一轮轮询一到就只能先清、
+       * 再看变没变——徽标的寿命会被绑成「一轮轮询」（2 秒），而不是 PRD 要的 6 秒。
        *
        * 为什么 `TaskCard` 自己不能做这件事：它是无 hook 的展示组件，每 2 秒轮询都
        * 重建一次，没有任何地方能记住「上一次的计划长什么样」。
        */
-      const planSeen = useRef({})
-      const [planUpdated, setPlanUpdated] = useState({})
+      const lastPlan = useRef(new Map())
+      /**
+       * 上一轮取数失败过 → 恢复后的第一轮**只重建基线**（PRD §11.5）。
+       *
+       * 失败期间手里拿的是旧快照，跨过这段空档再比，等于拿「几分钟前的计划」对
+       * 「现在的计划」直接下结论；PRD 要求这条缝里的第一轮不下提示，只把基线换新。
+       * 放 ref：它只影响下一次比较，不该触发渲染。
+       */
+      const planBaselineDirty = useRef(false)
+      const [planNotice, setPlanNotice] = useState({})
       /**
        * 行内归档的两步确认：存的是「正在等确认的 task_id」。
        *
@@ -7435,45 +7544,92 @@ window.__ModuleLoader__.load({
       }
       const counts = data && data.counts ? data.counts : {}
       /*
-       * 「计划已更新」的判定（PRD-01 §6）。
+       * 「计划已更新」的判定（PRD-01 §6 / PRD §11.3–11.5）。
        *
-       * 每次拿到新快照都比一次指纹（`总步数|已完成|当前步骤`）：
-       * - 只跟踪 `queued` / `running`：终态不再计划，「已更新」对一条做完的任务没有意义；
-       * - **第一次见到某条任务不点亮**：那只是「我第一次看到它的计划」，不是「它改了计划」；
-       * - 指纹变了才点亮，`data` 换成同一份计划时清空 —— 所以标记的生命周期
-       *   是**一次轮询**（约 2 秒），而不是定时器。
+       * 每次拿到**新**快照比较一次三元组（`总步数` / `已完成` / `当前步骤`）：
+       * - 只跟踪 `queued` / `running` 且真有计划的：终态不再计划，「已更新」对一条做完
+       *   的任务没有意义；结算/归档的行也顺手从两张表里清掉（不清会随轮询一直累积）；
+       * - **第一次见到某条任务只记录、不点亮**：那只是「我第一次看到它的计划」，
+       *   不是「它改了计划」。页面刷新后同样走这条路，所以刷新不补提示；
+       * - 三元组**任一**变化就点亮一次（一条任务只产出一个徽标，不会变成三条）；
+       * - 三元组没变但窗口没走完 → 把原来的时刻原样留下来（这才是 6 秒而不是 2 秒）。
        *
-       * 为什么用「下次轮询消失」而不是 setTimeout：看板每 2 秒本来就会重渲染一次，
-       * 蹭这趟车不需要额外定时器（面板卸载 / 切视图时也没有待清理的 timer），
-       * 而且它天然与「新快照到了」对齐——不会出现「标记还在，但计划已经又变了一次」。
+       * 为什么窗口不另起定时器：看板每 2 秒本来就重渲染一次，蹭这趟车不需要额外
+       * timer（面板卸载 / 切视图时也没有待清理的东西），而且它天然与「新快照到了」
+       * 对齐——不会出现「徽标还在，但计划已经又变了一次」。
        */
       useEffect(function () {
         if (!data) return
-        const seen = {}
+        /*
+         * stale 快照：**不比较、不提示**，只记一笔「恢复后先重建基线」。
+         *
+         * 取数失败时轮询只写 `failure`、不落新快照，此刻手里的 `data` 是上一次成功的
+         * 旧数据。拿这份旧数据再和 `lastPlan` 比一次，等于「自己和自己比」——只要将来
+         * 有人让失败路径回填一次快照（比如失败时也 setSnapshot(next)），这里就会凭空
+         * 亮出「计划已更新」，而计划其实一个字都没改（PRD §11.5 明确要求跳过）。
+         * 跳过时也**不动** `lastPlan`：失败期间基线保持上一次成功时的值，恢复后由
+         * `planBaselineDirty` 决定「只重建、不提示」。
+         */
+        if (failure) {
+          planBaselineDirty.current = true
+          return
+        }
+        const now = Date.now()
+        // 刚经历过失败：这一轮只重建基线（PRD §11.5「恢复后第一轮只重建基线」）。
+        const rebuild = planBaselineDirty.current
+        planBaselineDirty.current = false
+        const seen = new Map()
         const changed = []
         for (const task of allTasks) {
           if (!task || typeof task.task_id !== 'string' || !task.task_id) continue
           if (task.status !== 'queued' && task.status !== 'running') continue
           const total = num(task.plan_total, 0)
           if (total <= 0) continue
-          const done = num(task.plan_done, 0)
-          const current = typeof task.plan_current === 'string' ? task.plan_current : ''
-          const fingerprint = total + '|' + done + '|' + current
-          seen[task.task_id] = fingerprint
-          const previous = planSeen.current[task.task_id]
-          if (typeof previous === 'string' && previous !== fingerprint) changed.push(task.task_id)
+          const triple = {
+            total: total,
+            done: num(task.plan_done, 0),
+            current: typeof task.plan_current === 'string' ? task.plan_current : '',
+          }
+          seen.set(task.task_id, triple)
+          const previous = rebuild ? undefined : lastPlan.current.get(task.task_id)
+          if (!previous) continue
+          if (previous.total !== triple.total || previous.done !== triple.done || previous.current !== triple.current) {
+            changed.push(task.task_id)
+          }
         }
-        planSeen.current = seen
-        if (!changed.length) {
-          // 这一轮没人需要点亮：把上一轮的清掉（策略就是「下次轮询消失」）。
-          // 返回同一个对象时空集不算变化，避免每次轮询都白触发一次渲染。
-          setPlanUpdated(function (current) { return Object.keys(current).length ? {} : current })
-          return
-        }
-        const next = {}
-        for (const id of changed) next[id] = true
-        setPlanUpdated(next)
-      }, [data])
+        lastPlan.current = seen
+        /*
+         * 时刻表去重：只有「键集合与每个时刻都没变」时才返回原对象。
+         * 返回新对象会让每 2 秒的轮询都多一次渲染，而绝大多数轮次什么都没变。
+         */
+        setPlanNotice(function (current) {
+          const next = {}
+          for (const id of seen.keys()) {
+            if (changed.indexOf(id) !== -1) {
+              next[id] = now
+              continue
+            }
+            const stamp = current[id]
+            if (typeof stamp === 'number' && now - stamp < PLAN_NOTICE_MS) next[id] = stamp
+          }
+          const keys = Object.keys(next)
+          const same = keys.length === Object.keys(current).length
+            && keys.every(function (id) { return current[id] === next[id] })
+          return same ? current : next
+        })
+      }, [data, failure])
+
+      /**
+       * 这一行的「计划已更新」是否还在展示窗口内（`PLAN_NOTICE_MS`）。
+       *
+       * 渲染期再判一次时刻，而不是只靠上面那次清理：清理只在「新快照到了」时才跑，
+       * 万一某一轮轮询晚到，清理会跟着晚。渲染期判断让「6 秒」成为**读得到的上界**，
+       * 不依赖轮询准点。
+       */
+      const planNoticeLive = function (id) {
+        const stamp = planNotice[id]
+        return typeof stamp === 'number' && Date.now() - stamp < PLAN_NOTICE_MS
+      }
 
       /*
        * 工具栏那颗「立即归档超时会话」的悬浮提示。
@@ -7705,10 +7861,11 @@ window.__ModuleLoader__.load({
           // 依赖短名表（PRD-02 §4.5）：行标签要说「等 A」「前置 A 失败」。
           depTitles: depTitles,
           /*
-           * 「计划已更新」：这一行的计划指纹刚和上一轮不同（见上面的 effect）。
-           * 传布尔而不是从 map 里现查：`TaskCard` 是纯展示组件，行只关心自己亮不亮。
+           * 「计划已更新」：这一行的三元组刚和上一轮不同，且还在 `PLAN_NOTICE_MS` 窗口内
+           * （见上面的 effect）。传布尔而不是从表里现查：`TaskCard` 是纯展示组件，
+           * 行只关心自己亮不亮。
            */
-          planUpdated: Boolean(planUpdated[task.task_id]),
+          planUpdated: planNoticeLive(task.task_id),
           handlers: handlers,
         })
       }
@@ -8362,6 +8519,8 @@ window.__ModuleLoader__.load({
             emptyHint: tr('hist.subHint'),
             selected: drawerRow ? { kind: drawerRow.kind, task_id: drawerRow.task_id } : null,
             drawerRow: drawerRow,
+            // 抽屉里的「计划已更新」（PRD §11.3）：与列表行同一个窗口判断。
+            drawerPlanUpdated: drawerRow ? planNoticeLive(drawerRow.task_id) : false,
             depTitles: depTitles,
             onSub: function (next) {
               setHistSub(next)

@@ -550,9 +550,36 @@ export function toolDefinitions(dispatch) {
         const targets = args.task_ids?.length
           ? args.task_ids.map(id => ownTask(agent, id))
           : mine.filter(task => !SETTLED.has(task.status))
-        if (!targets.length) return { waited: false, tasks: mine.slice(0, 10).map(task => dispatch.card(task)) }
-        await dispatch.table.waitFor(targets, args.timeout_ms ?? 60_000)
-        return { waited: true, tasks: targets.map(task => dispatch.card(task)) }
+        // 没有可等任务时的三个新字段也要给全：`timed_out: false` 表示「不是因为超时」，
+        // `unsettled: []` 表示「没有还在跑的任务」。缺字段会让调用方把「没等」误读成
+        // 「等了但不知道结果」。
+        if (!targets.length) {
+          return {
+            waited: false,
+            timed_out: false,
+            unsettled: [],
+            tasks: mine.slice(0, 10).map(task => dispatch.card(task)),
+          }
+        }
+        const { timedOut } = await dispatch.table.waitFor(targets, args.timeout_ms ?? 60_000)
+        // `unsettled` 只做投影，不改任何任务、不伪造状态：拿当前 `status` 判 `SETTLED`，
+        // 与 `waitFor` 用的是同一个集合，所以 `cancelled` 天然算「已结算」。
+        // 按 id 去重（保持入参顺序）：`waitFor` 内部已去重，但 `targets` 本身可能重复，
+        // 不去重会让同一个 id 在 `unsettled` 里出现两次，调用方会以为有两个任务没等到。
+        const unsettled = []
+        const seenUnsettled = new Set()
+        for (const task of targets) {
+          if (SETTLED.has(task.status)) continue
+          if (seenUnsettled.has(task.id)) continue
+          seenUnsettled.add(task.id)
+          unsettled.push(task.id)
+        }
+        return {
+          waited: true,
+          timed_out: timedOut,
+          unsettled,
+          tasks: targets.map(task => dispatch.card(task)),
+        }
       },
     },
     {

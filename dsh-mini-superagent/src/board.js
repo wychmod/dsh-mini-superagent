@@ -255,6 +255,17 @@ export function boardTask(task) {
     // P0-4：待读超时后被降级成「不知道」。只在真的发生过时出现。
     ...(inputUnknownAt ? { input_unknown_at: inputUnknownAt } : {}),
     retry_at: task.retryAt ?? null,
+    /**
+     * 重试健康度（A6 / PRD §10.4）：`retryCounts` 在 `Dispatch` 里，`boardTask(task)`
+     * 拿不到，所以由 Host 侧把算好的快照挂在 `task.retryHealth` 上，这里只做投影
+     * ——签名保持 `boardTask(task)` 不变（PRD 的推荐做法）。
+     *
+     * 只在**真的续跑过**时出现（`{attempts, since?, last_at?, last_error?}`）。
+     * 与投递重试（`task.delivery` → `report_delivery`）是两件事：前者是模型/连接
+     * 瞬时故障后的续跑次数，后者是「报告有没有送到主会话」。字段名不共享，
+     * 界面上也不并排，否则「重试 2 次」会被读成「报告没送到」（PRD §10.8）。
+     */
+    ...(task.retryHealth ? { retry_health: task.retryHealth } : {}),
     // 每任务的独立目录与准备时间（配了 taskDirRoot 才有）。
     task_dir: task.taskDir ?? null,
     prepare_at: task.prepareAt ?? null,

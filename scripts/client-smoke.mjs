@@ -1457,9 +1457,23 @@ check('降级提示里没有 undefined / NaN /「0 小时」',
 unmount(legacyPanel)
 
 /*
- * 「计划已更新」：必须**同一个面板跨两次轮询**才能比较（指纹只活在面板的 ref 里），
+ * 「计划已更新」：必须**同一个面板跨两次轮询**才能比较（基线只活在面板的 ref 里），
  * 所以这里挂着不卸载，改掉 fixture 里的计划再等下一次轮询。
+ *
+ * 展示窗口是 `PLAN_NOTICE_MS = POLL_MS * 3`（PRD §11.3：6 秒 = 3 个轮询周期，Q7 拍板）。
+ * 真等 6 秒既慢又会被调度抖动搞成时好时坏，所以这里给 `Date.now` 加一个**偏移**
+ * （只改「现在几点」，不改时钟流速）：轮询与超时仍按真实时间走，跨窗口只要挪偏移。
  */
+const realNow = Date.now
+let planClockOffset = 0
+Date.now = () => realNow() + planClockOffset
+/** 跨过一次展示窗口：`POLL_MS * 3`（POLL_MS = 2 秒，与下面「真实 2 秒轮询」同源）。 */
+const PLAN_WINDOW_MS = 3 * 2000
+
+check('「计划已更新」的窗口按 POLL_MS 推导，不是写死的 6000 毫秒魔法数字（PRD §11.8）',
+  /const PLAN_NOTICE_MS = POLL_MS \* 3\b/.test(source) && !/PLAN_NOTICE_MS = \d/.test(source),
+  (source.match(/const PLAN_NOTICE_MS[^\n]*/) || ['没找到常量'])[0])
+
 boardResponse = planFixture({ archive_after_hours: 168 })
 const planPanel = mount(panelReg.component)
 await tick()
@@ -1467,6 +1481,7 @@ await tick()
 update(planPanel)
 const planPanelText = () => text(planPanel.tree)
 const planMarks = () => findAll(planPanel.tree, (item) => item.props && item.props['data-plan-updated'])
+const planTags = () => findAll(planPanel.tree, (item) => item.props && Object.prototype.hasOwnProperty.call(item.props, 'data-plan'))
 check('第一次看到计划不亮「计划已更新」（那是初次见到，不是改了计划）',
   planMarks().length === 0 && planPanelText().includes('2/5'),
   planPanelText().replace(/\s+/g, ' ').slice(0, 160))
@@ -1479,7 +1494,7 @@ await nextPoll(planPanel)
 // 真实 React 里 effect 里的 setState 会立刻重渲染；离线桩不会，补一次重绘等价于那一帧。
 update(planPanel)
 const marksAfterChange = planMarks()
-check('计划变了 → 这一行出现「计划已更新」',
+check('计划 2/5 → 3/5：出现一次「计划已更新」',
   marksAfterChange.length === 1 && text(marksAfterChange[0]).trim() === '计划已更新',
   JSON.stringify(marksAfterChange.map((item) => text(item).trim())))
 check('「计划已更新」带 hover 说明（当前快照 + 新进度）',
@@ -1490,13 +1505,115 @@ check('「计划已更新」带 hover 说明（当前快照 + 新进度）',
 check('同一行仍然显示新的计划进度 3/5（标记不是替代品）',
   planPanelText().includes('3/5'), planPanelText().replace(/\s+/g, ' ').slice(0, 160))
 
-// 下一次轮询拿到的是同一份计划：标记自己消失（策略 = 下次轮询消失，不是定时器）。
+/*
+ * 连续两轮相同计划：**不重复提示**。
+ *
+ * 两层意思都要钉住：①不是「每轮重新点亮」（那样会一直闪）；②也不是「下一轮就消失」
+ * （那是 2 秒，不是 PRD 要的 6 秒）。所以这里断言「窗口内仍是同一个徽标」。
+ */
 await nextPoll(planPanel)
 update(planPanel)
-check('下一次轮询仍是同一份计划 → 标记消失（一次轮询的短提示，不常驻）',
+check('连续两轮相同计划：窗口内仍是同一个徽标（不重复点亮，也不提前消失）',
+  planMarks().length === 1 && planMarks()[0].props['data-plan-updated'] === '3/5',
+  JSON.stringify(planMarks().map((item) => item.props['data-plan-updated'])))
+
+// 跨过展示窗口：徽标消失，但计划数字必须留着。
+planClockOffset += PLAN_WINDOW_MS
+await nextPoll(planPanel)
+update(planPanel)
+check('约 6 秒（3 个轮询周期）后提示消失，数字 3/5 保留',
   planMarks().length === 0 && planPanelText().includes('3/5'),
   JSON.stringify(planMarks().map((item) => text(item).trim())))
+
+/*
+ * 快照请求失败（stale）：**不比较、不提示**。
+ *
+ * 失败期间面板手里还是上一次成功的旧快照，拿它和基线比等于自己和自己比。
+ * 这里让 `boardResponse` 换成一份新计划、同时让取数失败——若实现去比了这份
+ * 「新数据」，就会凭空亮出一个计划根本没被观测到的徽标。
+ */
+getMode = 'fail'
+boardResponse = planFixture({ archive_after_hours: 168 })
+boardResponse.tasks[0].plan_done = 4
+await nextPoll(planPanel)
+update(planPanel)
+check('快照请求失败期间：不产生「计划已更新」',
+  planMarks().length === 0,
+  JSON.stringify(planMarks().map((item) => text(item).trim())))
+
+// 恢复：第一轮只重建基线（PRD §11.5），仍不提示。
+getMode = 'ok'
+await nextPoll(planPanel)
+update(planPanel)
+check('取数恢复后的第一轮只重建基线：不提示（上一份是跨空档的旧数据）',
+  planMarks().length === 0 && planPanelText().includes('4/5'),
+  planPanelText().replace(/\s+/g, ' ').slice(0, 160))
+
+// 恢复之后再改一次计划：判定要照常工作（别把「跳过」做成「永久关掉」）。
+boardResponse = planFixture({ archive_after_hours: 168 })
+boardResponse.tasks[0].plan_done = 5
+boardResponse.tasks[0].plan_current = '收尾步骤'
+await nextPoll(planPanel)
+update(planPanel)
+check('恢复后的下一轮计划再变：照常出现过一次提示',
+  planMarks().length === 1 && planMarks()[0].props['data-plan-updated'] === '5/5',
+  JSON.stringify(planMarks().map((item) => item.props['data-plan-updated'])))
+
+/*
+ * 抽屉打开时同样显示（PRD §11.3）。历史和列表是同一个面板的两块视图，
+ * 徽标还在窗口内时切过去、点开那一行，抽屉里也要看得到。
+ */
+const planHistTab = findAll(planPanel.tree, (item) => item && item.props && item.props['data-view-tab'] === 'history')[0]
+check('计划已在窗口内的行可以切到历史视图（抽屉断言的前置条件）', Boolean(planHistTab))
+planHistTab.props.onClick()
+update(planPanel)
+await tick()
+await tick()
+update(planPanel)
+const planHistRow = findAll(planPanel.tree, (item) => item.props && item.props['data-history-row'] === 't-plan-1')[0]
+if (planHistRow) planHistRow.props.onClick({ type: 'click', preventDefault() {} })
+update(planPanel)
+const planDrawer = () => findAll(planPanel.tree, (item) => item.props && typeof item.props['data-drawer'] === 'string')[0]
+check('抽屉里同样显示「计划已更新」（徽标不只在列表行上）',
+  Boolean(planDrawer()) && text(planDrawer()).includes('计划已更新'),
+  planDrawer() ? text(planDrawer()).replace(/\s+/g, ' ').slice(0, 200) : '抽屉没打开')
+
+/*
+ * 已结算任务：不显示提示，也不留计划标签。
+ *
+ * 这条同时钉住「两张表在任务结算时被清掉」——徽标原本是活的（上一步刚亮），
+ * 任务一结算就必须**立刻**消失，而不是继续挂满 6 秒。
+ */
+boardResponse = planFixture({ archive_after_hours: 168 })
+boardResponse.tasks[0].plan_done = 5
+boardResponse.tasks[0].plan_current = '收尾步骤'
+boardResponse.tasks[0].status = 'done'
+boardResponse.counts = Object.assign({}, boardResponse.counts, { running: 0, done: 1 })
+boardResponse.concurrency = Object.assign({}, boardResponse.concurrency, { running: 0 })
+await nextPoll(planPanel)
+update(planPanel)
+check('已结算任务：徽标立刻消失（不挂满窗口）',
+  planMarks().length === 0, JSON.stringify(planMarks().map((item) => text(item).trim())))
+check('已结算任务：计划标签也一起消失（终态优先于计划）',
+  planTags().length === 0, String(planTags().length))
 unmount(planPanel)
+Date.now = realNow
+
+/*
+ * 页面刷新：新面板没有上一轮基线，**不补提示**。
+ * 用的快照就是「刚变过一次」的那份计划——如果实现按快照内容猜，这里会亮。
+ */
+boardResponse = planFixture({ archive_after_hours: 168 })
+boardResponse.tasks[0].plan_done = 5
+const refreshedPanel = mount(panelReg.component)
+await tick()
+await tick()
+update(refreshedPanel)
+check('页面刷新（无上一轮基线）：不补提示，只显示 5/5',
+  findAll(refreshedPanel.tree, (item) => item.props && item.props['data-plan-updated']).length === 0
+    && text(refreshedPanel.tree).includes('5/5'),
+  text(refreshedPanel.tree).replace(/\s+/g, ' ').slice(0, 160))
+unmount(refreshedPanel)
 
 /* ═════════════════════ P0-4 状态徽标：冻结 / 未读未知 / 截断 ═════════════════════ */
 

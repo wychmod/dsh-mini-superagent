@@ -18,6 +18,12 @@
  * `restore()` 记 `restoreError` 并 warn。会话内容由 DSH 持久化是另一份事实，
  * 不能拿来替账本免责。
  *
+ * **例外是版本不兼容（A4）**：账本声明的 `version` 比插件新（或比可读下限旧）时
+ * 不降级、不空表继续，而是抛 `LEDGER_TOO_NEW` / `LEDGER_TOO_OLD` 让插件加载失败。
+ * 理由见 `assertReadableVersion()` 上方：读不懂的文件继续跑，下一次写盘就会把它
+ * 覆盖成插件自以为的形状，用户升级后账本已经没了——那是不可逆的数据损失，
+ * 比「插件起不来、只能看启动日志」严重得多。
+ *
  * ## 为什么写得这么绕
  *
  * 0.6.0 之前这里是裸 `writeFile` 覆盖写。进程在写入中途崩溃（或断电、或
@@ -39,17 +45,75 @@
 import { copyFile, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-/**
- * 文件结构版本；读取时不强校验，只用于人工排查。
- *
- * 4（本版）：新增 `retired` 数组。旧文件（3 及更早）没有这个键，
- * `normalize()` 按空数组读——**不迁移、不报错**，因为退休留痕丢了只影响
- * 「它为什么消失」这一条可查性，不该让升级后的插件起不来。
- */
-const FILE_VERSION = 4
+import { FILE_VERSION, OLDEST_FILE_VERSION } from './constants.js'
 
 /** 空状态。 */
 export const EMPTY_STATE = { tasks: [], targets: {}, retired: [] }
+
+/**
+ * 账本版本不兼容时的 `error.code`。
+ *
+ * 它们是启动期错误，**不属于** `constants.ERROR_CODES` 的 `dispatch/*` 闭集：
+ * 那张表是工具返回值与看板 HTTP 响应的机器可读标识，而这两个错误发生时插件
+ * 根本不会加载，`selfCheck()` 与看板都不可用——唯一出口是启动日志。
+ * 塞进闭集会误导消费方以为「工具失败后可以拿 code 去分流重试」。
+ */
+export const LEDGER_VERSION_CODES = Object.freeze({
+  TOO_NEW: 'LEDGER_TOO_NEW',
+  TOO_OLD: 'LEDGER_TOO_OLD',
+})
+
+const LEDGER_VERSION_CODE_SET = new Set(Object.values(LEDGER_VERSION_CODES))
+
+/** 这个错误是不是「账本版本不兼容」——`restore()` 据此决定是否 fail-closed。 */
+export function isLedgerVersionError(error) {
+  return LEDGER_VERSION_CODE_SET.has(error?.code)
+}
+
+/** 生成一个带稳定 `code` 的账本版本错误（`code` 不经过 `ERROR_CODES` 闭集）。 */
+function ledgerVersionError(code, message) {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
+/**
+ * 校验账本声明的结构版本，不合法就抛错（fail-closed 的判定点）。
+ *
+ * 为什么 fail-closed 而不是「只读降级」：本文件的写盘是**整文件原子替换**，
+ * 不存在「只改我认识的字段」这种写法。如果读回一个未来版本的账本后照常启动，
+ * 任务表在内存里是「按旧格式理解的样子」，下一次 `persist()` 就会用这个空心
+ * 状态覆盖原文件——用户为了用新插件装的版本降级回来一看，账本已经被写没了。
+ * 拒绝加载的代价是「插件工具消失 + 一行日志」，覆盖账本的代价是不可逆的数据损失。
+ *
+ * 顺序契约（PRD §8.8 风险）：这个函数必须在**主文件解析成功后立刻**调用，
+ * 早于任何 `.bak` 回退。否则「主文件 v99 + 备份 v4」会被备份救回来，等于白拦。
+ *
+ * @param {unknown} raw 解析后的账本原文
+ * @returns {{missingVersion?: true}} 缺失 `version` 时给出提示标记，其余合法
+ */
+function assertReadableVersion(raw) {
+  const version = raw?.version
+  // 缺失 `version` 是**极旧账本**，不是版本冲突：现有 `normalize()` 的
+  // 「缺字段按空读」能完整覆盖它的形状。这里不阻断启动，只让 `restore()`
+  // 在 `restoreError` 留一条 warn，用户排查时知道读的是旧格式。
+  if (version === undefined || version === null) return { missingVersion: true }
+  // 非整数（典型是手改成字符串 "4"）不能静默当 4：无法确认它是「当前版本的手误」
+  // 还是「某个未来格式真的长这样」。按 too-new 处理，宁可拒绝加载也不覆盖。
+  if (!Number.isInteger(version)) {
+    throw ledgerVersionError(LEDGER_VERSION_CODES.TOO_NEW,
+      `账本的 version 字段不是整数（读到 ${JSON.stringify(version)}），无法确认是否为当前插件支持的 ${FILE_VERSION}；请升级插件，或改用新的 state 目录。插件已按 fail-closed 拒绝加载，selfCheck 不会执行，只能查看启动日志。`)
+  }
+  if (version > FILE_VERSION) {
+    throw ledgerVersionError(LEDGER_VERSION_CODES.TOO_NEW,
+      `账本版本 ${version} 高于当前插件支持的 ${FILE_VERSION}；请升级插件，或改用新的 state 目录。插件已按 fail-closed 拒绝加载，selfCheck 不会执行，只能查看启动日志。`)
+  }
+  if (version < OLDEST_FILE_VERSION) {
+    throw ledgerVersionError(LEDGER_VERSION_CODES.TOO_OLD,
+      `账本版本 ${version} 低于当前插件可读的最旧版本 ${OLDEST_FILE_VERSION}；请改用新的 state 目录（旧账本先用仍兼容它的旧版插件导出）。插件已按 fail-closed 拒绝加载，selfCheck 不会执行，只能查看启动日志。`)
+  }
+  return {}
+}
 
 /** 备份文件后缀。 */
 const BAK = '.bak'
@@ -69,39 +133,62 @@ function normalize(raw) {
   }
 }
 
+/** 把版本判定结果并进读回结果（`missingVersion` 只存在于内存，不落盘）。 */
+function withVersionNote(state, verdict) {
+  return verdict.missingVersion ? { ...state, missingVersion: true } : state
+}
+
+/**
+ * 读 `.bak` 并做同样的版本判定；不存在或损坏返回 `undefined`。
+ *
+ * 回退成功后同样要判版本：备份里也可能是一份「未来版本」的账本，静默读进来
+ * 仍会在下一次写盘把它覆盖。
+ */
+async function readBackup(file) {
+  let raw
+  try {
+    raw = JSON.parse(await readFile(`${file}${BAK}`, 'utf8'))
+  } catch {
+    return undefined
+  }
+  const verdict = assertReadableVersion(raw)
+  return withVersionNote({ ...normalize(raw), recovered: 'bak' }, verdict)
+}
+
 /**
  * 读回状态；文件不存在返回空状态。
  *
- * 主文件损坏时回退到 `.bak`。两者都坏就抛错，让调用方明确知道
- * 「数据没了」，而不是拿空表继续跑。
+ * 版本规则（A4）：
+ * - 主文件解析成功 → **立刻**判版本，早于任何 `.bak` 回退。这是 §8.8 点名的
+ *   风险点：若先回退再判，「主文件 v99 + 备份 v4」会被备份救活，等于白拦。
+ * - 主文件不存在 / 解析失败 → 维持原有 `.bak` 回退顺序；回退成功后同样判版本。
  *
- * @returns {Promise<{tasks: object[], targets: object, recovered?: 'bak'}>}
+ * 版本不兼容时抛 `LEDGER_TOO_NEW` / `LEDGER_TOO_OLD`，由 `restore()` 重抛，
+ * 让 `apply()` 失败、插件不加载。**这条错不会被 `.bak` 吞掉**——主文件读不懂
+ * 就是读不懂，不能拿备份假装没事。
+ *
+ * @returns {Promise<{tasks: object[], targets: object, retired: object[], recovered?: 'bak', missingVersion?: true}>}
  */
 export async function readState(file) {
-  let primaryError
+  let raw
   try {
-    return normalize(JSON.parse(await readFile(file, 'utf8')))
+    raw = JSON.parse(await readFile(file, 'utf8'))
   } catch (error) {
     if (error?.code === 'ENOENT') {
       // 主文件不存在：看看是不是有备份（上一次 rename 之后被删了的情况）
-      try {
-        const recovered = normalize(JSON.parse(await readFile(`${file}${BAK}`, 'utf8')))
-        return { ...recovered, recovered: 'bak' }
-      } catch {
-        return { ...EMPTY_STATE }
-      }
+      return (await readBackup(file)) ?? { ...EMPTY_STATE }
     }
-    primaryError = error
+    // 主文件存在但解析失败：尝试备份；只有回退也失败才抛主文件错误。
+    // 版本判断不改变这条顺序（解析失败的主文件没有可判的版本）。
+    const recovered = await readBackup(file)
+    if (recovered) return recovered
+    // 两个都不可用：把主文件的错误抛出去，它是更有诊断价值的那个
+    throw error
   }
 
-  // 主文件存在但解析失败：尝试备份
-  try {
-    const recovered = normalize(JSON.parse(await readFile(`${file}${BAK}`, 'utf8')))
-    return { ...recovered, recovered: 'bak' }
-  } catch {
-    // 两个都不可用：把主文件的错误抛出去，它是更有诊断价值的那个
-    throw primaryError
-  }
+  // 主文件解析成功：先判版本，再归一字段。必须在这里、不能挪到回退之后。
+  const verdict = assertReadableVersion(raw)
+  return withVersionNote(normalize(raw), verdict)
 }
 
 /**

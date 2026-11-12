@@ -101,17 +101,52 @@ test('waitFor 对已全部结算的任务立即返回', async () => {
   const a = table.add(makeTask('a', { status: 'done' }))
   const started = Date.now()
   const result = await table.waitFor([a], 5000)
-  assert.equal(result[0], a)
+  // 形状是 `{ timedOut, tasks }`：全部已结算时 timedOut 必须为 false，
+  // 不能因为「没真的等」被误标成超时。
+  assert.equal(result.timedOut, false)
+  assert.equal(result.tasks[0], a)
   assert.ok(Date.now() - started < 1000, '不该真的等满超时')
 })
 
-test('waitFor 超时后按当前状态返回', async () => {
+test('waitFor 超时后按当前状态返回，且 timedOut 为 true', async () => {
   const table = new TaskTable(5)
   const task = table.add(makeTask('a'))
+  const keepAlive = setInterval(() => {}, 5)
   const started = Date.now()
-  await table.waitFor([task], 30)
+  const result = await table.waitFor([task], 30)
+  clearInterval(keepAlive)
+  assert.equal(result.timedOut, true, '超时返回必须能从返回值本身看出来')
+  assert.deepEqual(result.tasks, [task])
   assert.equal(task.status, 'queued', '超时不该改状态')
   assert.ok(Date.now() - started >= 20)
+})
+
+test('waitFor 全部结算时 timedOut 为 false（不是超时）', async () => {
+  const table = new TaskTable(5)
+  const a = table.add(makeTask('a'))
+  const b = table.add(makeTask('b'))
+  // 定时器 unref 后需要外部事件循环兜底，否则超时路径根本不会触发；
+  // 这里给个更长的时间窗，证明「结算路径先到，且不冒充超时」。
+  const keepAlive = setInterval(() => {}, 5)
+  const waiting = table.waitFor([a, b], 2000)
+  table.settle(a, 'done')
+  table.settle(b, 'cancelled')
+  const result = await waiting
+  clearInterval(keepAlive)
+  assert.equal(result.timedOut, false)
+  assert.deepEqual(result.tasks, [a, b])
+})
+
+test('waitFor 重复 id 只等一次，返回的 tasks 仍是原数组', async () => {
+  const table = new TaskTable(5)
+  const task = table.add(makeTask('a'))
+  const keepAlive = setInterval(() => {}, 5)
+  const waiting = table.waitFor([task, task], 2000)
+  table.settle(task, 'done')
+  const result = await waiting
+  clearInterval(keepAlive)
+  assert.equal(result.timedOut, false)
+  assert.equal(result.tasks.length, 2, 'tasks 原样返回，去重只影响等待逻辑')
 })
 
 test('byWorker 按子会话回查任务', () => {
