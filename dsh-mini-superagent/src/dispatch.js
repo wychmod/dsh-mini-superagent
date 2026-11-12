@@ -1489,6 +1489,27 @@ export class Dispatch {
   }
 
   /**
+   * 直接依赖 `taskId` 的任务里，**已经因为它的失败被连带取消**的那些（PRD-02 §6）。
+   *
+   * 判据必须同时看 `status` / `cancelReason` / `errorCode` 三样：
+   * 只看 `cancelReason` 会把「用户手动取消、恰好也记了依赖原因」的边界数据算进来；
+   * 只看 `status === 'cancelled'` 又会把用户主动取消的普通任务算成「被前置连坐」。
+   * 三个一起判，才只剩「这条取消是依赖机制造成的」这一种。
+   *
+   * **只扫活表**：退休留痕（`#retire()`）只搬身份与摘要，不带 `dependsOn` /
+   * `cancelReason`，事后无法判断它当初是不是被这位前置连坐——而且它已经离开
+   * 账本，`retry()` 本来就复活不了它。所以「查不到」在这里不是漏，是事实。
+   *
+   * @param {string} taskId
+   * @returns {object[]} 被它连坐取消的后继
+   */
+  #cancelledDependentsOf(taskId) {
+    return this.#dependentsOf(taskId).filter(task => task.status === 'cancelled'
+      && task.cancelReason === CANCEL_REASONS.DEPENDENCY_FAILED
+      && task.errorCode === ERROR_CODES.DEPENDENCY_FAILED)
+  }
+
+  /**
    * 把「前置没成」的后继**连带取消**（PRD-02 §4.4）。BFS，不做深递归。
    *
    * 三条规则：
@@ -3049,6 +3070,23 @@ export class Dispatch {
     // attempt 只在**投递成功之后**才递增：0.6.0 之前先自增再投递，
     // 投递失败时 attempt 已经消耗掉、状态还卡在 running。
     const nextAttempt = (task.attempt ?? 1) + 1
+    /*
+     * PRD-02 §6：前置被 `retry` 重开时，**已经因它失败而被连带取消**的后继不复活。
+     *
+     * 这不是遗漏，是定义——那些后继的取消原因在当时是真的（前置确实没成），而
+     * 重开只是把这条前置再跑一遍，不代表后继该跟着重来；「仍在排队等它的」才会
+     * 继续等新一次结算。坑在于用户点「重试」时往往以为整条链一起重来，任务表上
+     * 却只剩前一条在跑、后继还是 cancelled，看起来像漏做了。
+     *
+     * 所以记一条 warn 明说现状（含条数与 id），用户/排障都能对上。
+     * N=0 不记：一条都没被取消时这句话只是噪音。
+     */
+    const strandedDependents = this.#cancelledDependentsOf(task.id)
+    if (strandedDependents.length) {
+      this.warn(`${LOG_PREFIX} 任务 %s 被重开（第 %d 次），但已因它失败而取消的 %d 条后继不会自动复活`
+        + '：%s（PRD-02 §6；要重做请单独 retry 那几条）',
+      task.id, nextAttempt, strandedDependents.length, strandedDependents.map(item => item.id).join(', '))
+    }
     task.error = undefined
     task.lastReportAt = undefined
 

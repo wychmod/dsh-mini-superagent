@@ -318,6 +318,25 @@ async function resolveMemory(dispatch) {
 }
 
 /**
+ * 归档巡检的判定小时数（`dispatch.config.archiveAfterHours`）。
+ *
+ * 为什么要把配置投影进快照：客户端要在「立即归档超时会话」的悬浮提示里写清
+ * 「多久没更新算超时」。把 168 写死在客户端，配置一改（或插件把巡检关掉 = 0）
+ * 提示就变成假话——用户拿着一个和实际行为不符的数字去理解归档。
+ *
+ * `<= 0` / 非数字 = 不自动归档（与 `archiveStale()` 同一套约定，见 `constants.js`
+ * 的 `archiveAfterHours`）。这种情况返回 0，客户端据此退化成不带数字的说法，
+ * 而不是显示「超过 0 小时」。
+ *
+ * @param {object} dispatch
+ * @returns {number} 小时数；不自动归档时为 0
+ */
+function archiveAfterHoursOf(dispatch) {
+  const raw = Number(dispatch && dispatch.config ? dispatch.config.archiveAfterHours : 0)
+  return Number.isFinite(raw) && raw > 0 ? raw : 0
+}
+
+/**
  * 整块看板的数据。
  * @param {object} dispatch
  * @param {object|null} [memory] 已解析的 memoryStats；省略时尝试同步取（可能得 null）
@@ -341,6 +360,12 @@ export function boardSnapshot(dispatch, memory) {
     version: VERSION,
     generatedAt: new Date().toISOString(),
     concurrency: { running: counts.running, queued: counts.queued, max: dispatch.table.maxWorkers },
+    /*
+     * 归档巡检的判定小时数。客户端拿它拼「立即归档超时会话」的悬浮提示，
+     * 所以这里必须是**真实配置**，不能留一个写死的数字（见 `archiveAfterHoursOf`）。
+     * 0 = 当前不自动归档，客户端退化成不带数字的说法。
+     */
+    archive_after_hours: archiveAfterHoursOf(dispatch),
     counts,
     // 任务数超过展示上限时，明确告诉看板「列表被截断了」。
     // 否则「总计 500 / 列表 200」看起来像数据丢了，用户会去翻根本不存在的条目。

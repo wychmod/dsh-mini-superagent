@@ -670,6 +670,48 @@ test('重试不复活：前置失败 → 后继已取消；前置重开后重新
   })
 })
 
+test('retry 重开前置：已因它取消的后继不复活，并记一条点名的 warn（PRD-02 §6）', async () => {
+  await withDispatch(async ({ d, host, launch }) => {
+    const a = await launch({ title: 'A', brief: 'a' })
+    await drain()
+    const b = await launch({ title: 'B', brief: 'b', depends_on: [a.id] })
+    await drain()
+
+    d.settle(a, 'failed')
+    await drain()
+    assert.equal(b.status, 'cancelled')
+
+    await d.retry(a)
+    await drain()
+
+    // ① 不复活：B 的取消在「前置那一刻确实没成」时是正确的，重开不追认。
+    assert.equal(b.status, 'cancelled', 'PRD-02 §6：已连带取消的后继不会被 retry 复活')
+    assert.equal(b.cancelReason, CANCEL_REASONS.DEPENDENCY_FAILED)
+    // ② 记一条 warn，且点出被留下的那条 id——否则用户不知道要单独去重做谁。
+    const line = host.warns.find(item => item.includes('不会自动复活'))
+    assert.ok(line, `应当记一条重开前置的 warn，实际：${host.warns.join(' | ')}`)
+    assert.ok(line.includes(b.id), `warn 里要能读到被留下的后继 id，实际：${line}`)
+  })
+})
+
+test('retry 没有已取消的后继：不记「不会自动复活」的 warn（避免噪音）', async () => {
+  await withDispatch(async ({ d, host, launch }) => {
+    const a = await launch({ title: 'A', brief: 'a' })
+    await drain()
+    d.settle(a, 'failed')
+    await drain()
+
+    await d.retry(a)
+    await drain()
+
+    assert.equal(
+      host.warns.some(item => item.includes('不会自动复活')),
+      false,
+      `没有任何后继被取消时不该说这句话，实际：${host.warns.join(' | ')}`,
+    )
+  })
+})
+
 test('运行中的后继在前置重开后再次失败：不回溯、不打断，只记一条 warn', async () => {
   await withDispatch(async ({ d, host, launch }) => {
     const a = await launch({ title: 'A', brief: 'a' })

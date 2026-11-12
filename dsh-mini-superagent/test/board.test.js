@@ -273,6 +273,29 @@ test('boardSnapshot 统计每个状态的数量', () => {
   assert.deepEqual(snap.concurrency, { running: 2, queued: 1, max: 6 })
 })
 
+/**
+ * `archive_after_hours` 是客户端那句「超过 168 小时（7 天）」的唯一来源。
+ *
+ * 三种取值都要钉住，因为三种在客户端对应三种文案：
+ * - 有配置 → 带数字；
+ * - `0`（巡检关掉）→ 不能显示「超过 0 小时」；
+ * - 宿主没给 `config`（旧宿主 / 单测里最简的假 dispatch）→ 同样是 0，不许是 NaN。
+ */
+test('boardSnapshot 投影归档巡检小时数（archive_after_hours）', () => {
+  const dispatch = fakeDispatch([makeTask('a', { status: 'done' })])
+  dispatch.config = { archiveAfterHours: 168 }
+  assert.equal(boardSnapshot(dispatch).archive_after_hours, 168)
+
+  dispatch.config = { archiveAfterHours: 0 }
+  assert.equal(boardSnapshot(dispatch).archive_after_hours, 0, '0 = 不自动归档，客户端据此退化成不带数字的说法')
+
+  dispatch.config = {}
+  assert.equal(boardSnapshot(dispatch).archive_after_hours, 0, '缺字段不许变成 NaN')
+
+  delete dispatch.config
+  assert.equal(boardSnapshot(dispatch).archive_after_hours, 0, '没有 config 的假 dispatch 也要给 0')
+})
+
 test('boardSnapshot 排序：running → queued → 其余按更新时间倒序', () => {
   const dispatch = fakeDispatch([
     makeTask('old-done', { status: 'done', updatedAt: '2026-01-01T00:00:01.000Z' }),
