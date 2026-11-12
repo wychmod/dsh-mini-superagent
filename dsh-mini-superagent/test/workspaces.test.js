@@ -65,8 +65,13 @@ test('resolve 按 id 命中', async () => {
 })
 
 test('resolve 按绝对路径命中', async () => {
-  const registry = fakeRegistry([{ id: 'w-1', path: 'C:\\a\\b', title: '项目 B' }])
-  const workspace = await gatewayWith(registry).resolve('C:\\a\\b')
+  // 夹具必须是**当前平台**的绝对路径：`resolve` 用 `node:path` 的 `isAbsolute` 判断走不走
+  // 「按路径查注册表」那条分支，而 Linux 上 `C:\a\b` 不是一个绝对路径。
+  // 写死盘符会让这条测试在 Ubuntu 上静默退化（绕过被测分支，只因标题匹配不到而返回 undefined），
+  // 断言不变，只把夹具换成两边都真正合法的绝对路径。
+  const absolutePath = process.platform === 'win32' ? 'C:\\a\\b' : '/a/b'
+  const registry = fakeRegistry([{ id: 'w-1', path: absolutePath, title: '项目 B' }])
+  const workspace = await gatewayWith(registry).resolve(absolutePath)
   assert.equal(workspace.id, 'w-1')
 })
 
