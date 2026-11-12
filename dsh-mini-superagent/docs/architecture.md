@@ -76,7 +76,7 @@ apply()
   │    GET  /dsh-mini-superagent/board/retired  （选中「已退休」chip 时按需取一次）
   │    POST /dsh-mini-superagent/board/cancel   （看板「取消」）
   │    POST /dsh-mini-superagent/board/retry    （看板「重试」）
-  │    POST /dsh-mini-superagent/board/archive  （「立即归档」/手动巡检）
+  │    POST /dsh-mini-superagent/board/archive  （「立即归档超时会话」/手动巡检）
   │    POST /dsh-mini-superagent/board/target   （看板读 targets；选择器与 @ 写）
   ├─ 派发目标选择器（conversation.input.left）
   │    GET  /board（挂载 + 每次打开）→ POST /board/target
