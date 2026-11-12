@@ -75,10 +75,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.9.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.9.1","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.9.0`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.9.1`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
@@ -92,7 +92,10 @@ dispatch_list()
 Copy-Item "$env:DSH_HOME\dsh-dispatch\tasks.json" "$env:DSH_HOME\dsh-mini-superagent\tasks.json"
 ```
 
-旧文件是 version 1，新代码读取时不强校验版本；其中未结算的任务照样会被标成 `interrupted`。
+旧文件是 version 1，而账本版本低于可读下限（`OLDEST_FILE_VERSION = 3`）现在会被 **fail-closed 拒绝加载**
+（见下文「落盘与重启」）——**直连拷贝会被拦**。要做这次迁移，拷贝后须把文件里的 `version` 改成 3 或 4
+（结构与 `normalize()` 兼容，缺 `targets` / `retired` 按空读），或先用仍能读 v1 的旧版插件把任务结算干净。
+迁过来的未结算任务照样会被标成 `interrupted`。
 （若 `DSH_HOME` 未设，两处路径换成 `~/.dsh/...`。）
 
 ---
@@ -209,8 +212,8 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 切到分析看板时，原有派发工作台的字段、入口与所有行内操作都不变。
 
 分析看板读另一条只读路由 `GET /board/analytics`（全量账本，10 秒刷新），
-按时间范围 / 状态 / 负责人 / 工作区 / 批次筛选，展示任务总量、状态分布、完成率、超时代理、按天趋势与环比，
-并附一张可展开的指标口径表。**账本没有人员与截止时间字段**：负责人按 `parentSessionId`（派发主会话）代理、
+按时间范围 / 状态 / 负责人 / 工作区 / 批次筛选，展示任务总量、状态分布、完成率、超时代理、按天趋势与环比。
+**账本没有人员与截止时间字段**：负责人按 `parentSessionId`（派发主会话）代理、
 逾期按「创建后超过阈值的时长」代理，两处都标「待业务确认」；详见 [docs/board.md](docs/board.md)。
 
 **装完/升级后必须刷新一次 GUI 页面**，图标才会出现——客户端模块在页面刷新后加载，插件已激活不影响这一点。
@@ -466,7 +469,10 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 ## 落盘与重启
 
 - 任务表在 `<stateDir>/tasks.json`（默认 `$DSH_HOME/dsh-mini-superagent/tasks.json`），UTF-8，原子替换写（`tmp` → `fsync` → `rename`，另留 `.bak`），800ms 防抖。
-- 文件结构 `{version: 4, savedAt, tasks: [...], targets: {...}, retired: [...]}`；读取时不强校验版本，坏文件只记日志、不阻止插件启动。
+- 文件结构 `{version: 4, savedAt, tasks: [...], targets: {...}, retired: [...]}`；读取时**校验版本**：
+  过新（含非整数）或过旧一律 fail-closed，插件不加载、**原文件一个字节不改写**（这是唯一会阻止启动的
+  读取错误，理由见 [docs/architecture.md](docs/architecture.md) 的「`version` 是账本结构的版本闸门」）；
+  其余坏文件只记日志、不阻止插件启动。
   旧文件没有 `targets` 时按空对象、没有 `retired` 时按空数组（**不迁移、不报错**）。
 - `retired` 是**退休留痕**：任务被移出活表后只剩 13 个字段（含 `retiredAt` / `retiredReason` 与 200 字摘要），
   **不搬报告正文**。它落盘是为了重启后还能回答「这条任务什么时候、为什么不见了」。

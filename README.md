@@ -12,7 +12,7 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| [`dsh-mini-superagent/`](dsh-mini-superagent/) | 插件包本体（0.9.0）：`src/` 源码、`client/` 浏览器面板与输入框控件、`test/`、`locale/`、bundle patch、文档 |
+| [`dsh-mini-superagent/`](dsh-mini-superagent/) | 插件包本体（当前工作区版本 0.9.1；已发布版本以 [`dsh-mini-superagent/CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准）：`src/` 源码、`client/` 浏览器面板与输入框控件、`test/`、`locale/`、bundle patch、文档 |
 | [`notes/`](notes/) | 本机 DSH 环境的排查记录，不是插件文档：历史会话失败检查（[`dsh-session-failures.md`](notes/dsh-session-failures.md)）、环境修复报告（[`dsh-fix-report.md`](notes/dsh-fix-report.md)）、`session-<redacted>` 卡死诊断（[`diagnosis-session-<redacted>.md`](notes/diagnosis-session-<redacted>.md)） |
 | [`plans/`](plans/) | 产品规划与可行性调研，全部计划见 [`plans/README.md`](plans/README.md)（含主题与状态）；其中 [00-vision](plans/00-vision.md) 是五条需求的判定与分期，01/02 是输入框与侧边栏的逐条取证 |
 | `reference/` | DSH 官方 `dsh-superagent-prototype` 的本地克隆，只作架构参考。目录内容被 `.gitignore` 排除，只提交了 [`reference/README.md`](reference/README.md) 作指针（记录上游地址、参考时的提交 `8c32a9d`，以及取回与移除方法） |
@@ -26,7 +26,7 @@
 
 把下面这句交给 DSH 里的任意会话：
 
-> 用 plugin_manager 的 install_bundle，把 `<本仓库路径>/dsh-mini-superagent` 安装成 bundle，装完确认 9 个 `dispatch_*` 工具已注册。
+> 用 plugin_manager 的 install_bundle，把 `<本仓库路径>/dsh-mini-superagent` 安装成 bundle，装完确认 10 个 `dispatch_*` 工具已注册。
 
 或者直接调用：
 
@@ -38,7 +38,7 @@ plugin_manager(action="install_bundle", target="<本仓库路径>/dsh-mini-super
 
 ```text
 dispatch_list()
-→ {"version":"0.9.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.9.1","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
 **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标，输入框控件与 `@` 才会挂载。要求与详细步骤见 [`dsh-mini-superagent/README.md`](dsh-mini-superagent/README.md)。
@@ -68,7 +68,7 @@ dispatch_list()
 | [`dsh-mini-superagent/docs/composer.md`](dsh-mini-superagent/docs/composer.md) | 输入框：派发目标选择器、`@` 工作区、chip 契约与降级、未验证清单 |
 | [`dsh-mini-superagent/docs/api-contracts.md`](dsh-mini-superagent/docs/api-contracts.md) | DSH 主机 API 契约取证：消息构造、Agent、事件、会话控制器、工具作用域 |
 | [`notes/diagnosis-session-<redacted>.md`](notes/diagnosis-session-<redacted>.md) | 一次会话卡死的只读诊断记录（`session-<redacted>`）：用户输入被 `outcome:"canceled"` 静默丢弃，根因在 DSH 核心而非本插件。**性质是排查记录，不是插件文档**（故放在 `notes/` 而非插件的 `docs/`） |
-| [`dsh-mini-superagent/CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0、0.4.0、0.5.0 至 0.9.0 |
+| [`dsh-mini-superagent/CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0、0.4.0、0.5.0 至 0.9.1 |
 
 ## 开发
 
@@ -76,6 +76,9 @@ dispatch_list()
 # 单元测试（Node 内置 test runner，无依赖）
 cd dsh-mini-superagent
 npm test
+
+# 提交前跑这一条：语法检查 + 单测 + 客户端渲染冒烟（CI 用的是同一组命令）
+npm run check
 
 # 语法检查
 node --check dsh-mini-superagent/src/index.js

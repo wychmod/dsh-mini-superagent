@@ -4,6 +4,134 @@
 
 ## 未发布
 
+### 工程收口：A 类七条（0.9.1）
+
+PRD「A 类七条」不做新功能，只把**已经实现的东西钉住**：每一处都补上「为什么这样、不这样会怎么坏」，
+并且把「话说过就算」的地方换成有断言或闸门兜着的。版本号按 PRD §15 Q2 拍板定为补丁版 **0.9.1**
+（工具层没有破坏性变更；唯一的破坏性变化是内部 `TaskTable.waitFor()` 的返回形状，见 A3）。
+
+#### A1 · 根 README 终于进了断言
+
+根 README 的工具数改回 **10 个**（原文写 9 个，而 `TOOL_NAMES` 是 10 个），版本表述改成
+「当前工作区版本 X；已发布版本以 CHANGELOG 为准」；`test/contract-consistency.test.js` 新增
+「根 README 的工具数与版本号与代码一致」。
+
+**为什么**：根 README 是用户第一眼看到的东西，而它此前**不在任何断言里**——已有的断言读的是包内
+`dsh-mini-superagent/README.md`，根 README 是另一份文件。于是它一路漂：工具数写 9、版本停在 0.8.0，
+而 `package.json` 与 `constants.VERSION` 早就是另一个数，**没有任何测试会红**。断言只钉两个对外数字
+（`TOOL_NAMES.length` 与 `package.json.version`），不钉措辞：两份 README 允许说法不同，但数字必须与
+代码同源。正则只认「N 个 `dispatch_*` 工具」这一种写法，将来改成表格或英文时会直接失败——逼维护者
+连断言一起改，而不是「匹配不到就放过」。
+
+#### A2 · `dispatch_inspect` 补全依赖与计划字段，`dispatch_list` 只补两个短字段
+
+`detail()` 新增/补齐 `plan` / `depends_on` / `blocked_by` / `blocked_reason` / `cancel_reason` /
+`error_code`（6 个）；`card()` 只加 `depends_on` / `blocked_by`（2 个）。
+
+**为什么**：排查「这条为什么还没开始」需要一次看全——在等谁、此刻是谁挡着、挡着的原因、被连带取消
+的原因与机器码、它到底分了几步走到哪。这些字段账本里早就有，缺的是**出口**。
+`dispatch_list` **刻意不含 `plan`**：`card()` 同时服务 `list` 与 `inspect`，而列表是每轮都要渲染的
+全量，把步骤数组塞进去会让返回体膨胀数倍（PRD §6.8 点名的坑）；列表要的是「一眼看多少条」。
+`blocked_by` 在工具面是数组（一次看全在等谁）、在看板是标量（2 秒轮询省体积），两者第 0 项逐字相同。
+
+#### A3 · `dispatch_wait` 能说清「等到了」还是「等满了」（**破坏性变更**）
+
+`dispatch_wait` 的返回体新增 `timed_out` / `unsettled`。
+
+> ⚠️ **破坏性变更**：`TaskTable.waitFor()` 的返回值从「任务数组」变成 `{ timedOut, tasks }`。
+> 仓库内唯一调用方是 `dispatch_wait`（已同步）；**外部若直接 `import { TaskTable }` 并调用
+> `waitFor()`，需要改读 `.tasks`**。工具层的返回体只是**新增**字段，不影响现有调用方。
+
+**为什么**：以前调用方无法判断「真的等到了」还是「等满了、任务还在跑」——`status` 在两种情形下都可能
+是 `running`，只能自己逐条猜。`timedOut` 把这条信息从「猜」变成「读」，`unsettled` 直接列出还没结算
+的 id（`cancelled` 属于已结算，不会出现在里面）。超时**仍不报错**：到点按当前状态返回。
+
+#### A4 · 账本版本过新或过旧一律 fail-closed
+
+`readState()` 读回时校验账本 `version`：高于 `FILE_VERSION`（含非整数）或低于 `OLDEST_FILE_VERSION`
+时抛 `LEDGER_TOO_NEW` / `LEDGER_TOO_OLD`，由 `restore()` 重抛让插件不加载，**原文件一个字节不改写**；
+`FILE_VERSION` / `OLDEST_FILE_VERSION` 收敛到 `src/constants.js`（此前 `FILE_VERSION` 在 `store.js`）。
+
+**为什么**：写盘是**整文件原子替换**，没有「只改我认识的字段」这种写法。读回一个未来版本的账本后照常
+启动，任务表在内存里就是「按旧格式理解的样子」，下一次 `persist()` 会用这个空心状态覆盖原文件——
+用户为了用新插件装的版本降级回来一看，账本已经没了。拒绝加载的代价只是「工具消失 + 一行启动日志」，
+覆盖账本的代价是不可逆的数据损失。三条配套约定：①判定在**主文件解析成功后立刻**做，早于任何 `.bak`
+回退（否则「主文件 v99 + 备份 v4」会被备份救活，等于白拦）；②缺失 `version` 的极旧账本**不拦**，
+只在 `restoreError` 留一条 warn；③这两个错误码**不进** `ERROR_CODES` 闭集——插件此时根本没加载，
+`selfCheck()` 与看板都不可用，唯一出口是启动日志。`OLDEST_FILE_VERSION` 取 3 而不是 4：v3 只差
+`retired` 一个键，取 4 会把 0.7.x 用户挡在升级门外。
+
+#### A5 · `npm run check` 与 GitHub Actions CI
+
+新增 `npm run check` = `node scripts/check-syntax.mjs && node --test && node ../scripts/client-smoke.mjs`
+（语法 → 单测 → 客户端离线渲染冒烟）；新增 `.github/workflows/ci.yml`，push 到 `main` 与 PR 各跑一次
+同一串命令，Node 22 对齐 `engines.node`，**不执行 `npm ci`**（零运行时依赖、无 lockfile，直接调 node
+更稳），**不用 `continue-on-error`**。
+
+**为什么**：在此之前「客户端冒烟跑没跑过」靠人记——单测绿了不等于界面没崩，而 `client-smoke.mjs` 在
+仓库根 `scripts/` 下，最容易在「只跑了 `npm test`」时被忘掉。三条命令合成一个名字、本地与 CI 跑同一串，
+才谈得上「提交前跑一下」。语法闸门单独放在最前面，是为了先把「文件根本解析不了」拦掉——否则单测只会
+报一堆 ImportError，看不出真正原因。不用 `continue-on-error` 是刻意的：首次接入若暴露既有失败，应该修
+失败，而不是让闸门装成绿的。
+
+#### A6 · 「重试了几次、从什么时候开始」投影到工具面与看板
+
+新增 `retry_health: { attempts, since?, last_at?, last_error? }`：`card()` / `detail()` 现算，
+看板由 `boardTask()` 投影 `task.retryHealth`（Host 侧把派生快照挂在任务上，`boardTask(task)` 签名不变）。
+**不落盘、重启归零**：`restore()` 读回时一律丢掉 `retryHealth` / `retryError`。
+
+**为什么**：看板能显示「重试中」却说不清重试了几次、从什么时候开始，用户分不出「刚失败一次」和
+「卡在退避循环里半小时」。**与投递重试（`report_delivery`）刻意区分**：后者回答「报告有没有送到主会话」，
+前者回答「模型/连接瞬时故障后这条任务续跑了几次」——放在一起展示，用户会把「重试 2 次」读成
+「报告没送到」（PRD §10.8）。不落盘是因为计数表本身就是内存态：账本里照抄一份快照，重启后显示
+「重试 2 次」而真实次数是 0，比不显示更糟。`last_error` 单独记而不复用 `card().error`：后者是**结算
+原因**，续跑中的任务还没结算，为了展示去写它会让「还在重试」长得跟「已经失败」一样。
+
+#### A7 · 「计划已更新」的窗口、闸门与抽屉
+
+徽标窗口从「一轮轮询（2 秒）」改为 `PLAN_NOTICE_MS = POLL_MS * 3`（6 秒 = 3 个轮询周期）；补
+`planNotice` 时刻表（存「这一轮该亮的时刻」而不是布尔，才能在 6 秒里跨轮存活）与 `stale` 显式闸门；
+任务结算即从两张表里清理；抽屉同步显示（`historyRowOf` 的白名单原先漏了 `plan_*`）。
+
+**为什么**：2 秒窗口等于「下一次轮询就把它抹掉」——在 2 秒一轮的刷新里人眼几乎看不见，而且用户看到的
+可能是下一轮已经变过的数字。写成 `POLL_MS * 3` 而不是 `6000`，是因为这个窗口的语义是「让用户看到
+3 次轮询」：`POLL_MS` 一改窗口必须跟着变，写死魔法数字会变成「一闪而过」或「赖着不走」。
+`stale` 快照**不比较、不提示**：拿一份旧数据比出「计划变了」是在报一件没发生过的事，恢复后第一轮
+先重建基线。抽屉那段原本是**死代码**——`historyRowOf` 是白名单归一，只搬行渲染要用的字段，`plan_*`
+没搬进去，于是抽屉里「当前步骤」永远是空的（`planTotal = 0`）；补进白名单才让「抽屉同步」真的成立。
+
+### 删除：任务行截断标记与分析视图的统计口径表（0.9.0）
+
+两块界面内容都导不到用户能看的东西，一并删掉。**后端字段与统计计算一行未动**，删的只是渲染。
+
+**「摘要已截断 / 详情已截断」标记（`client/index.js`）**
+
+- 理由：快照本来就不带正文，超长内容在**入库时**就按上限裁掉（summary 6000 / detail 4000），
+  标记背后没有任何可查看的内容——点了看不到被裁的那段，只会让人以为自己漏看了什么。
+  想核对被裁情况请用 `dispatch_inspect`，那里有原文与截断说明。
+- 删的：行内标记与 hover 说明（`truncatedTag` / `truncatedTagDetail` / `truncatedHint` /
+  `truncatedHintNoLimit` 这 4 组中英文案键）、`.dsh-sa-truncated` 样式，以及只为提示语取上限的
+  `summaryCapOf()` / `detailCapOf()` 与 `summaryCap` / `detailCap` 两个 props。
+- **后端字段未动**：`boardTask()` 仍照常投影 `has_truncated` / `truncated_fields`——它们是事实，
+  其他消费者可能读得到，只是前端不再渲染；`truncated_fields` 的分段兼容投影也留着。
+
+**分析视图的「统计口径与数据可得性」整块（`client/index.js`）**
+
+- 理由：那张表写的是分子分母、样本量、时间字段与「待接入」字段，属于**给维护者的字典**，
+  界面上没有人会读它（用户原话：「没人看得懂」）。信息没有丢：`docs/board.md` 的
+  「指标口径表」一节完整保留，`/board/analytics` 的字段与聚合一律未改。
+- 删的：表格与展开/收起交互、23×2 条文案（`an.definitions` / `an.definitionsHint`、
+  `an.def.metric` / `an.def.formula` / `an.def.source` 与 6 个指标的公式/来源，共 23 键 ×中英）、
+  `.dsh-sa-an-defs*` 样式；页脚 `an.foot` 改成「数字每 10 秒刷新；统计说明见 `docs/board.md`」。
+- 后端字段未动：`warnings` / `pendingFields` / `coverage` 等口径元数据照常返回。
+
+**防回归**：`scripts/client-smoke.mjs` 把这两块从「断言标记 / 表存在」改成**否定断言**——
+截断 9 条、口径表 3 条。fixture 照旧喂 `has_truncated` / `truncated_fields`，
+谁把标记或表格加回来，冒烟立刻红；只删断言等于以后加回来也没人拦。
+
+**文案键**：中英各删 27 键（截断 4 组 + 口径表 23 条），当前 `TEXT` / `TEXT_EN` 各 **494 键**、
+集合完全一致。`preview/board-preview.html` 由 `scripts/board-preview.mjs` 重新生成。
+
 ### 新增：会话轮次分隔线（0.9.0）
 
 长会话里最缺的不是状态，而是**锚点**：assistant 的步骤、工具卡片与回流报告连成一片，滚动时
@@ -43,8 +171,9 @@ worker 可以在报告里写「这条任务分几步、走到哪一步」：`dis
   计划本身仍留在账本里。
 - 终态报告可以带计划：先应用、再结算，结算后冻结（`#applyPlan()` 对 `queued` / 终态返回 `false`，
   迟到的 `progress` 带计划只会拿到 `plan_accepted:false`）。
-- 尚未实现：PRD-01 §6 的「计划更新后显示『计划已更新』一次」——当前客户端没有这个提示，
-  缺口与验收落点见 [`../plans/README.md`](../plans/README.md)。
+- **已实现（0.9.1 / A7）**：PRD-01 §6 的「计划更新后显示『计划已更新』一次」——看板行与抽屉在计划
+  三元组（总步数 / 已完成 / 当前步骤）变化时亮一个徽标，窗口 `PLAN_NOTICE_MS = POLL_MS * 3`（6 秒）。
+  缺口与验收落点见 [`../plans/README.md`](../plans/README.md)，实现细节见上文 A7。
 
 ### 新增：批次依赖（`depends_on`，PRD-02）
 

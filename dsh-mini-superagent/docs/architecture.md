@@ -93,9 +93,9 @@ Host 与 Client 不共享内存：Client 只认这几个同源 HTTP 端点（GET
 | 文件 | 职责 | 依赖 | 明确不做 |
 | --- | --- | --- | --- |
 | `src/index.js` | 插件入口：建 `Dispatch`、`restore` + `provision`、注册 10 个工具、接宿主事件、注册看板路由、启动归档巡检、`ctx.effect` 清理 | `dispatch` / `tools` / `board` / `constants` | 不含业务逻辑 |
-| `src/constants.js` | 名称、版本、日志前缀、消息来源 kind、提示段名、状态集合、默认配置（含工作区/归档）、任务 id 与消息 id 生成 | 无 | 不读文件、不碰 ctx |
+| `src/constants.js` | 名称、版本、日志前缀、消息来源 kind、提示段名、状态集合、默认配置（含工作区/归档）、任务 id 与消息 id 生成、账本结构版本与可读下限（`FILE_VERSION` / `OLDEST_FILE_VERSION`） | 无 | 不读文件、不碰 ctx |
 | `src/tasks.js` | `TaskTable`：并发位、排队、结算、等待者；纯函数 `clip` / `oneLine` / `lastAssistantText` | `constants` | 不做 I/O，不调宿主 API |
-| `src/store.js` | `tasks.json` 读回与原子替换写；`{version, savedAt, tasks, targets, retired}`（`version: 4`，缺 `targets` 按空对象、缺 `retired` 按空数组） | Node 内置模块 | 不校验业务字段、不做迁移 |
+| `src/store.js` | `tasks.json` 读回与原子替换写；`{version, savedAt, tasks, targets, retired}`（`version` 取 `constants.FILE_VERSION` = 4；缺 `targets` 按空对象、缺 `retired` 按空数组） | Node 内置模块 / `constants` | 不校验业务字段、不做迁移；唯一会拒绝读取的是账本版本不兼容（见下文「`version` 是账本结构的版本闸门」） |
 | `src/sessions.js` | `SessionGateway`：`freezeMessage` 懒加载、构造插件来源消息、双通道投递、`holds`（投递判重）、按目录取 cwd、workspace 解析、建子会话、权限预设、`applyModel`（model 透传）、`restrictTools`（路由模式收窄工具面）、系统提示注入、`enterDirectory`（切工作目录） | `constants` / `prompt` | 不管任务状态 |
 | `src/prompt.js` | 给模型看的文本：主会话工作方式提示 `DISPATCH_HINT`、worker 首条消息 `workerPrompt` | `constants` / `tasks` | 不含判断逻辑 |
 | `src/tools.js` | 10 个工具定义（含只读的 `dispatch_workspaces` / `dispatch_candidates`）、`TOOL_NAMES`、参数 schema、结果卡片拼装、归属校验 | `constants` | 不直接操作会话 |
@@ -823,7 +823,21 @@ P0 管的是「写不写进账本」，P1 管的是「**写进会话的那一份
 }
 ```
 
-- **`version` 只用于人工排查**，读取时不强校验、不迁移（`store.js` 的 `FILE_VERSION = 4`）。
+- **`version` 是账本结构的版本闸门**：`FILE_VERSION = 4` 与可读下限 `OLDEST_FILE_VERSION = 3`
+  都定义在 `src/constants.js`（**不在** `store.js` 里）。读回时先判版本，**过新（含非整数）或过旧
+  一律 fail-closed**：抛 `LEDGER_TOO_NEW` / `LEDGER_TOO_OLD`，由 `restore()` 重抛让插件不加载，
+  `tasks.json` **一个字节不改写**。理由：写盘是整文件原子替换，读不懂的账本继续跑，下一次
+  `persist()` 就会把那份账本覆盖成插件自以为的形状——那是不可逆的数据损失，比「插件起不来、
+  只能看启动日志」严重得多。
+  - 判定点在**主文件解析成功后立刻**，早于任何 `.bak` 回退：否则「主文件 v99 + 备份 v4」会被
+    备份救活，等于白拦。解析失败的主文件没有可判的版本，照旧走回退。
+  - 缺失 `version`（极旧账本）**不拦**：现有「缺字段按空读」已能完整覆盖它的形状，只在
+    `restoreError` 与日志里留一条 warn。
+  - **`OLDEST_FILE_VERSION = 3` 而不是 4**：v3 只差 `retired` 一个键，而「缺字段按空读」已经
+    覆盖；取 4 会把 0.7.x 用户挡在门外，等于用一次格式校验制造一次不可升级。低于 3 的账本
+    字段形状已无法按 `normalize()` 解释，硬读只会得到每条都缺字段的空壳。
+  - 这两个错误码**不在** `ERROR_CODES` 闭集里：插件此时根本没加载，`selfCheck()` 与看板都
+    不可用，唯一出口是启动日志；塞进闭集会误导消费方以为「可以拿 code 去分流重试」。
 - **旧文件（无 `retired` 键）读成 `[]`**：`normalize()` 里 `Array.isArray(raw?.retired) ? … : []`，
   并且只保留对象条目（数组里混进字符串会让 `Map` 构造与 `oneLine(record.summary)` 炸掉）。
   刻意**不迁移、不报错**：退休留痕丢了只影响「它为什么消失」这一条可查性，不该让升级后的插件起不来。

@@ -144,7 +144,7 @@
 
 ```json
 {
-  "version": "0.9.0",
+  "version": "0.9.1",
   "generatedAt": "2026-11-05T10:42:07.000Z",
   "concurrency": { "running": 2, "queued": 1, "max": 6 },
   "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0, "archived": 2, "retired": 3 },
@@ -169,7 +169,7 @@
 - `targets` 是每个主会话当前的派发目标（`session_id → {workspace_id,title,path}` 或 `{auto:true,…}`）；没有目标的会话不出现。
 - `tasks` 最多 200 条；排序：`running` → `queued` → 其余按 `updated_at` 倒序；同权重按 `updated_at` 倒序。
 - `truncated`：任务总数超过 200 时为 `{shown, total}`，否则 `null`。**这是给界面的提示**——没有它的时候「总计 500 / 列表 200」看起来像数据丢了。
-- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.9.0`）。
+- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.9.1`）。
 - `memory`：记忆治理口径，**形状逐字冻结**为 `memoryStats()` 的返回值。五块的含义：
   - `window`：指标窗口（最近 `days` 天 / `tasks` 条，`since` 是窗口起点 ISO 串，
     `count` 是窗口**实际命中**的条数——未套 `tasks` 上限，按 `updated_at`（没有则 `settled_at`）

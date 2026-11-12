@@ -45,6 +45,8 @@
 | `reports` | integer | 报告条数（上限 50），有报告时才出现 |
 | `summary` | string | 最近一条报告摘要，没有报告时取 worker 最后输出；≤200 字符 |
 | `error` | string | 启动失败原因，仅失败任务出现；≤300 字符 |
+| `depends_on` | string[] | 前置任务 id（PRD-02）；没有依赖时是 `[]`，不是缺字段；最多 8 个 |
+| `blocked_by` | string[] | 当前第一个未满足的前置 id；依赖已满足或没有依赖时字段缺失。看板同名字段是标量，取这里的第 0 项 |
 
 ### detail（= card + 以下字段）
 
@@ -54,12 +56,17 @@
 | `cwd` | string | 子会话实际工作目录（指定 `workspace` 时为工作区路径） |
 | `recent_reports` | array | 最近 5 条 `{at, status, headline?, summary, detail?, truncated?}` |
 | `last_worker_text` | string | worker 最后一条 assistant 文本，≤3000 字符 |
+| `plan` | array | 全量步骤 `[{text, status}]`（`status` 是 `pending` / `doing` / `done`）；**已结算任务照样返回**；账本里没有计划、或任一步缺 `text` 时字段缺失 |
+| `blocked_reason` | string | `running` / `failed` / `missing`，与 `blocked_by` 同时出现 |
+| `cancel_reason` | string | 被连带取消时的原因：`dependency_failed` / `dependency_missing`；人取消时是调用方给的原因 |
+| `error_code` | string | 与 `cancel_reason` 配套的机器码，取值在 `ERROR_CODES` 闭集内 |
 
-> **计划的完整步骤不在 `card` / `detail` 里**：`dispatch_report` 的 `plan` 只写账本字段 `task.plan`
-> （连同 `plan_updated_at`），`card()` 与 `detail()` 都**不投影**它；看板快照只给 `plan_total` /
-> `plan_done` / `plan_current` 三个标量（见 [board.md](board.md)）。所以「想看全量计划走
-> `dispatch_inspect`」目前只是计划书里的说法，代码里没有落点——完整步骤只能读账本文件
-> （`<stateDir>/tasks.json` 的 `tasks[].plan`）。这是当前实现的缺口，不是客户端漏了渲染。
+> **计划的完整步骤在 `dispatch_inspect` 里，不在 `dispatch_list` 里**：`dispatch_report` 的 `plan`
+> 写账本字段 `task.plan`（连同 `plan_updated_at`），`detail()` 把它投影成 `plan` 数组（已结算任务
+> 也返回）；`card()` 刻意不投影它——列表是每轮都要渲染的全量，步骤数组会把返回体撑大数倍。
+> 看板快照只给 `plan_total` / `plan_done` / `plan_current` 三个标量（见 [board.md](board.md)）。
+> 所以「这条任务分几步、走到哪、为什么还没开始」一律用 `dispatch_inspect` 查 `plan` /
+> `depends_on` / `blocked_by`，不需要去翻账本文件。
 
 ---
 
@@ -439,7 +446,7 @@ dispatch_launch({ continue_task_id: 't-m0abc-1', title: '补一句', brief: '把
 
 ```json
 {
-  "version": "0.4.0",
+  "version": "0.9.1",
   "total": 3,
   "running": 2,
   "max_workers": 6,
@@ -581,19 +588,34 @@ dispatch_launch({ continue_task_id: 't-m0abc-1', title: '补一句', brief: '把
 
 ### 返回
 
-有可等任务：
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `waited` | boolean | 是否真的进入了等待；没有可等任务（`targets` 为空）时为 `false` |
+| `timed_out` | boolean | 本次是否因**超时**返回。`false` = 任务全部结算 |
+| `unsettled` | string[] | 仍未结算的 `task_id`；全部结算时为 `[]`，与 `timed_out` 同源判断 |
+| `tasks` | object[] | 原样的任务卡片（`card()`），未结算项就是当前 `status`，不做任何伪造 |
+
+全部结算：
 
 ```json
-{ "waited": true, "tasks": [ { "task_id": "t-m0abc-1", "status": "done", "...": "..." } ] }
+{ "waited": true, "timed_out": false, "unsettled": [], "tasks": [ { "task_id": "t-m0abc-1", "status": "done", "...": "..." } ] }
 ```
 
-没有未结算任务：
+超时返回（任务可能还在 `running`）：
 
 ```json
-{ "waited": false, "tasks": [ { "task_id": "t-m0abc-1", "...": "..." } ] }
+{ "waited": true, "timed_out": true, "unsettled": ["t-m0abc-2"], "tasks": [ { "task_id": "t-m0abc-2", "status": "running", "...": "..." } ] }
 ```
 
-- 超时**不报错**：到点后按当前状态返回，`waited` 仍为 `true`，任务可能还是 `running`。
+没有可等任务：
+
+```json
+{ "waited": false, "timed_out": false, "unsettled": [], "tasks": [ { "task_id": "t-m0abc-1", "...": "..." } ] }
+```
+
+- 超时**不报错**：到点后按当前状态返回，`waited` 仍为 `true`、`timed_out: true`，
+  `unsettled` 列出仍未结算的 id，任务可能还是 `running`。
+- `cancelled` 属于已结算，不会出现在 `unsettled` 里。
 - 没有可等任务时返回的是本会话最新 10 条任务，供你判断。
 
 ### 何时用 / 何时别用
@@ -648,7 +670,8 @@ worker 向派发者汇报。主会话不要调用。
    （整版替换 / 单行化 / 空文案丢弃 / 同文案最多 3 条 / 上限截断），再由 `#applyPlan()` 写 `task.plan` 与
    `planUpdatedAt`。顺序是**先应用计划、再结算**；`queued` 任务与已结算任务一律拒绝（返回 `plan_accepted:false`），
    所以终态报告自己那一版能被接受，结算之后迟到的计划不会把 `2/5` 写回去。内容完全相同视为幂等，
-   不刷新 `planUpdatedAt`、不额外写盘。计划**不进报告条目、不进投影**。
+   不刷新 `planUpdatedAt`、不额外写盘。计划**不进报告条目**；`card()` 也不投影它，
+   只有 `dispatch_inspect` 的 `detail()` 给全量步骤（见上文 `plan` 字段）。
 7. **准入分级**（本版未发布，P0-2）：决定这条报告要不要回流主会话。
    - `done` / `blocked` / `failed` / `cancelled` → **恒 `direct`**（回流）；
    - 配置 `directReportStatuses` 点名的状态（默认 `blocked` / `failed`）→ `direct`；
