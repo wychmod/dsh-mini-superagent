@@ -401,7 +401,7 @@ function boardFixture() {
  * 计数、成功率、chip 数字都被后面的断言钉住了，加一条任务就会连带改掉十几条
  * 无关断言，让「这个改动坏了什么」变得看不出来。
  *
- * 四个任务分别覆盖：冻结不归档 / 未读未知 / 摘要截断 / 三个字段全缺（降级）。
+ * 四个任务分别覆盖：冻结不归档 / 未读未知 / 截断字段（**已不再渲染**）/ 三个字段全缺（降级）。
  */
 function statusBadgeFixture() {
   return {
@@ -409,7 +409,7 @@ function statusBadgeFixture() {
     generatedAt: new Date().toISOString(),
     concurrency: { running: 1, queued: 0, max: 6 },
     counts: { total: 4, running: 1, queued: 0, done: 3, blocked: 0, failed: 0, cancelled: 0, ended: 0, interrupted: 0, archived: 0, retired: 0 },
-    // 有 memory 块：截断提示才能写出「前 6000 字」而不是退化成不帶数字的说法。
+    // 照真实快照给 memory 块：截断标记删了，但字段仍要喂进来证明「不渲染」。
     memory: {
       window: { days: WINDOW_DAYS, tasks: 200 },
       ledger: { tasks: 4, retired: 0, archived: 0, retiredDropped: 0, capPerTask: { summary: 6000, detail: 4000 } },
@@ -426,16 +426,14 @@ function statusBadgeFixture() {
 }
 
 /**
- * 截断标记的**分段** fixture（`truncated_fields`）。
+ * 截断**分段** fixture（`truncated_fields`）：字段仍在快照里，但界面已不渲染标记。
  *
- * 旧版宿主只给 `has_truncated` 一个布尔，客户端只能说「摘要已截断」。但真实账本里
- * 被裁掉的几乎全是 `detail`（入库上限 4000），摘要本身（上限 6000）完好无损——
- * 于是看板上出现了「摘要已截断」这句话本身是假的。宿主现在额外汇出
- * `truncated_fields`，客户端必须按段改口，这就是用户报的「所有任务都显示摘要已截断」
- * 的离线证据。
+ * 保留这份 fixture 是为了钉否定断言：旧版这里验「[detail] 说详情已截断、[summary]
+ * 说摘要已截断」；标记删除后，两种分段都必须**一个标记都不画**。只删断言不行——
+ * 那样以后有人把标记加回来也没人拦。
  *
- * 另起一份 fixture 的理由同 `statusBadgeFixture()`：上面那份的断言已经把
- * 「截断标记全局只出现一次」钉死了，往里加行会连带改坏无关断言。
+ * 另起一份 fixture 的理由同 `statusBadgeFixture()`：上面那份的断言钉住了别的计数，
+ * 往里加行会连带改坏无关断言。
  */
 function truncationScopeFixture() {
   return {
@@ -931,6 +929,29 @@ check('选择器 id 是 dsh-mini-superagent/target', pickerRegs[0] && pickerRegs
 check('@ 工作区源已注册', registeredSources.length === 1, `实际 ${registeredSources.length}`)
 check('@ 源是 @workspace', registeredSources[0] && registeredSources[0].trigger === '@' && registeredSources[0].name === 'workspace')
 check('插件清理 effect 已挂', disposers.length >= 1)
+
+/*
+ * 轮次分隔线（conversation.chat.user.before）：宿主在每条用户消息上方留的 chain 槽。
+ * 这里守三件事：**注册一次**、**只接用户行**、**派发报告与人类输入在视觉上分得开**。
+ * 槽本身由宿主调用选择器，所以 select 的入参形状必须按 ownerProps（source / kind）断言。
+ */
+const dividerRegs = registrations.filter((item) => item.options.name === 'conversation.chat.user.before')
+check('conversation.chat.user.before 注册一次', dividerRegs.length === 1, `实际 ${dividerRegs.length}`)
+check('分隔线注册带 select', Boolean(dividerRegs[0] && typeof dividerRegs[0].options.select === 'function'))
+const dividerSelect = dividerRegs[0] ? dividerRegs[0].options.select : () => undefined
+check('分隔线不接管 steering 行', dividerSelect({ kind: 'steering', source: {} }) === null)
+check('人类输入画普通线', Boolean(dividerSelect({ kind: 'user', source: { kind: 'user' } }))
+  && dividerSelect({ kind: 'user', source: { kind: 'user' } }).relay === false)
+check('插件回流报告标成派发报告', Boolean(dividerSelect({ kind: 'user', source: { kind: 'dsh-mini-superagent' } }))
+  && dividerSelect({ kind: 'user', source: { kind: 'dsh-mini-superagent' } }).relay === true)
+check('没有 source 也照样画线', Boolean(dividerSelect({ kind: 'user' })) && dividerSelect({ kind: 'user' }).relay === false)
+const userDivider = dividerRegs[0] ? dividerRegs[0].component({ matched: dividerSelect({ kind: 'user', source: { kind: 'user' } }) }) : null
+check('普通分隔线带 dsh-sa-divide 类', hasClass(userDivider, 'dsh-sa-divide'))
+check('普通分隔线没有文字标签（不制造噪音）', findAll(userDivider, (i) => hasClass(i, 'dsh-sa-divide-tag')).length === 0)
+const relayDivider = dividerRegs[0] ? dividerRegs[0].component({ matched: dividerSelect({ kind: 'user', source: { kind: 'dsh-mini-superagent' } }) }) : null
+check('派发报告分隔线带「派发报告」标签', text(relayDivider).includes('派发报告'), text(relayDivider))
+const dividerStyles = findAll(userDivider, (item) => item && item.type === 'style')
+check('分隔线样式走主题 token（不写死颜色）', dividerStyles.length === 1 && text(dividerStyles[0]).includes('--dsw-alias-border-l2'))
 
 // apply() 末尾的自报存活：真实宿主用 selfcheck.client.ready 区分
 // 「模块没进图 / 进了图但 apply 抛错 / apply 跑完了」，这里断言它确实发出且内容对得上。
@@ -1516,14 +1537,19 @@ const unknownTags = tagsOfRow(badgePanel.tree, '未读未知任务')
 check('input_unknown_at → 出现「未读未知」徽标', Boolean(unknownTags) && unknownTags.includes('未读未知'), JSON.stringify(unknownTags))
 check('input_unknown_at → **不**出现「待读」（那是要消灭的误导）',
   Boolean(unknownTags) && !unknownTags.includes('待读'), JSON.stringify(unknownTags))
-const truncTags = tagsOfRow(badgePanel.tree, '摘要被截断的任务')
-check('has_truncated → 摘要行出现「摘要已截断」标记',
-  Boolean(rowByTitle(badgePanel.tree, '摘要被截断的任务')) && text(badgePanel.tree).includes('摘要已截断'),
-  truncTags ? JSON.stringify(truncTags) : 'row missing')
-check('截断标记带 hover 说明（原文更长 + 前 N 字）',
-  findAll(badgePanel.tree, (item) => item.props && item.props['data-truncated'] === 'true')
-    .every((item) => typeof item.props.title === 'string' && item.props.title.includes('6000') && item.props.title.includes('dispatch_inspect')),
-  JSON.stringify(findAll(badgePanel.tree, (item) => item.props && item.props['data-truncated'] === 'true').map((i) => i.props.title)))
+/*
+ * 截断标记已经从界面删除（0.9.x）：快照本来就不带正文，标记也导不到被裁的那部分。
+ * 这里反转成**否定断言**——fixture 照样喂 `has_truncated` / `truncated_fields`，
+ * 界面必须一个都不画；谁把标记加回来，这两条会立刻红。
+ */
+const truncMarksIn = (root) => findAll(root, (item) => item.props
+  && (item.props['data-truncated'] !== undefined || hasClass(item, 'dsh-sa-truncated')))
+check('has_truncated=true 的行不再渲染截断标记（徽标已删除）',
+  Boolean(rowByTitle(badgePanel.tree, '摘要被截断的任务')) && truncMarksIn(badgePanel.tree).length === 0,
+  Boolean(rowByTitle(badgePanel.tree, '摘要被截断的任务')) ? `标记 ${truncMarksIn(badgePanel.tree).length} 个` : 'row missing')
+check('界面上完全不出现「摘要已截断 / 详情已截断」文案',
+  !badgeAllText.includes('摘要已截断') && !badgeAllText.includes('详情已截断'),
+  badgeAllText.replace(/\s+/g, ' ').slice(0, 160))
 const plainTags = tagsOfRow(badgePanel.tree, '没有任何新标记的任务')
 check('三个字段全缺 → 没有「已冻结」',
   Boolean(plainTags) && !plainTags.includes('已冻结'), JSON.stringify(plainTags))
@@ -1533,11 +1559,11 @@ check('三个字段全缺 → 没有「待读」',
   Boolean(plainTags) && !plainTags.includes('待读'), JSON.stringify(plainTags))
 const plainRow = rowByTitle(badgePanel.tree, '没有任何新标记的任务')
 check('三个字段全缺 → 没有截断标记',
-  Boolean(plainRow) && findAll(plainRow, (item) => item.props && item.props['data-truncated'] === 'true').length === 0,
+  Boolean(plainRow) && truncMarksIn(plainRow).length === 0,
   plainRow ? 'row found' : 'row missing')
-check('截断标记全局只出现一次（只挂在被截过的那一行）',
-  findAll(badgePanel.tree, (item) => item.props && item.props['data-truncated'] === 'true').length === 1,
-  String(findAll(badgePanel.tree, (item) => item.props && item.props['data-truncated'] === 'true').length))
+check('整块看板一个截断标记都没有（字段还在快照里，只是不渲染）',
+  truncMarksIn(badgePanel.tree).length === 0,
+  String(truncMarksIn(badgePanel.tree).length))
 check('未读未知行仍然可辨识状态（status 文字还在）', badgeAllText.includes('运行中'), badgeAllText.replace(/\s+/g, ' ').slice(0, 120))
 // 必须卸载：面板的轮询定时器会一直挂住事件循环，全绿分支没有 process.exit 兜底。
 unmount(badgePanel)
@@ -1566,7 +1592,8 @@ unmount(archivedPanel)
 
 /*
  * 降级：宿主只给 has_truncated，不给 memory 块（旧版宿主 / headless）。
- * 这时不能编一个「前 6000 字」出来，只能说不带数字的那句。
+ * 客户端已经不渲染这个标记了，降级路径同样不该冒出它——这条否定断言同时钉住
+ * 「删掉的是渲染，不是字段兼容」：字段在不在快照里都不该出现在界面上。
  */
 const noCap = statusBadgeFixture()
 delete noCap.memory
@@ -1575,25 +1602,23 @@ const noCapPanel = mount(panelReg.component)
 await tick()
 await tick()
 update(noCapPanel)
-const noCapMarks = findAll(noCapPanel.tree, (item) => item.props && item.props['data-truncated'] === 'true')
-check('没有 memory 块时截断标记仍在（字段本身就在快照里）', noCapMarks.length === 1, String(noCapMarks.length))
-check('没有 memory 块时不编造上限数字（退化成不带 n 的说法）',
-  noCapMarks.length === 1 && !/\d/.test(String(noCapMarks[0].props.title)) && String(noCapMarks[0].props.title).includes('dispatch_inspect'),
-  noCapMarks.length ? String(noCapMarks[0].props.title) : 'mark missing')
+const noCapMarks = findAll(noCapPanel.tree, (item) => item.props
+  && (item.props['data-truncated'] !== undefined || hasClass(item, 'dsh-sa-truncated')))
+check('没有 memory 块时也不渲染截断标记（字段仍在快照里）', noCapMarks.length === 0, String(noCapMarks.length))
+check('没有 memory 块时界面不出现「摘要已截断」文案',
+  !text(noCapPanel.tree).includes('摘要已截断'), text(noCapPanel.tree).replace(/\s+/g, ' ').slice(0, 160))
 unmount(noCapPanel)
 boardResponse = boardFixture()
 
 /*
- * 分段：`truncated_fields` 说了「哪一段被裁」，客户端就不能一律说「摘要已截断」。
- * 真实账本里 32 条被裁条目**全部**只裁了 detail、summary 一条都没被裁过；继续喊
- * 「摘要已截断」等于每一行都在说一件没发生的事。
+ * 分段：`truncated_fields` 从前用来区分「哪一段被裁」。标记删除后，两种分段都要
+ * **一个标记都不画**——这里继续喂 [detail] / [summary] 两种 fixture，把「删干净了」
+ * 钉成否定断言，而不是简单删掉用例（删断言等于以后加回来也没人拦）。
  */
-console.log('\n截断标记分段：详情被裁 ≠ 摘要被裁')
-/** 一行里所有截断标记的可见文本（标记的类是 `dsh-sa-truncated`，不在 `dsh-sa-tag` 里）。 */
-const truncMarksOfRow = (row) => (row ? findAll(row, (item) => item.props && item.props['data-truncated'] === 'true') : [])
-function marksText(row) {
-  return truncMarksOfRow(row).map((item) => text(item).trim())
-}
+console.log('\n截断标记分段：字段仍在快照里，但界面不渲染')
+/** 一行里所有截断标记（属性或类名，任一出现都算）。 */
+const truncMarksOfRow = (row) => (row ? findAll(row, (item) => item.props
+  && (item.props['data-truncated'] !== undefined || hasClass(item, 'dsh-sa-truncated'))) : [])
 boardResponse = truncationScopeFixture()
 const scopePanel = mount(panelReg.component)
 await tick()
@@ -1601,25 +1626,17 @@ await tick()
 update(scopePanel)
 
 const detailRow = rowByTitle(scopePanel.tree, '仅详情被截')
-const detailTexts = marksText(detailRow)
-check('truncated_fields: [detail] → 该行说「详情已截断」',
-  detailTexts.length === 1 && detailTexts[0] === '详情已截断', detailTexts.length ? JSON.stringify(detailTexts) : 'mark missing')
-check('truncated_fields: [detail] → 该行**不**说「摘要已截断」（摘要完好，不能替它认罪）',
-  Boolean(detailRow) && !text(detailRow).includes('摘要已截断'), detailRow ? 'row found' : 'row missing')
-const detailMark = truncMarksOfRow(detailRow)[0]
-check('详情被裁的 hover 用**详情**上限（4000 字）',
-  Boolean(detailMark) && String(detailMark.props.title).includes('4000'),
-  detailMark ? String(detailMark.props.title) : 'mark missing')
+check('truncated_fields: [detail] → 该行不渲染「详情已截断」',
+  Boolean(detailRow) && truncMarksOfRow(detailRow).length === 0 && !text(detailRow).includes('详情已截断'),
+  detailRow ? `标记 ${truncMarksOfRow(detailRow).length} 个` : 'row missing')
 
 const summaryRow = rowByTitle(scopePanel.tree, '摘要真被截')
-const summaryTexts = marksText(summaryRow)
-check('truncated_fields: [summary] → 该行仍说「摘要已截断」（功能不能被修没）',
-  summaryTexts.length === 1 && summaryTexts[0] === '摘要已截断',
-  summaryTexts.length ? JSON.stringify(summaryTexts) : 'mark missing')
-const summaryMark = truncMarksOfRow(summaryRow)[0]
-check('摘要被裁的 hover 仍用摘要上限（6000 字）',
-  Boolean(summaryMark) && String(summaryMark.props.title).includes('6000'),
-  summaryMark ? String(summaryMark.props.title) : 'mark missing')
+check('truncated_fields: [summary] → 该行不渲染「摘要已截断」',
+  Boolean(summaryRow) && truncMarksOfRow(summaryRow).length === 0 && !text(summaryRow).includes('摘要已截断'),
+  summaryRow ? `标记 ${truncMarksOfRow(summaryRow).length} 个` : 'row missing')
+check('两种分段下整块看板都不出现截断文案（标记是真的删了，不是只换段名）',
+  !text(scopePanel.tree).includes('摘要已截断') && !text(scopePanel.tree).includes('详情已截断'),
+  text(scopePanel.tree).replace(/\s+/g, ' ').slice(0, 160))
 unmount(scopePanel)
 boardResponse = boardFixture()
 
@@ -3113,8 +3130,21 @@ check('核心指标区标题不再与大标题重复',
   text(anFind(anPanel, 'data-an-section', 'kpi')[0]).includes('核心指标'))
 check('环比行给出「较上一等长窗口」',
   anFind(anPanel, 'data-an-compare', 'true').length === 1 && text(anPanel.tree).includes('较上一等长窗口'))
-check('统计口径表常驻（含待接入字段）',
-  anFind(anPanel, 'data-an-defs', 'true').length === 1 && text(anPanel.tree).includes('待接入：due_at'))
+/*
+ * 口径表已从界面移除（用户原话：「没人看得懂」）——那张表写的是分子分母、字段名
+ * 与待接入字段，是给维护者的实现说明。这里改成**否定断言**：只删旧断言的话，
+ * 以后谁把它加回来都不会有人拦。
+ */
+check('分析视图不再渲染统计口径表（data-an-defs 不存在）',
+  anFind(anPanel, 'data-an-defs', 'true').length === 0
+  && !text(anPanel.tree).includes('统计口径与数据可得性'))
+check('口径表的内部术语不再出现在界面上（待接入 / 计算口径 / 数据字段）',
+  !text(anPanel.tree).includes('待接入：due_at')
+  && !text(anPanel.tree).includes('计算口径')
+  && !text(anPanel.tree).includes('数据字段 / 可得性'))
+check('分析视图脚注不再指回已删除的口径表，改为指向 docs/board.md',
+  text(anPanel.tree).includes('docs/board.md')
+  && !text(anPanel.tree).includes('为准'))
 check('样本口径行说明退休留痕不并入',
   anFind(anPanel, 'data-an-scope', 'true').length === 1 && text(anPanel.tree).includes('不并入'))
 check('负责人与逾期都标注为代理口径（待业务确认）',

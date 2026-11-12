@@ -520,6 +520,11 @@ window.__ModuleLoader__.load({
     const TICK_MS = 1000
     /** Client locale 命名空间。 */
     const LOCALE_NS = 'dsh-mini-superagent.board'
+    /**
+     * 插件投递消息时写进 `source.kind` 的值（= 包名，见 `src/sessions.js` 的 `userMessage()`）。
+     * 客户端只用它区分「这条用户行是派发报告还是人打的字」，不解释 source 的其它字段。
+     */
+    const RELAY_SOURCE_KIND = 'dsh-mini-superagent'
 
     /* ───────────────────────── 文案 ───────────────────────── */
 
@@ -544,6 +549,53 @@ window.__ModuleLoader__.load({
       attemptPrefix: '第',
       attemptSuffix: '次',
       reports: '报告',
+      /*
+       * 任务级计划（PRD-01 §4.3）。看板只显示「做了几步 / 共几步」与当前步骤一句，
+       * 不搬完整步骤数组（那是 2 秒轮询的快照）；要看全部用 dispatch_inspect。
+       * 三个键都要有 zh/en 两份，缺英文的会在英文界面下静默退回中文。
+       */
+      'plan.label': '计划',
+      'plan.ratio': '计划 {done}/{total}',
+      'plan.currentLabel': '当前步骤',
+      'plan.tagHint': '计划 {done}/{total}',
+      /*
+       * 「计划已更新」（PRD-01 §6）：worker 第二次带**不同的**计划时亮一次短标记。
+       *
+       * 为什么只在行内亮、不进账本：这是给盯着看板的人一次「它改主意了」的提示，
+       * 不是任务事实。写进账本会让每次 plan 变更多一条持久记录（还要落盘、还要
+       * 在抽屉里占位），而重开页面时旧指纹会把它再放一遍——那是在重放历史。
+       * 提示里点明「计划标签是当前快照」，因为标记消失后 2/5 仍然在那里，别让人以为丢了。
+       */
+      'plan.updatedTag': '计划已更新',
+      'plan.updatedHint': '子会话刚提交了一份不同的计划（{done}/{total}）；这里显示的是当前快照，旧的计划不会留在看板上',
+      /*
+       * 批次依赖（PRD-02 §4.5）：任务行标签 / 抽屉 / 批次头三处共用这一组文案。
+       *
+       * - `dep.tag` = 「依赖 2」，`dep.waiting` = 「等 A」，`dep.failedTag` = 「前置失败」；
+       * - 抽屉三条：`dep.tagHint` 的「前置：A、B」、`dep.waitingOn` 的「当前等待：
+       *   A（运行中）」、`dep.notRun` 的「未执行原因：前置 A 失败」；
+       * - `dep.batchHead` = 「3 个成员 · 1 个等待前置 · 1 个未执行」。
+       *
+       * 标题由客户端从同一份快照里按 id 查（`depTitles`），所以这里只需要占位符，
+       * 不要把前置标题拼进看板 payload。英文必须与中文逐键成对（client-smoke 会数）。
+       */
+      'dep.tag': '依赖 {n}',
+      'dep.waiting': '等 {title}',
+      'dep.failedTag': '前置失败',
+      'dep.tagHint': '前置：{list}',
+      'dep.block': '前置与等待',
+      'dep.label': '前置',
+      'dep.join': '、',
+      'dep.waitingLabel': '当前等待',
+      'dep.waitingOn': '{title}（{reason}）',
+      'dep.notRunLabel': '未执行原因',
+      'dep.notRun': '前置 {title} 失败',
+      'dep.notRunMissing': '前置 {title} 已不在账本',
+      'dep.reason.running': '运行中',
+      'dep.reason.failed': '失败',
+      'dep.reason.missing': '缺失',
+      'dep.none': '没有前置任务',
+      'dep.batchHead': '{total} 个成员 · {waiting} 个等待前置 · {skipped} 个未执行',
       noReport: '尚无报告',
       waiting: '等待中',
       updatedAt: '更新于',
@@ -568,8 +620,17 @@ window.__ModuleLoader__.load({
       archivedTag: '已归档',
       archivedHint: '该子会话已归档，不可直接打开；请在会话列表里取消归档后再查看',
       archiveErrorPrefix: '归档失败：',
-      archiveNow: '立即归档',
-      archiveConfirm: '确认归档',
+      /*
+       * 工具栏那颗按钮：文案要说清「归档的是**超时**的那些会话」，否则
+       * 「立即归档」看起来像「把我现在看到的东西都归档掉」。
+       * 悬浮提示里的时长来自快照的 `archive_after_hours`（真实配置），拿不到就用
+       * 不带数字的 `archiveNowHintUnknown`——不许拼出「undefined 小时」。
+       */
+      archiveNow: '立即归档超时会话',
+      archiveNowHint: '归档「已结算且超过 {hours} 小时（{days} 天）没有更新」的任务；归档后从「全部」移到「已归档」',
+      archiveNowHintHours: '归档「已结算且超过 {hours} 小时没有更新」的任务；归档后从「全部」移到「已归档」',
+      archiveNowHintUnknown: '归档长期未更新的已结算任务；归档后从「全部」移到「已归档」',
+      archiveConfirm: '再次点击确认归档超时会话',
       archiveRunning: '归档中…',
       archiveDone: '归档巡检：扫描 {scanned}，归档 {archived}，失败 {failed}',
       archiveTask: '归档',
@@ -613,10 +674,6 @@ window.__ModuleLoader__.load({
        */
       frozenTag: '已冻结',
       frozenHint: '只读冻结：这条不会再更新，续跑会失败',
-      /* 报告或简报被账本截断过：只标明「被截过」，正文仍去看 dispatch_inspect。 */
-      truncatedTag: '摘要已截断',
-      truncatedHint: '原文更长，账本只保留前 {n} 字；完整正文请用 dispatch_inspect 查看',
-      truncatedHintNoLimit: '原文更长，账本只保留了开头一段；完整正文请用 dispatch_inspect 查看',
       'sec.attention': '需要你处理',
       'sec.attentionEmpty': '没有需要你处理的任务',
       'sec.active': '在跑与排队',
@@ -690,6 +747,9 @@ window.__ModuleLoader__.load({
       targetAutoHint: '按关键词自动匹配一个工作区',
       targetAutoHit: '自动：{title}',
       targetAutoMiss: '自动：没有匹配的工作区',
+
+      /* 轮次分隔线（conversation.chat.user.before）：只有插件回流的报告带这一枚标签。 */
+      'divider.relay': '派发报告',
 
       /*
        * ── plans/09 P1：总览 / 效果 / 拆解 三个视图 ──
@@ -945,7 +1005,7 @@ window.__ModuleLoader__.load({
       'an.kpi': '核心指标',
       'an.kpiHint': '四张卡基于同一批筛选后的任务',
       'an.proxyNote': '代理口径（待业务确认）：负责人=主会话 · 逾期=时长阈值',
-      'an.foot': '数字每 10 秒刷新；口径以「统计口径与数据可得性」为准',
+      'an.foot': '数字每 10 秒刷新；统计说明见 docs/board.md',
       'an.emptyRange': '连续 {n} 天无任务（空天补 0）',
       'an.emptyDay': '无任务（空天补 0）',
       'an.filters': '筛选条件',
@@ -1009,29 +1069,11 @@ window.__ModuleLoader__.load({
       'an.overdueSettled': '已结算超阈值',
       'an.overdueUnknown': '时间未知',
       'an.overdueRate': '占比',
-      'an.definitions': '统计口径与数据可得性',
-      'an.definitionsHint': '展开查看每个指标的分子、分母、时间字段与待接入字段',
-      'an.def.metric': '指标',
-      'an.def.formula': '计算口径',
-      'an.def.source': '数据字段 / 可得性',
-      'an.def.total': '任务总量',
-      'an.def.totalFormula': '筛选后任务条数；窗口按 createdAt 归属，all 时连缺创建时间的行也计入',
-      'an.def.totalSource': 'dispatch.table.tasks 全量（不受 /board 200 条上限影响）；退休留痕单列不并入',
-      'an.def.rate': '完成率',
-      'an.def.rateFormula': 'done ÷ (done+ended+failed+blocked+interrupted)；n=0 显示 —，1≤n<5 标注样本少',
-      'an.def.rateSource': 'status + COMPLETION_BASE；取消、running、queued 不进分母',
-      'an.def.status': '状态分布',
-      'an.def.statusFormula': '每个 status 的条数 ÷ 任务总量（分母含归档与取消）',
-      'an.def.statusSource': 'status 字段，直接计数',
-      'an.def.overdue': '超时代理',
-      'an.def.overdueFormula': '未结算：now − createdAt > 阈值；已结算：settle − createdAt > 阈值。默认 24h，可调',
-      'an.def.overdueSource': 'createdAt / settledAt（旧数据回退 updatedAt）；待接入：due_at',
-      'an.def.trend': '趋势变化',
-      'an.def.trendFormula': '按 UTC 自然日分桶；新建按 createdAt、完成与异常按 settledAt；环比 = 当前窗口 − 上一等长窗口',
-      'an.def.trendSource': 'createdAt / settledAt；all 窗口不提供环比；范围超过 366 天会裁剪',
-      'an.def.owner': '负责人筛选',
-      'an.def.ownerFormula': '以「派发主会话」代理负责人；缺字段归到「未标注」',
-      'an.def.ownerSource': 'parentSessionId；待接入：assignee / owner（账本目前没有人员字段）',
+      /*
+       * 口径表已从界面移除（用户原话：「没人看得懂」）：那张表写的是分子分母、
+       * 字段名与待接入字段，属于给维护者的实现说明，界面上没有人会读。
+       * 说明本身保留在 docs/board.md，只从 UI 撤掉，不删文档、不改统计。
+       */
       'an.coverage': '样本口径',
       'an.coverageText': '账本 {source} 条 · 窗口内 {inWindow} 条 · 命中 {matched} 条 · 退休留痕 {retired} 条（不并入）',
       'an.warn.missingTimes': '有任务缺创建/结算时间，趋势可能低估',
@@ -1077,6 +1119,31 @@ window.__ModuleLoader__.load({
       attemptPrefix: 'attempt ',
       attemptSuffix: '',
       reports: 'reports',
+      /* 与上面 TEXT 的 plan.* 一一对应；缺一条英文界面就会退回中文。 */
+      'plan.label': 'Plan',
+      'plan.ratio': 'Plan {done}/{total}',
+      'plan.currentLabel': 'Current step',
+      'plan.tagHint': 'Plan {done}/{total}',
+      'plan.updatedTag': 'Plan updated',
+      'plan.updatedHint': 'The worker just submitted a different plan ({done}/{total}); this is the current snapshot, the old plan is not kept on the board',
+      /* 与上面 TEXT 的 dep.* 一一对应；缺一条英文界面下会退回中文。 */
+      'dep.tag': 'needs {n}',
+      'dep.waiting': 'waiting for {title}',
+      'dep.failedTag': 'upstream failed',
+      'dep.tagHint': 'Depends on: {list}',
+      'dep.block': 'Dependencies',
+      'dep.label': 'Depends on',
+      'dep.join': ', ',
+      'dep.waitingLabel': 'Waiting on',
+      'dep.waitingOn': '{title} ({reason})',
+      'dep.notRunLabel': 'Not run because',
+      'dep.notRun': 'upstream {title} failed',
+      'dep.notRunMissing': 'upstream {title} is no longer in the ledger',
+      'dep.reason.running': 'running',
+      'dep.reason.failed': 'failed',
+      'dep.reason.missing': 'missing',
+      'dep.none': 'No dependencies',
+      'dep.batchHead': '{total} members · {waiting} waiting on deps · {skipped} not run',
       noReport: 'no report yet',
       waiting: 'waiting',
       updatedAt: 'updated',
@@ -1101,8 +1168,11 @@ window.__ModuleLoader__.load({
       archivedTag: 'Archived',
       archivedHint: 'That worker session is archived and cannot be opened; unarchive it in the session list first',
       archiveErrorPrefix: 'Archive failed: ',
-      archiveNow: 'Archive now',
-      archiveConfirm: 'Confirm archive',
+      archiveNow: 'Archive stale sessions',
+      archiveNowHint: 'Archives settled tasks with no update for over {hours} hours ({days} days); archived tasks move from "All" to "Archived"',
+      archiveNowHintHours: 'Archives settled tasks with no update for over {hours} hours; archived tasks move from "All" to "Archived"',
+      archiveNowHintUnknown: 'Archives settled tasks that have not been updated for a long time; archived tasks move from "All" to "Archived"',
+      archiveConfirm: 'Click again to archive stale sessions',
       archiveRunning: 'Archiving…',
       archiveDone: 'Archive sweep: scanned {scanned}, archived {archived}, failed {failed}',
       archiveTask: 'Archive',
@@ -1132,9 +1202,6 @@ window.__ModuleLoader__.load({
       unknownReadHint: 'The follow-up was delivered but never confirmed read; we no longer know whether the worker saw it',
       frozenTag: 'frozen',
       frozenHint: 'Frozen read-only: it will not change again, and a retry will fail',
-      truncatedTag: 'truncated',
-      truncatedHint: 'The original is longer; the ledger keeps only the first {n} characters. Use dispatch_inspect for the full text',
-      truncatedHintNoLimit: 'The original is longer; the ledger keeps only the opening part. Use dispatch_inspect for the full text',
       'sec.attention': 'Needs you',
       'sec.attentionEmpty': 'Nothing needs you right now',
       'sec.active': 'Running and queued',
@@ -1204,6 +1271,7 @@ window.__ModuleLoader__.load({
       targetAutoHint: 'Pick a workspace from the typed keywords',
       targetAutoHit: 'Auto: {title}',
       targetAutoMiss: 'Auto: no workspace matches',
+      'divider.relay': 'Dispatch report',
 
       /* plans/09 P1：与上面 TEXT 里新增的键一一对应（缺一条就会在英文界面退回中文）。 */
       'view.tabs': 'Board view',
@@ -1447,7 +1515,7 @@ window.__ModuleLoader__.load({
       'an.kpi': 'Key metrics',
       'an.kpiHint': 'All four cards use the same filtered task set',
       'an.proxyNote': 'Proxies (pending confirmation): owner = parent session · overtime = duration threshold',
-      'an.foot': 'Refreshes every 10s; definitions are in "Metric definitions and data availability"',
+      'an.foot': 'Refreshes every 10s; statistical notes live in docs/board.md',
       'an.emptyRange': '{n} days with no tasks (filled with 0)',
       'an.emptyDay': 'No tasks (filled with 0)',
       'an.filters': 'Filters',
@@ -1511,29 +1579,7 @@ window.__ModuleLoader__.load({
       'an.overdueSettled': 'Settled past threshold',
       'an.overdueUnknown': 'Unknown time',
       'an.overdueRate': 'Share',
-      'an.definitions': 'Metric definitions and data availability',
-      'an.definitionsHint': 'Expand for each metric numerator, denominator, time field and missing field',
-      'an.def.metric': 'Metric',
-      'an.def.formula': 'Definition',
-      'an.def.source': 'Fields / availability',
-      'an.def.total': 'Total tasks',
-      'an.def.totalFormula': 'Count of filtered tasks; window uses createdAt; "all" also includes rows without a creation time',
-      'an.def.totalSource': 'Full dispatch.table.tasks (not capped by the 200-row /board snapshot); retired traces listed separately',
-      'an.def.rate': 'Completion rate',
-      'an.def.rateFormula': 'done ÷ (done+ended+failed+blocked+interrupted); n=0 shows —, 1≤n<5 is flagged as a low sample',
-      'an.def.rateSource': 'status + COMPLETION_BASE; cancelled, running and queued are excluded',
-      'an.def.status': 'Status distribution',
-      'an.def.statusFormula': 'Count per status ÷ total tasks (archived and cancelled included in the denominator)',
-      'an.def.statusSource': 'status field, counted directly',
-      'an.def.overdue': 'Overtime proxy',
-      'an.def.overdueFormula': 'Unsettled: now − createdAt > threshold; settled: settle − createdAt > threshold. Default 24h, adjustable',
-      'an.def.overdueSource': 'createdAt / settledAt (older rows fall back to updatedAt); missing: due_at',
-      'an.def.trend': 'Trend',
-      'an.def.trendFormula': 'UTC day buckets; created by createdAt, done/problems by settledAt; delta = current window − previous equal window',
-      'an.def.trendSource': 'createdAt / settledAt; no comparison for "all"; ranges longer than 366 days are clipped',
-      'an.def.owner': 'Owner filter',
-      'an.def.ownerFormula': 'Parent session is used as an owner proxy; missing values are grouped as "Not specified"',
-      'an.def.ownerSource': 'parentSessionId; missing: assignee / owner (the ledger has no person field today)',
+      /* 与中文侧同步：口径表已从界面移除，说明保留在 docs/board.md。 */
       'an.coverage': 'Sample coverage',
       'an.coverageText': 'ledger {source} · in window {inWindow} · matched {matched} · retired traces {retired} (excluded)',
       'an.warn.missingTimes': 'Some tasks lack creation/settlement times; the trend may be underestimated',
@@ -1862,17 +1908,25 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 报告摘要的账本上限（字数），来自 `memory.ledger.capPerTask.summary`。
+     * 「立即归档超时会话」的悬浮提示。
      *
-     * 只用来把截断提示写成「前 N 字」。拿不到就返回 0，调用方退化成不带数字的
-     * 说法——宿主没告诉我们上限时，编一个「6000 字」比不说更糟。
+     * 时长来自快照的 `archive_after_hours`（宿主真实配置，见 `src/board.js`）。
+     * 为什么不能写死 168：配置改成别的值、或把巡检关掉（0 = 不自动归档）之后，
+     * 一句「超过 168 小时」就变成了假话，而用户正是拿这句话去理解那颗按钮做了什么。
+     *
+     * 三种取值对应三种说法：
+     * - 有值且是整天 → 「超过 168 小时（7 天）」；
+     * - 有值但不是整天 → 只说小时（取整成天会差出一截，宁可不给天数）；
+     * - 0 / 缺失（旧宿主没这个字段）→ 不带数字的说法，**绝不**拼出 undefined。
+     *
+     * @param {number|undefined} hours 快照里的 `archive_after_hours`
+     * @returns {string} 可直接放进 title / aria-label 的一句话
      */
-    function summaryCapOf(memory) {
-      const cap = memory && typeof memory === 'object' && memory.ledger && typeof memory.ledger === 'object'
-        ? memory.ledger.capPerTask
-        : null
-      if (!cap || typeof cap !== 'object') return 0
-      return Math.max(0, num(cap.summary, 0))
+    function archiveHintOf(hours) {
+      const value = num(hours, 0)
+      if (!(value > 0)) return tr('archiveNowHintUnknown')
+      if (value % 24 === 0) return fill(tr('archiveNowHint'), { hours: value, days: value / 24 })
+      return fill(tr('archiveNowHintHours'), { hours: value })
     }
 
     /**
@@ -1984,6 +2038,28 @@ window.__ModuleLoader__.load({
       const members = tasks.filter(function (task) { return task && task.group === name })
       const done = members.filter(function (task) { return SETTLED_STATUS.has(task.status) }).length
       return { done: done, total: members.length }
+    }
+
+    /**
+     * 批次的依赖状态计数（PRD-02 §4.5）：批次头要写「3 个成员 · 1 个等待前置 ·
+     * 1 个未执行」。
+     *
+     * 为什么扫**整份快照**而不是 `activeTasks`：批次成员的依赖信息分布在三种状态里
+     * ——等着的（queued + blocked_by）、已经在跑的、被连带取消的（cancelled +
+     * cancel_reason）。只扫活跃任务会把「未执行」漏掉，批次头于是永远显示 0 个未执行，
+     * 而那正是用户最需要看到的一项。
+     */
+    function batchDependencyCounts(tasks, name) {
+      let total = 0
+      let waiting = 0
+      let skipped = 0
+      for (const task of tasks) {
+        if (!task || task.group !== name) continue
+        total += 1
+        if (task.status === 'queued' && typeof task.blocked_by === 'string' && task.blocked_by) waiting += 1
+        else if (task.cancel_reason === 'dependency_failed' || task.cancel_reason === 'dependency_missing') skipped += 1
+      }
+      return { total: total, waiting: waiting, skipped: skipped }
     }
 
     /* ───────────────────────── 已退休记录（只读视图） ───────────────────────── */
@@ -2865,16 +2941,29 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
   color: var(--dsw-alias-state-warn-primary, #b45309);
 }
-/* 截断标记：贴着报告数/摘要，比正文弱一档，但点得出「这里被切过」。 */
-.dsh-sa-truncated {
-  flex: none;
-  padding: 0 4px;
-  border-radius: var(--dsw-radius-sm, 4px);
-  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
-  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
-  font-size: var(--dsw-font-xxxs-11, 11px);
-  white-space: nowrap;
-  cursor: help;
+/*
+ * 「计划已更新」：与「2/5」并排的一次性提示，所以比计划标签**弱一档**——
+ * 它说的是「你刚才看到的数字变了」，不是一个新的状态。用信息蓝保持与计划标签
+ * 同一色系（同一件事），但只加虚线边框，不加重底色：亮 2 秒就走，不该抢过步骤数。
+ */
+.dsh-sa-tag-plan-updated {
+  background: var(--dsw-alias-state-info-surface, rgba(37,99,235,.08));
+  color: var(--dsw-alias-state-info-primary, #2563eb);
+  border: 1px dashed var(--dsw-alias-state-info-primary, #2563eb);
+}
+/*
+ * 依赖标签（PRD-02 §4.5）：
+ * - 「依赖 N」/「等 A」用信息蓝：等前置是**正常运行状态**，不是问题；
+ * - 「前置失败」用警示色：那是这条任务不会再跑了的终局原因，需要人处理前置。
+ * 颜色不是唯一通道——三种标签的文字本身已经把状态说清（§八.8）。
+ */
+.dsh-sa-tag-dep {
+  background: var(--dsw-alias-state-info-surface, rgba(37,99,235,.12));
+  color: var(--dsw-alias-state-info-primary, #2563eb);
+}
+.dsh-sa-tag-dep-failed {
+  background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
+  color: var(--dsw-alias-state-warn-primary, #b45309);
 }
 /* ── 面板改版：效果数字、并发条、分节、批次、原因行 ── */
 .dsh-sa-stats {
@@ -3660,15 +3749,7 @@ window.__ModuleLoader__.load({
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.dsh-sa-an-defs { margin: 8px 16px 0; font-size: var(--dsw-font-xxxs-11, 11px); }
-.dsh-sa-an-defs summary {
-  cursor: pointer;
-  color: var(--dsw-alias-label-secondary, inherit);
-  padding: 4px 0;
-}
-.dsh-sa-an-defs-hint { color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9)); padding: 0 0 6px; }
-.dsh-sa-an-defs .dsh-sa-tablewrap { padding: 0; }
-.dsh-sa-an-defs-cell { text-align: left !important; white-space: normal !important; overflow-wrap: anywhere; }
+/* 口径表样式随区块一起删掉：界面上已经没有那张给维护者看的表。 */
 .dsh-sa-an-foot {
   display: flex;
   gap: 8px;
@@ -4337,6 +4418,102 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ───────────────────────── 轮次分隔线 ───────────────────────── */
+
+    /**
+     * 会话流里的「轮次分隔线」。
+     *
+     * 挂 `conversation.chat.user.before`（chain，会话作用域）：宿主在每条用户消息气泡
+     * **上方**留了这一个装饰槽，选择器返回非空就由我们接管那一格。
+     *
+     * 为什么需要：长会话里 assistant 的步骤、工具卡片、回流报告连成一片，滚动时找不到
+     * 「这一轮是从哪句话开始的」。这里给每一轮画一条横线，作为可见的起点。
+     *
+     * 不猜业务语义：只看 `owner.kind`（宿主已经把 steering 行排除在外）和消息 `source.kind`
+     * ——本插件自己投递的报告（`src/sessions.js` 里 `source.kind` = 包名）多一枚「派发报告」
+     * 标签，其余用户输入一律是同样的一条线。`source` 的其它字段一概不读，也不依赖任何
+     * 会话投影：拿不到就没有标签，绝不因此不画线。
+     */
+    const DIVIDER_SELECTED_USER = Object.freeze({ relay: false })
+    const DIVIDER_SELECTED_RELAY = Object.freeze({ relay: true })
+
+    /** chain 槽的选择器：只接用户行；返回值同时告诉组件「这一行是不是派发报告」。 */
+    function selectTurnDivider(owner) {
+      if (!owner || owner.kind !== 'user') return null
+      const source = owner.source && typeof owner.source === 'object' ? owner.source : null
+      return source && source.kind === RELAY_SOURCE_KIND ? DIVIDER_SELECTED_RELAY : DIVIDER_SELECTED_USER
+    }
+
+    /**
+     * 分隔线样式。用的是宿主主题 token（`--dsw-alias-*`），明暗两套自动跟随；
+     * 写死的颜色只作 token 缺失时的兜底。类名仍在 `dsh-sa-` 前缀下，
+     * 随组件内的 <style> 一起卸载，不写全局样式表。
+     */
+    const DIVIDER_STYLE = `
+.dsh-sa-divide {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 22px 4px 12px;
+  pointer-events: none;
+  user-select: none;
+}
+.dsh-sa-divide-line { flex: 1 1 auto; height: 1px; min-width: 12px; }
+.dsh-sa-divide-line-lead {
+  background: linear-gradient(to right, transparent, var(--dsw-alias-border-l2, rgba(127,127,127,.45)));
+}
+.dsh-sa-divide-line-trail {
+  background: linear-gradient(to left, transparent, var(--dsw-alias-border-l2, rgba(127,127,127,.45)));
+}
+.dsh-sa-divide-mark {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 1.5px;
+  transform: rotate(45deg);
+  background: var(--dsw-alias-label-secondary, #6b6b6b);
+  opacity: .45;
+}
+.dsh-sa-divide-relay .dsh-sa-divide-line-lead {
+  background: linear-gradient(to right, transparent, var(--dsw-alias-brand-primary, #4d6bfe));
+  opacity: .55;
+}
+.dsh-sa-divide-relay .dsh-sa-divide-line-trail {
+  background: linear-gradient(to left, transparent, var(--dsw-alias-brand-primary, #4d6bfe));
+  opacity: .55;
+}
+.dsh-sa-divide-tag {
+  flex: 0 0 auto;
+  padding: 2px 9px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+`
+
+    /** 一条轮次分隔线。`matched` 由 `selectTurnDivider` 给出；缺失时按普通用户轮次画。 */
+    function TurnDivider(props) {
+      const relay = Boolean(props && props.matched && props.matched.relay)
+      return h(
+        'div',
+        {
+          className: relay ? 'dsh-sa-divide dsh-sa-divide-relay' : 'dsh-sa-divide',
+          'aria-hidden': 'true',
+          'data-divider': relay ? 'relay' : 'turn',
+        },
+        h('style', { key: 'style' }, DIVIDER_STYLE),
+        h('span', { key: 'lead', className: 'dsh-sa-divide-line dsh-sa-divide-line-lead' }),
+        relay
+          ? h('span', { key: 'tag', className: 'dsh-sa-divide-tag' }, tr('divider.relay'))
+          : h('span', { key: 'mark', className: 'dsh-sa-divide-mark' }),
+        h('span', { key: 'trail', className: 'dsh-sa-divide-line dsh-sa-divide-line-trail' }),
+      )
+    }
+
     /* ───────────────────────── 主面板 ───────────────────────── */
 
     /** 顶部的一个指标。 */
@@ -4407,12 +4584,26 @@ window.__ModuleLoader__.load({
       const total = num(props.total, 0)
       const done = num(props.done, 0)
       const percent = total > 0 ? Math.round((done / total) * 100) : 0
+      const members = num(props.members, total)
+      const waiting = num(props.waiting, 0)
+      const skipped = num(props.skipped, 0)
       return h(
         'div',
         { className: 'dsh-sa-batch' },
         h('span', { className: 'dsh-sa-tag dsh-sa-tag-group' }, tr('groupTag')),
         h('span', { className: 'dsh-sa-batch-name' }, String(props.name || '')),
         h('span', { className: 'dsh-sa-batch-count' }, done + '/' + total),
+        /*
+         * 依赖口径（PRD-02 §4.5）：只在真有等待/未执行时出现——一个「0 个等待前置
+         * · 0 个未执行」的尾巴对用户没有信息量，还会把批次头撑成两行。
+         */
+        waiting + skipped > 0
+          ? h(
+              'span',
+              { className: 'dsh-sa-meta', 'data-batch-dep': 'true' },
+              fill(tr('dep.batchHead'), { total: members, waiting: waiting, skipped: skipped }),
+            )
+          : null,
         h(
           'div',
           { className: 'dsh-sa-bar dsh-sa-batch-bar', 'aria-hidden': 'true' },
@@ -4462,6 +4653,86 @@ window.__ModuleLoader__.load({
       const reportLine = firstLine(summary) || tr('noReport')
       const attempt = num(task.attempt, 1)
       const reportCount = num(task.report_count, 0)
+      /*
+       * 计划标签（PRD-01 §4.3）。**只在 queued / running 且真有计划时出现**：
+       * 终态优先于计划——任务 done 之后再挂一个「2/5」，用户会以为它没跑完。
+       * 宿主 `boardTask()` 已经对已结算任务不下发 plan_*，这里再判一次状态是
+       * 第二道闸：快照契约与界面契约任一被绕开时，仍不会画出自相矛盾的标签。
+       *
+       * 只在标签区显示、**不在元信息行重复**：元信息行已经有「报告 N」，
+       * 两个数字并排会让人分不清哪个是报告数、哪个是步骤数。
+       */
+      const planTotal = num(task.plan_total, 0)
+      const planDone = num(task.plan_done, 0)
+      const planCurrent = typeof task.plan_current === 'string' ? task.plan_current : ''
+      const planVisible = !archived
+        && (task.status === 'queued' || task.status === 'running')
+        && planTotal > 0
+      const planHint = planCurrent
+        ? fill(tr('plan.tagHint'), { done: planDone, total: planTotal }) + ' · ' + planCurrent
+        : fill(tr('plan.tagHint'), { done: planDone, total: planTotal })
+      /*
+       * 「计划已更新」标记（PRD-01 §6）。指纹比较在 `BoardPanel` 里做（它是唯一
+       * 能跨轮询记住「上一次看到的是什么」的地方），这一行只负责画。
+       * 与计划标签同生命周期（`planVisible`）：计划标签都不显示了（任务结算 / 归档），
+       * 再挂一个「刚更新过」只会让人以为还有下一步。
+       */
+      const planJustUpdated = planVisible && Boolean(props.planUpdated)
+      const planUpdatedHint = fill(tr('plan.updatedHint'), { done: planDone, total: planTotal })
+      /*
+       * 依赖标签（PRD-02 §4.5）。三种形态互斥，按信息量从高到低只放一个：
+       *
+       *   前置失败（被连带取消）> 等 A（被挡）> 依赖 2（有依赖但此刻没被挡）
+       *
+       * 只放一个而不是并列：行内标签区已经有可能在放计划 / 后台 / 待读 / 冻结，
+       * 再加两个会把标题挤到换行；完整前置列表在抽屉里（`dep.tagHint` 是它的 hover）。
+       *
+       * 标题从 `props.depTitles` 查（同一份快照里的 title），查不到就退回 id——
+       * **不**在这一行里发一次 fetch：看板是 2 秒轮询的纯展示层，多一个请求源
+       * 就多一处会和快照不同步的数字。
+       */
+      const deps = Array.isArray(task.depends_on) ? task.depends_on : []
+      const depFailed = task.cancel_reason === 'dependency_failed' || task.cancel_reason === 'dependency_missing'
+      // 「等 A」只在**还在排队**时成立：已结算的任务留着 blocked_by 只是留痕，
+      // 再画一个「在等」会让用户以为它还会自己开始。
+      const depWaitingId = task.status === 'queued' && typeof task.blocked_by === 'string' ? task.blocked_by : ''
+      const depTitleOf = function (id) {
+        const titles = props.depTitles || {}
+        const raw = typeof titles[id] === 'string' && titles[id] ? titles[id] : id
+        return raw.length > 12 ? raw.slice(0, 12) : raw
+      }
+      const depHint = deps.length
+        ? fill(tr('dep.tagHint'), { list: deps.map(depTitleOf).join(tr('dep.join')) })
+        : ''
+      const depTag = depFailed
+        ? h(
+            'span',
+            {
+              key: 'dep-failed',
+              className: 'dsh-sa-tag dsh-sa-tag-dep-failed',
+              title: depHint || tr('dep.failedTag'),
+              'data-dep': 'failed',
+            },
+            tr('dep.failedTag'),
+          )
+        : depWaitingId
+          ? h(
+              'span',
+              {
+                key: 'dep-waiting',
+                className: 'dsh-sa-tag dsh-sa-tag-dep',
+                title: depHint,
+                'data-dep': 'waiting',
+              },
+              fill(tr('dep.waiting'), { title: depTitleOf(depWaitingId) }),
+            )
+          : deps.length && !archived
+            ? h(
+                'span',
+                { key: 'dep', className: 'dsh-sa-tag dsh-sa-tag-dep', title: depHint, 'data-dep': deps.length },
+                fill(tr('dep.tag'), { n: deps.length }),
+              )
+            : null
       const title = typeof task.title === 'string' && task.title ? task.title : tr('noTitle')
       const group = typeof task.group === 'string' ? task.group : ''
       const background = task.background && typeof task.background === 'object' ? task.background : null
@@ -4483,13 +4754,6 @@ window.__ModuleLoader__.load({
        * 语义不丢：归档行的 hover 里仍然会写「只读冻结，续跑会失败」。
        */
       const frozen = frozenAt && !archived
-      /*
-       * 「摘要已截断」：宿主只给布尔（`has_truncated`），正文不出快照。
-       * 上限数值来自 memory 块（`ledger.capPerTask.summary`），拿不到就退化成
-       * 不带数字的说法——**不要**编一个「前 6000 字」出来。
-       */
-      const truncated = Boolean(task.has_truncated)
-      const summaryCap = num(props.summaryCap, 0)
       /*
        * 归档行**不可点**。根因不在这一行，而在宿主的导航策略：`uiWorkspace.openSession`
        * 会把主视图换成那个会话，而 ui-workspace 的 `watchNavigation` 里有一条
@@ -4528,14 +4792,58 @@ window.__ModuleLoader__.load({
         // hover 里明确写「只读冻结、续跑会失败」，那是 frozen 想要的断言。
         + (frozenAt ? '\n' + tr('frozenHint') : '')
 
-      /** 整行可点（按钮除外）：打开这个任务的子会话。 */
+      /*
+       * 行内交互控件的选择器（第二层闸）。
+       *
+       * 行本身整体可点，行里却可以长控件（按钮、输入框、链接）。凡 target 落在这些
+       * 元素里的事件都不是「想打开这一行」；`data-no-row-click` 是给将来新加的自定义
+       * 控件留的显式逃生标记，不必再回来改这份选择器。
+       */
+      const ROW_CONTROL_SELECTOR = 'input, textarea, button, select, a, [contenteditable], [data-no-row-click]'
+
+      /**
+       * target 是否落在行内控件里（第二层闸，防复发）。
+       *
+       * 为什么用 `closest()`：事件目标可能是控件内部的子节点（例如按钮里的 span），
+       * 直接与元素比对会漏；`closest` 一次就能判断「这个目标在控件内部」。
+       * `target === currentTarget` 必须放行——那是行自己（键盘 Tab 到行上 / 点行空白处），
+       * 否则 `closest` 会顺着祖先找到 aria/tooltip 一类外层标记，把正常打开也挡了。
+       */
+      function insideRowControl(event) {
+        const target = event && event.target
+        if (!target || target === event.currentTarget) return false
+        if (typeof target.closest !== 'function') return false
+        return Boolean(target.closest(ROW_CONTROL_SELECTOR))
+      }
+
+      /**
+       * 整行可点（行内控件除外）：打开这个任务的子会话。
+       *
+       * 第一层闸在控件自己身上（`stopRowBubble`），这里是第二层：键盘、脚本
+       * `dispatchEvent`、将来忘了拦冒泡的新控件都可能绕过第一层，这一层才防复发。
+       */
       function activate(event) {
         if (!clickable) return
+        if (insideRowControl(event)) return
         if (event) {
           if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return
           if (event.preventDefault) event.preventDefault()
         }
         props.handlers.open(task)
+      }
+
+      /**
+       * 行内控件的冒泡闸门（第一层）。
+       *
+       * 续派输入行是行的子节点：在输入框上按下/点一下，click 会冒到行的 onClick，
+       * 触发「打开子会话」——用户看到的就是「输入框刚展开，点进去页面就跳走了」。
+       * 按钮各自的 onClick 已有 stopPropagation，输入框当时**只拦了 input/keydown，
+       * 漏了 mousedown 与 click**，于是这个缺陷只在输入框上出现。
+       *
+       * **绝不调 preventDefault**：默认行为正是「聚焦 + 落光标」，拦掉就真打不了字了。
+       */
+      function stopRowBubble(event) {
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
       }
 
       /*
@@ -4584,13 +4892,14 @@ window.__ModuleLoader__.load({
        * - **二次确认**：归档是写操作，会话会被冻成只读（`archivedSessionIds`），
        *   误触的代价是「一条任务从待办区消失」。第一次点击只进确认态，
        *   4 秒内没再点自动退回（`confirmArchive` 状态由面板统一管，与工具栏
-       *   「立即归档」共用同一套 4 秒过期逻辑）。
+       *   「立即归档超时会话」共用同一套 4 秒过期逻辑）。
        * - **走 `/archive-task` 而不是 `/archive`**：后者是**巡检**——不读 body、
        *   按保留期扫全表、回 `{scanned, archived, failed}`。拿它做单条归档会
        *   把别的超期任务一起扫走，而用户点的是「这一条」。
        * - **文案用 `archiveTaskConfirm` 而不是 `archiveConfirm`**：后者是工具栏
-       *   「立即归档」巡检的确认词（「确认归档」），两条路文案要能分清到底在确认
-       *   哪一件事。同一个 `archiveTask` 词干不能复用，否则读屏里也分不出来。
+       *   「立即归档超时会话」巡检的确认词（「再次点击确认归档超时会话」），两条路
+       *   文案要能分清到底在确认哪一件事。同一个 `archiveTask` 词干不能复用，
+       *   否则读屏里也分不出来。
        */
       const archiving = busyKind === 'archive'
       // 确认态由面板统一持有（`archiveAsk` 是「哪一行在等确认」的 task_id），
@@ -4649,7 +4958,20 @@ window.__ModuleLoader__.load({
       const continueRow = continueOpen
         ? h(
             'div',
-            { key: 'continue-row', className: 'dsh-sa-continue' },
+            {
+              key: 'continue-row',
+              className: 'dsh-sa-continue',
+              /*
+               * 行可点，行内控件必须阻断冒泡，否则点输入框会跳走（第一层闸）。
+               * 拦 mousedown 与 click：有的交互把「按下」当成行的激活时机，
+               * 只拦 click 会漏掉。两者都**不** preventDefault——输入框要靠默认行为
+               * 聚焦并落下光标。keydown 由输入框自己的 onKeyDown 拦（Enter/Esc 也在那边）。
+               * `data-no-row-click` 供第二层闸（`insideRowControl`）识别这个容器。
+               */
+              'data-no-row-click': 'true',
+              onMouseDown: stopRowBubble,
+              onClick: stopRowBubble,
+            },
             h('input', {
               key: 'input',
               type: 'text',
@@ -4665,6 +4987,7 @@ window.__ModuleLoader__.load({
               },
               onKeyDown: function (event) {
                 if (!event) return
+                // Enter/Esc 也不能冒到行上：行的 onKeyDown 认 Enter 为「打开会话」。
                 if (event.stopPropagation) event.stopPropagation()
                 if (event.key === 'Enter') props.continueHandlers.submit(task)
                 else if (event.key === 'Escape') props.continueHandlers.toggle(task)
@@ -4705,31 +5028,43 @@ window.__ModuleLoader__.load({
         : null
 
       /*
-       * 截断标记：宿主只投影布尔 `has_truncated`（一位小标记，不搬正文）。
-       * 有上限数值就写「前 N 字」，没有就退化成不带数字的说法。
-       * 它跟报告数 / 摘要放在同一行，因为「被切掉的是哪段」正是那一行的内容。
+       * 不再渲染「摘要已截断 / 详情已截断」标记。原因只有一句：快照本来就不带正文，
+       * 点进去也看不到被裁掉的部分，这个标记**无法导向任何可读内容**，只会让人以为
+       * 自己漏看了什么。后端仍投影 `has_truncated` / `truncated_fields`（其他消费者
+       * 可能读得到），但界面不再展示；要确认被裁情况请用 `dispatch_inspect`。
        */
-      const truncHint = summaryCap > 0
-        ? fill(tr('truncatedHint'), { n: summaryCap })
-        : tr('truncatedHintNoLimit')
-      const truncMark = truncated
-        ? h(
-            'span',
-            {
-              key: 'truncated',
-              className: 'dsh-sa-truncated',
-              title: truncHint,
-              'aria-label': truncHint,
-              'data-truncated': 'true',
-            },
-            tr('truncatedTag'),
-          )
-        : null
-
       const tags = [
         attempt > 1
           ? h('span', { key: 'attempt', className: 'dsh-sa-tag' }, tr('attemptPrefix') + attempt + tr('attemptSuffix'))
           : null,
+        planVisible
+          ? h(
+              'span',
+              {
+                key: 'plan',
+                className: 'dsh-sa-tag dsh-sa-tag-plan',
+                title: planHint,
+                'aria-label': planHint,
+                'data-plan': planDone + '/' + planTotal,
+              },
+              planDone + '/' + planTotal,
+            )
+          : null,
+        planJustUpdated
+          ? h(
+              'span',
+              {
+                key: 'plan-updated',
+                className: 'dsh-sa-tag dsh-sa-tag-plan-updated',
+                title: planUpdatedHint,
+                'aria-label': planUpdatedHint,
+                // 观测口径：冒烟与排障直接读这个属性，不必按文字找。
+                'data-plan-updated': planDone + '/' + planTotal,
+              },
+              tr('plan.updatedTag'),
+            )
+          : null,
+        depTag,
         background
           ? h('span', { key: 'bg', className: 'dsh-sa-tag dsh-sa-tag-bg', title: tr('backgroundHint') }, tr('backgroundTag'))
           : null,
@@ -4831,7 +5166,6 @@ window.__ModuleLoader__.load({
               reportCount > 0
                 ? h('span', { key: 'dense-count', className: 'dsh-sa-dense-meta' }, tr('reports') + ' ' + reportCount)
                 : null,
-              truncMark,
             ]
           : h(
               'div',
@@ -4851,7 +5185,6 @@ window.__ModuleLoader__.load({
                 reportLine,
               ),
               reportAgo ? h('span', { key: 'report-at', className: 'dsh-sa-meta' }, reportAgo) : null,
-              truncMark,
             ),
         typeof task.error === 'string' && task.error && props.variant !== 'attention'
           ? h('div', { key: 'error', className: 'dsh-sa-errorline', title: task.error }, task.error)
@@ -5731,6 +6064,18 @@ window.__ModuleLoader__.load({
         cwd: typeof record.cwd === 'string' ? record.cwd : '',
         task_dir: typeof record.task_dir === 'string' ? record.task_dir : '',
         prepare_at: record.prepare_at || null,
+        /*
+         * 依赖（PRD-02 §4.5）：抽屉要说「前置：A、B」「当前等待：A（运行中）」
+         * 「未执行原因：前置 A 失败」。这里是**白名单**归一，不补就会在抽屉里
+         * 安静地少掉一整块——历史行是唯一能打开抽屉的地方。
+         *
+         * 退休留痕是薄记录（没有依赖边），一律给空值而不是去猜。
+         */
+        depends_on: retired ? [] : (Array.isArray(record.depends_on) ? record.depends_on : []),
+        blocked_by: retired ? null : (typeof record.blocked_by === 'string' ? record.blocked_by : null),
+        blocked_reason: retired ? null : (typeof record.blocked_reason === 'string' ? record.blocked_reason : null),
+        cancel_reason: retired ? null : (typeof record.cancel_reason === 'string' ? record.cancel_reason : null),
+        error_code: retired ? null : (typeof record.error_code === 'string' ? record.error_code : null),
         // 退休留痕只剩最后一条摘要：账本封顶的目的就是让写放大有上界。
         summary: retired && typeof record.summary === 'string' ? record.summary : '',
       }
@@ -6056,8 +6401,72 @@ window.__ModuleLoader__.load({
         ),
       ])
 
+      /*
+       * 依赖（PRD-02 §4.5）：抽屉是「它在等谁 / 为什么没跑」唯一能说清的地方。
+       * 三行分别对应 PRD 的三条文案：
+       *   「前置：A、B」            → 它声明了哪些前置；
+       *   「当前等待：A（运行中）」   → 此刻卡在哪一条、对面是什么状态；
+       *   「未执行原因：前置 A 失败」 → 被连带取消时的终局原因。
+       *
+       * 只在真有依赖信息时出现；没有依赖的任务不生成空块（与 frozen_at 等同风格）。
+       * 标题从 `props.depTitles` 查（同一份快照），查不到退回 id——不编一个假名字。
+       */
+      const depTitleOf = function (id) {
+        const titles = props.depTitles || {}
+        const raw = typeof titles[id] === 'string' && titles[id] ? titles[id] : id
+        return raw.length > 12 ? raw.slice(0, 12) : raw
+      }
+      const depList = Array.isArray(row.depends_on) ? row.depends_on : []
+      const depBlockedBy = typeof row.blocked_by === 'string' ? row.blocked_by : ''
+      const depFailed = row.cancel_reason === 'dependency_failed'
+      const depMissing = row.cancel_reason === 'dependency_missing'
+      const depLines = []
+      if (depList.length) {
+        depLines.push(kv('deps', tr('dep.label'), depList.map(depTitleOf).join(tr('dep.join'))))
+      }
+      if (depBlockedBy && row.status === 'queued') {
+        // 「当前等待」只对**还在排队**的任务成立：已结算的任务留着 blocked_by 只是
+        // 留痕（抽屉的「未执行原因」会用同一个 id），再写「在等」会自相矛盾。
+        // 机器值（running/failed/missing）必须翻成人话：抽屉是给人看的。
+        const reasonText = row.blocked_reason === 'failed'
+          ? tr('dep.reason.failed')
+          : row.blocked_reason === 'missing'
+            ? tr('dep.reason.missing')
+            : tr('dep.reason.running')
+        depLines.push(kv(
+          'waiting',
+          tr('dep.waitingLabel'),
+          fill(tr('dep.waitingOn'), { title: depTitleOf(depBlockedBy), reason: reasonText }),
+        ))
+      }
+      if (depFailed || depMissing) {
+        const failingDep = depBlockedBy || (depList.length ? depList[0] : '')
+        depLines.push(kv(
+          'not-run',
+          tr('dep.notRunLabel'),
+          failingDep
+            ? fill(depMissing ? tr('dep.notRunMissing') : tr('dep.notRun'), { title: depTitleOf(failingDep) })
+            : tr('dep.none'),
+        ))
+      }
+      const dependencyBlock = depLines.length ? block('deps', tr('dep.block'), depLines) : null
+
       const lastReport = row.last_report
       const reportLines = []
+      /*
+       * 计划进度（PRD-01 §4.3）：抽屉里给「计划 2/5」与当前步骤文案。
+       *
+       * 与任务行同一条显示优先级：只在 queued / running 时出现。宿主快照对已结算
+       * 任务本来就不下发 plan_*（见 `boardTask()`），这里判状态是为了让「终态优先」
+       * 在界面上是**读得到的规则**，而不是依赖快照恰好没给字段。
+       */
+      const planTotal = num(row.plan_total, 0)
+      const planDone = num(row.plan_done, 0)
+      const planCurrent = typeof row.plan_current === 'string' ? row.plan_current : ''
+      if ((row.status === 'queued' || row.status === 'running') && planTotal > 0) {
+        reportLines.push(kv('plan', tr('plan.label'), fill(tr('plan.ratio'), { done: planDone, total: planTotal })))
+        if (planCurrent) reportLines.push(kv('plan-current', tr('plan.currentLabel'), planCurrent))
+      }
       reportLines.push(kv('count', tr('drawer.reportCount'), String(num(row.report_count, 0))))
       if (lastReport) {
         const bits = [lastReport.at ? stampText(lastReport.at, now) : tr('drawer.noTime')]
@@ -6176,6 +6585,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dsh-sa-drawer-title2' }, row.title || tr('noTitle')),
           block('lifecycle', tr('drawer.lifecycle'), lifecycle),
           scopeBlock,
+          dependencyBlock,
           reportsBlock,
           faultsBlock,
           deliveryBlock,
@@ -6391,6 +6801,8 @@ window.__ModuleLoader__.load({
           ? h(TaskDrawer, {
               row: props.drawerRow,
               now: props.now,
+              // 依赖短名表（PRD-02 §4.5）：抽屉里的「前置：A、B」按 id 查标题。
+              depTitles: props.depTitles,
               onClose: props.onCloseDrawer,
               onCopy: props.onCopy,
               onOpen: props.onOpen,
@@ -6432,15 +6844,6 @@ window.__ModuleLoader__.load({
       'invalid-overdue-hours': 'an.warn.invalidOverdueHours',
       degraded: 'an.warn.degraded',
     }
-    /** 指标口径表：指标 / 分子分母 / 数据可得性，三列逐字来自统计口径。 */
-    const AN_DEFINITIONS = [
-      ['an.def.total', 'an.def.totalFormula', 'an.def.totalSource'],
-      ['an.def.rate', 'an.def.rateFormula', 'an.def.rateSource'],
-      ['an.def.status', 'an.def.statusFormula', 'an.def.statusSource'],
-      ['an.def.overdue', 'an.def.overdueFormula', 'an.def.overdueSource'],
-      ['an.def.trend', 'an.def.trendFormula', 'an.def.trendSource'],
-      ['an.def.owner', 'an.def.ownerFormula', 'an.def.ownerSource'],
-    ]
 
     /** 数字：非法值给 em dash，不把「算不出来」画成 0。 */
     function anNum(value) {
@@ -6524,34 +6927,6 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dsh-sa-an-section-hint' }, props.hint || ''),
         ),
         props.children || null,
-      )
-    }
-
-    /** 口径表：默认收起，但永远在页面上，不是一个藏进 tooltip 的链接。 */
-    function AnDefinitions() {
-      return h(
-        'details',
-        { className: 'dsh-sa-an-defs', 'data-an-defs': 'true' },
-        h('summary', null, tr('an.definitions')),
-        h('div', { className: 'dsh-sa-an-defs-hint' }, tr('an.definitionsHint')),
-        h(
-          'div',
-          { className: 'dsh-sa-tablewrap' },
-          h(
-            'table',
-            { className: 'dsh-sa-table' },
-            h('thead', null, h('tr', null,
-              h('th', { scope: 'col' }, tr('an.def.metric')),
-              h('th', { scope: 'col' }, tr('an.def.formula')),
-              h('th', { scope: 'col' }, tr('an.def.source')),
-            )),
-            h('tbody', null, AN_DEFINITIONS.map(function (row, index) {
-              return h('tr', { key: 'def-' + index }, row.map(function (key, column) {
-                return h('td', { key: column, className: 'dsh-sa-an-defs-cell', scope: column === 0 ? 'row' : undefined }, tr(key))
-              }))
-            })),
-          ),
-        ),
       )
     }
 
@@ -6946,7 +7321,6 @@ window.__ModuleLoader__.load({
         scopeLine,
         strips.length ? strips : null,
         content,
-        AnDefinitions(),
         h('div', { className: 'dsh-sa-an-foot' }, tr('an.foot')),
       )
     }
@@ -6965,9 +7339,22 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState({})
       const [generation, setGeneration] = useState(0)
       const [now, setNow] = useState(function () { return Date.now() })
-      /** 立即归档的两步确认：0 空闲，1 等待确认。 */
+      /** 立即归档超时会话的两步确认：0 空闲，1 等待确认。 */
       const [archiveStage, setArchiveStage] = useState(0)
       const [archiving, setArchiving] = useState(false)
+      /**
+       * 「计划已更新」（PRD-01 §6）：worker 第二次带**不同的**计划时，这一行亮一次短标记。
+       *
+       * 两份本地状态，都**不入账本**（PRD 明确要求：这是看板的瞬时提示，不是任务事实）：
+       * - `planSeen`：task_id → 上一次看到的计划指纹（`总步数|已完成|当前步骤`）。
+       *   放 ref 而不是 state：它只用来做前后比较，改它不该触发渲染；
+       * - `planUpdated`：本次要点亮的 task_id 集合。放 state 才会驱动渲染。
+       *
+       * 为什么 `TaskCard` 自己不能做这件事：它是无 hook 的展示组件，每 2 秒轮询都
+       * 重建一次，没有任何地方能记住「上一次的计划长什么样」。
+       */
+      const planSeen = useRef({})
+      const [planUpdated, setPlanUpdated] = useState({})
       /**
        * 行内归档的两步确认：存的是「正在等确认的 task_id」。
        *
@@ -7420,7 +7807,7 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      /* 立即归档：会真的归档会话，不是预览，所以走两步确认。 */
+      /* 立即归档超时会话：会真的归档会话，不是预览，所以走两步确认。 */
       const runArchive = useCallback(async function () {
         if (archiving) return
         setArchiveStage(0)
@@ -7499,7 +7886,67 @@ window.__ModuleLoader__.load({
 
       const data = snapshot && Array.isArray(snapshot.tasks) ? snapshot : null
       const allTasks = data ? data.tasks.filter(function (task) { return task && typeof task === 'object' }) : []
+      /**
+       * 依赖链的短名表（PRD-02 §4.5）：看板快照只给前置 id，任务行与抽屉要说
+       * 「等 A」/「前置 A 失败」。在这里拍平成 id → 标题一层映射传下去。
+       *
+       * 用整份快照（`allTasks`）而不是筛选后的 `scopedTasks`：抽屉可能指向一条
+       * 被筛选掉的任务，它的前置仍然要能读出名字；而再发一次请求拿标题，会让
+       * 同一屏出现两份可能不同步的数据。
+       */
+      const depTitles = {}
+      for (const task of allTasks) {
+        if (task && typeof task.task_id === 'string' && task.task_id) depTitles[task.task_id] = task.title
+      }
       const counts = data && data.counts ? data.counts : {}
+      /*
+       * 「计划已更新」的判定（PRD-01 §6）。
+       *
+       * 每次拿到新快照都比一次指纹（`总步数|已完成|当前步骤`）：
+       * - 只跟踪 `queued` / `running`：终态不再计划，「已更新」对一条做完的任务没有意义；
+       * - **第一次见到某条任务不点亮**：那只是「我第一次看到它的计划」，不是「它改了计划」；
+       * - 指纹变了才点亮，`data` 换成同一份计划时清空 —— 所以标记的生命周期
+       *   是**一次轮询**（约 2 秒），而不是定时器。
+       *
+       * 为什么用「下次轮询消失」而不是 setTimeout：看板每 2 秒本来就会重渲染一次，
+       * 蹭这趟车不需要额外定时器（面板卸载 / 切视图时也没有待清理的 timer），
+       * 而且它天然与「新快照到了」对齐——不会出现「标记还在，但计划已经又变了一次」。
+       */
+      useEffect(function () {
+        if (!data) return
+        const seen = {}
+        const changed = []
+        for (const task of allTasks) {
+          if (!task || typeof task.task_id !== 'string' || !task.task_id) continue
+          if (task.status !== 'queued' && task.status !== 'running') continue
+          const total = num(task.plan_total, 0)
+          if (total <= 0) continue
+          const done = num(task.plan_done, 0)
+          const current = typeof task.plan_current === 'string' ? task.plan_current : ''
+          const fingerprint = total + '|' + done + '|' + current
+          seen[task.task_id] = fingerprint
+          const previous = planSeen.current[task.task_id]
+          if (typeof previous === 'string' && previous !== fingerprint) changed.push(task.task_id)
+        }
+        planSeen.current = seen
+        if (!changed.length) {
+          // 这一轮没人需要点亮：把上一轮的清掉（策略就是「下次轮询消失」）。
+          // 返回同一个对象时空集不算变化，避免每次轮询都白触发一次渲染。
+          setPlanUpdated(function (current) { return Object.keys(current).length ? {} : current })
+          return
+        }
+        const next = {}
+        for (const id of changed) next[id] = true
+        setPlanUpdated(next)
+      }, [data])
+
+      /*
+       * 工具栏那颗「立即归档超时会话」的悬浮提示。
+       * 时长取快照的 `archive_after_hours`（宿主真实配置）；旧宿主没这个字段时是 0，
+       * 退化成不带数字的说法（见 `archiveHintOf`）。
+       */
+      const archiveHint = archiveHintOf(data ? data.archive_after_hours : 0)
+
       const concurrency = data && data.concurrency ? data.concurrency : {}
       const workspaces = data && Array.isArray(data.workspaces)
         ? data.workspaces.filter(function (item) { return item && typeof item.id === 'string' })
@@ -7709,9 +8156,6 @@ window.__ModuleLoader__.load({
           baseline: stats.average,
           now: now,
           fetchedAt: fetchedAt,
-          // 截断提示里的「前 N 字」来自 memory.ledger.capPerTask.summary；
-          // 宿主没给就是 0，行内退化成不带数字的说法。
-          summaryCap: summaryCapOf(memory),
           busy: busy,
           /*
            * 行内归档的「哪一行在等确认」。只传这一个字符串而不是一个查询函数：
@@ -7723,6 +8167,13 @@ window.__ModuleLoader__.load({
           continueAsk: continueAsk,
           continueDraft: continueDraft,
           continueHandlers: continueHandlers,
+          // 依赖短名表（PRD-02 §4.5）：行标签要说「等 A」「前置 A 失败」。
+          depTitles: depTitles,
+          /*
+           * 「计划已更新」：这一行的计划指纹刚和上一轮不同（见上面的 effect）。
+           * 传布尔而不是从 map 里现查：`TaskCard` 是纯展示组件，行只关心自己亮不亮。
+           */
+          planUpdated: Boolean(planUpdated[task.task_id]),
           handlers: handlers,
         })
       }
@@ -7732,7 +8183,17 @@ window.__ModuleLoader__.load({
         const rows = []
         for (const group of activeGroups.groups) {
           const progress = batchProgress(live, group.name)
-          rows.push(h(BatchHead, { key: 'batch-' + group.name, name: group.name, done: progress.done, total: progress.total }))
+          const depCounts = batchDependencyCounts(allTasks, group.name)
+          rows.push(h(BatchHead, {
+            key: 'batch-' + group.name,
+            name: group.name,
+            done: progress.done,
+            total: progress.total,
+            // 「3 个成员 · 1 个等待前置 · 1 个未执行」里的三个数字（PRD-02 §4.5）。
+            members: depCounts.total,
+            waiting: depCounts.waiting,
+            skipped: depCounts.skipped,
+          }))
           for (const task of group.members) rows.push(card(task, 'active', false))
         }
         if (activeGroups.singles.length) {
@@ -8213,7 +8674,16 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'dsh-sa-btn' + (archiveStage === 1 ? ' dsh-sa-btn-confirm' : ''),
               disabled: archiving,
-              title: archiveStage === 1 ? tr('archiveConfirm') : tr('archiveNow'),
+              /*
+               * hover 里放「归档的是什么、多久算超时」这份**说明**，不放按钮自己的名字：
+               * 名字已经在按钮上（`archiveNow` / `archiveConfirm`），悬停时更该看到的是
+               * 「点下去会发生什么、影响哪些任务」。`aria-label` 放当前动作名，
+               * 读屏用户听到的是「立即归档超时会话」而不是一整句说明。
+               */
+              title: archiveHint,
+              'aria-label': archiving
+                ? tr('archiveRunning')
+                : archiveStage === 1 ? tr('archiveConfirm') : tr('archiveNow'),
               onClick: function () {
                 if (archiving) return
                 if (archiveStage === 0) {
@@ -8357,6 +8827,7 @@ window.__ModuleLoader__.load({
             emptyHint: tr('hist.subHint'),
             selected: drawerRow ? { kind: drawerRow.kind, task_id: drawerRow.task_id } : null,
             drawerRow: drawerRow,
+            depTitles: depTitles,
             onSub: function (next) {
               setHistSub(next)
               setHistPage(0)
@@ -8662,6 +9133,21 @@ window.__ModuleLoader__.load({
         }, TargetPicker)
       })
 
+      /*
+       * 轮次分隔线：宿主在每条用户消息上方留的装饰槽（chain，会话作用域）。
+       * 它只是装饰，注册失败不该把看板与输入框控件一起拖下水，所以单独 try/catch。
+       */
+      try {
+        ctx.slots.inject('conversation.chat.user.before', function () {
+          return ctx.slots.register({
+            name: 'conversation.chat.user.before',
+            select: selectTurnDivider,
+          }, TurnDivider)
+        })
+      } catch (error) {
+        ctx.logger?.warn?.('%s 轮次分隔线注册失败: %s', 'dsh-mini-superagent:', String(error))
+      }
+
       // @ 工作区：可选能力。inputTriggers 不在（或没有 registerSource）就安静跳过。
       try {
         registerWorkspaceTrigger(ctx)
@@ -8689,7 +9175,13 @@ window.__ModuleLoader__.load({
             headers: { 'content-type': 'application/json', ...AUTH_HEADERS },
             body: JSON.stringify({
               ok: true,
-              registered: ['sidebar.panellist', 'main', 'conversation.input.left', '@workspace'],
+              registered: [
+                'sidebar.panellist',
+                'main',
+                'conversation.input.left',
+                'conversation.chat.user.before',
+                '@workspace',
+              ],
             }),
           }).catch(function () { /* 宿主不在线时忽略 */ })
         }

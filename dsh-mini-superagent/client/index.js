@@ -55,6 +55,11 @@ window.__ModuleLoader__.load({
     const TICK_MS = 1000
     /** Client locale 命名空间。 */
     const LOCALE_NS = 'dsh-mini-superagent.board'
+    /**
+     * 插件投递消息时写进 `source.kind` 的值（= 包名，见 `src/sessions.js` 的 `userMessage()`）。
+     * 客户端只用它区分「这条用户行是派发报告还是人打的字」，不解释 source 的其它字段。
+     */
+    const RELAY_SOURCE_KIND = 'dsh-mini-superagent'
 
     /* ───────────────────────── 文案 ───────────────────────── */
 
@@ -204,16 +209,6 @@ window.__ModuleLoader__.load({
        */
       frozenTag: '已冻结',
       frozenHint: '只读冻结：这条不会再更新，续跑会失败',
-      /* 报告或简报被账本截断过：只标明「被截过」，正文仍去看 dispatch_inspect。 */
-      truncatedTag: '摘要已截断',
-      truncatedHint: '原文更长，账本只保留前 {n} 字；完整正文请用 dispatch_inspect 查看',
-      truncatedHintNoLimit: '原文更长，账本只保留了开头一段；完整正文请用 dispatch_inspect 查看',
-      /*
-       * 只有 `detail` 被裁时的说法。真实账本里被裁的几乎全是 detail（入库上限 4000），
-       * 而这一行展示的 summary（上限 6000）是完整的——再喊「摘要已截断」就是在说假话。
-       * 提示语仍沿用 truncatedHint（只换上限数字）：「账本只保留前 N 字」对哪一段都成立。
-       */
-      truncatedTagDetail: '详情已截断',
       'sec.attention': '需要你处理',
       'sec.attentionEmpty': '没有需要你处理的任务',
       'sec.active': '在跑与排队',
@@ -287,6 +282,9 @@ window.__ModuleLoader__.load({
       targetAutoHint: '按关键词自动匹配一个工作区',
       targetAutoHit: '自动：{title}',
       targetAutoMiss: '自动：没有匹配的工作区',
+
+      /* 轮次分隔线（conversation.chat.user.before）：只有插件回流的报告带这一枚标签。 */
+      'divider.relay': '派发报告',
 
       /*
        * ── plans/09 P1：总览 / 效果 / 拆解 三个视图 ──
@@ -542,7 +540,7 @@ window.__ModuleLoader__.load({
       'an.kpi': '核心指标',
       'an.kpiHint': '四张卡基于同一批筛选后的任务',
       'an.proxyNote': '代理口径（待业务确认）：负责人=主会话 · 逾期=时长阈值',
-      'an.foot': '数字每 10 秒刷新；口径以「统计口径与数据可得性」为准',
+      'an.foot': '数字每 10 秒刷新；统计说明见 docs/board.md',
       'an.emptyRange': '连续 {n} 天无任务（空天补 0）',
       'an.emptyDay': '无任务（空天补 0）',
       'an.filters': '筛选条件',
@@ -606,29 +604,11 @@ window.__ModuleLoader__.load({
       'an.overdueSettled': '已结算超阈值',
       'an.overdueUnknown': '时间未知',
       'an.overdueRate': '占比',
-      'an.definitions': '统计口径与数据可得性',
-      'an.definitionsHint': '展开查看每个指标的分子、分母、时间字段与待接入字段',
-      'an.def.metric': '指标',
-      'an.def.formula': '计算口径',
-      'an.def.source': '数据字段 / 可得性',
-      'an.def.total': '任务总量',
-      'an.def.totalFormula': '筛选后任务条数；窗口按 createdAt 归属，all 时连缺创建时间的行也计入',
-      'an.def.totalSource': 'dispatch.table.tasks 全量（不受 /board 200 条上限影响）；退休留痕单列不并入',
-      'an.def.rate': '完成率',
-      'an.def.rateFormula': 'done ÷ (done+ended+failed+blocked+interrupted)；n=0 显示 —，1≤n<5 标注样本少',
-      'an.def.rateSource': 'status + COMPLETION_BASE；取消、running、queued 不进分母',
-      'an.def.status': '状态分布',
-      'an.def.statusFormula': '每个 status 的条数 ÷ 任务总量（分母含归档与取消）',
-      'an.def.statusSource': 'status 字段，直接计数',
-      'an.def.overdue': '超时代理',
-      'an.def.overdueFormula': '未结算：now − createdAt > 阈值；已结算：settle − createdAt > 阈值。默认 24h，可调',
-      'an.def.overdueSource': 'createdAt / settledAt（旧数据回退 updatedAt）；待接入：due_at',
-      'an.def.trend': '趋势变化',
-      'an.def.trendFormula': '按 UTC 自然日分桶；新建按 createdAt、完成与异常按 settledAt；环比 = 当前窗口 − 上一等长窗口',
-      'an.def.trendSource': 'createdAt / settledAt；all 窗口不提供环比；范围超过 366 天会裁剪',
-      'an.def.owner': '负责人筛选',
-      'an.def.ownerFormula': '以「派发主会话」代理负责人；缺字段归到「未标注」',
-      'an.def.ownerSource': 'parentSessionId；待接入：assignee / owner（账本目前没有人员字段）',
+      /*
+       * 口径表已从界面移除（用户原话：「没人看得懂」）：那张表写的是分子分母、
+       * 字段名与待接入字段，属于给维护者的实现说明，界面上没有人会读。
+       * 说明本身保留在 docs/board.md，只从 UI 撤掉，不删文档、不改统计。
+       */
       'an.coverage': '样本口径',
       'an.coverageText': '账本 {source} 条 · 窗口内 {inWindow} 条 · 命中 {matched} 条 · 退休留痕 {retired} 条（不并入）',
       'an.warn.missingTimes': '有任务缺创建/结算时间，趋势可能低估',
@@ -757,10 +737,6 @@ window.__ModuleLoader__.load({
       unknownReadHint: 'The follow-up was delivered but never confirmed read; we no longer know whether the worker saw it',
       frozenTag: 'frozen',
       frozenHint: 'Frozen read-only: it will not change again, and a retry will fail',
-      truncatedTag: 'truncated',
-      truncatedHint: 'The original is longer; the ledger keeps only the first {n} characters. Use dispatch_inspect for the full text',
-      truncatedHintNoLimit: 'The original is longer; the ledger keeps only the opening part. Use dispatch_inspect for the full text',
-      truncatedTagDetail: 'detail truncated',
       'sec.attention': 'Needs you',
       'sec.attentionEmpty': 'Nothing needs you right now',
       'sec.active': 'Running and queued',
@@ -830,6 +806,7 @@ window.__ModuleLoader__.load({
       targetAutoHint: 'Pick a workspace from the typed keywords',
       targetAutoHit: 'Auto: {title}',
       targetAutoMiss: 'Auto: no workspace matches',
+      'divider.relay': 'Dispatch report',
 
       /* plans/09 P1：与上面 TEXT 里新增的键一一对应（缺一条就会在英文界面退回中文）。 */
       'view.tabs': 'Board view',
@@ -1073,7 +1050,7 @@ window.__ModuleLoader__.load({
       'an.kpi': 'Key metrics',
       'an.kpiHint': 'All four cards use the same filtered task set',
       'an.proxyNote': 'Proxies (pending confirmation): owner = parent session · overtime = duration threshold',
-      'an.foot': 'Refreshes every 10s; definitions are in "Metric definitions and data availability"',
+      'an.foot': 'Refreshes every 10s; statistical notes live in docs/board.md',
       'an.emptyRange': '{n} days with no tasks (filled with 0)',
       'an.emptyDay': 'No tasks (filled with 0)',
       'an.filters': 'Filters',
@@ -1137,29 +1114,7 @@ window.__ModuleLoader__.load({
       'an.overdueSettled': 'Settled past threshold',
       'an.overdueUnknown': 'Unknown time',
       'an.overdueRate': 'Share',
-      'an.definitions': 'Metric definitions and data availability',
-      'an.definitionsHint': 'Expand for each metric numerator, denominator, time field and missing field',
-      'an.def.metric': 'Metric',
-      'an.def.formula': 'Definition',
-      'an.def.source': 'Fields / availability',
-      'an.def.total': 'Total tasks',
-      'an.def.totalFormula': 'Count of filtered tasks; window uses createdAt; "all" also includes rows without a creation time',
-      'an.def.totalSource': 'Full dispatch.table.tasks (not capped by the 200-row /board snapshot); retired traces listed separately',
-      'an.def.rate': 'Completion rate',
-      'an.def.rateFormula': 'done ÷ (done+ended+failed+blocked+interrupted); n=0 shows —, 1≤n<5 is flagged as a low sample',
-      'an.def.rateSource': 'status + COMPLETION_BASE; cancelled, running and queued are excluded',
-      'an.def.status': 'Status distribution',
-      'an.def.statusFormula': 'Count per status ÷ total tasks (archived and cancelled included in the denominator)',
-      'an.def.statusSource': 'status field, counted directly',
-      'an.def.overdue': 'Overtime proxy',
-      'an.def.overdueFormula': 'Unsettled: now − createdAt > threshold; settled: settle − createdAt > threshold. Default 24h, adjustable',
-      'an.def.overdueSource': 'createdAt / settledAt (older rows fall back to updatedAt); missing: due_at',
-      'an.def.trend': 'Trend',
-      'an.def.trendFormula': 'UTC day buckets; created by createdAt, done/problems by settledAt; delta = current window − previous equal window',
-      'an.def.trendSource': 'createdAt / settledAt; no comparison for "all"; ranges longer than 366 days are clipped',
-      'an.def.owner': 'Owner filter',
-      'an.def.ownerFormula': 'Parent session is used as an owner proxy; missing values are grouped as "Not specified"',
-      'an.def.ownerSource': 'parentSessionId; missing: assignee / owner (the ledger has no person field today)',
+      /* 与中文侧同步：口径表已从界面移除，说明保留在 docs/board.md。 */
       'an.coverage': 'Sample coverage',
       'an.coverageText': 'ledger {source} · in window {inWindow} · matched {matched} · retired traces {retired} (excluded)',
       'an.warn.missingTimes': 'Some tasks lack creation/settlement times; the trend may be underestimated',
@@ -1485,35 +1440,6 @@ window.__ModuleLoader__.load({
       const sinceAt = since ? Date.parse(since) : (days > 0 ? Date.now() - days * 86400000 : NaN)
       if (!Number.isFinite(sinceAt) && !(tasks > 0)) return null
       return { days: days, tasks: tasks, sinceAt: sinceAt }
-    }
-
-    /**
-     * 报告摘要的账本上限（字数），来自 `memory.ledger.capPerTask.summary`。
-     *
-     * 只用来把截断提示写成「前 N 字」。拿不到就返回 0，调用方退化成不带数字的
-     * 说法——宿主没告诉我们上限时，编一个「6000 字」比不说更糟。
-     */
-    function summaryCapOf(memory) {
-      const cap = memory && typeof memory === 'object' && memory.ledger && typeof memory.ledger === 'object'
-        ? memory.ledger.capPerTask
-        : null
-      if (!cap || typeof cap !== 'object') return 0
-      return Math.max(0, num(cap.summary, 0))
-    }
-
-    /**
-     * 报告 `detail` 的账本上限（字数），来自 `memory.ledger.capPerTask.detail`。
-     *
-     * 为什么单列：被裁的段不同，「前 N 字」里的 N 也不同。账本实际裁掉的是
-     * `detail`（上限 4000）时提示却写「前 6000 字」，等于把另一个上限安到它头上——
-     * 用户拿着这个数去数正文，永远对不上。拿不到就返回 0，退化成不带数字的说法。
-     */
-    function detailCapOf(memory) {
-      const cap = memory && typeof memory === 'object' && memory.ledger && typeof memory.ledger === 'object'
-        ? memory.ledger.capPerTask
-        : null
-      if (!cap || typeof cap !== 'object') return 0
-      return Math.max(0, num(cap.detail, 0))
     }
 
     /**
@@ -2574,17 +2500,6 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-state-warn-surface, rgba(180,83,9,.12));
   color: var(--dsw-alias-state-warn-primary, #b45309);
 }
-/* 截断标记：贴着报告数/摘要，比正文弱一档，但点得出「这里被切过」。 */
-.dsh-sa-truncated {
-  flex: none;
-  padding: 0 4px;
-  border-radius: var(--dsw-radius-sm, 4px);
-  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14));
-  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
-  font-size: var(--dsw-font-xxxs-11, 11px);
-  white-space: nowrap;
-  cursor: help;
-}
 /* ── 面板改版：效果数字、并发条、分节、批次、原因行 ── */
 .dsh-sa-stats {
   display: flex;
@@ -3369,15 +3284,7 @@ window.__ModuleLoader__.load({
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.dsh-sa-an-defs { margin: 8px 16px 0; font-size: var(--dsw-font-xxxs-11, 11px); }
-.dsh-sa-an-defs summary {
-  cursor: pointer;
-  color: var(--dsw-alias-label-secondary, inherit);
-  padding: 4px 0;
-}
-.dsh-sa-an-defs-hint { color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9)); padding: 0 0 6px; }
-.dsh-sa-an-defs .dsh-sa-tablewrap { padding: 0; }
-.dsh-sa-an-defs-cell { text-align: left !important; white-space: normal !important; overflow-wrap: anywhere; }
+/* 口径表样式随区块一起删掉：界面上已经没有那张给维护者看的表。 */
 .dsh-sa-an-foot {
   display: flex;
   gap: 8px;
@@ -4046,6 +3953,102 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ───────────────────────── 轮次分隔线 ───────────────────────── */
+
+    /**
+     * 会话流里的「轮次分隔线」。
+     *
+     * 挂 `conversation.chat.user.before`（chain，会话作用域）：宿主在每条用户消息气泡
+     * **上方**留了这一个装饰槽，选择器返回非空就由我们接管那一格。
+     *
+     * 为什么需要：长会话里 assistant 的步骤、工具卡片、回流报告连成一片，滚动时找不到
+     * 「这一轮是从哪句话开始的」。这里给每一轮画一条横线，作为可见的起点。
+     *
+     * 不猜业务语义：只看 `owner.kind`（宿主已经把 steering 行排除在外）和消息 `source.kind`
+     * ——本插件自己投递的报告（`src/sessions.js` 里 `source.kind` = 包名）多一枚「派发报告」
+     * 标签，其余用户输入一律是同样的一条线。`source` 的其它字段一概不读，也不依赖任何
+     * 会话投影：拿不到就没有标签，绝不因此不画线。
+     */
+    const DIVIDER_SELECTED_USER = Object.freeze({ relay: false })
+    const DIVIDER_SELECTED_RELAY = Object.freeze({ relay: true })
+
+    /** chain 槽的选择器：只接用户行；返回值同时告诉组件「这一行是不是派发报告」。 */
+    function selectTurnDivider(owner) {
+      if (!owner || owner.kind !== 'user') return null
+      const source = owner.source && typeof owner.source === 'object' ? owner.source : null
+      return source && source.kind === RELAY_SOURCE_KIND ? DIVIDER_SELECTED_RELAY : DIVIDER_SELECTED_USER
+    }
+
+    /**
+     * 分隔线样式。用的是宿主主题 token（`--dsw-alias-*`），明暗两套自动跟随；
+     * 写死的颜色只作 token 缺失时的兜底。类名仍在 `dsh-sa-` 前缀下，
+     * 随组件内的 <style> 一起卸载，不写全局样式表。
+     */
+    const DIVIDER_STYLE = `
+.dsh-sa-divide {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 22px 4px 12px;
+  pointer-events: none;
+  user-select: none;
+}
+.dsh-sa-divide-line { flex: 1 1 auto; height: 1px; min-width: 12px; }
+.dsh-sa-divide-line-lead {
+  background: linear-gradient(to right, transparent, var(--dsw-alias-border-l2, rgba(127,127,127,.45)));
+}
+.dsh-sa-divide-line-trail {
+  background: linear-gradient(to left, transparent, var(--dsw-alias-border-l2, rgba(127,127,127,.45)));
+}
+.dsh-sa-divide-mark {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 1.5px;
+  transform: rotate(45deg);
+  background: var(--dsw-alias-label-secondary, #6b6b6b);
+  opacity: .45;
+}
+.dsh-sa-divide-relay .dsh-sa-divide-line-lead {
+  background: linear-gradient(to right, transparent, var(--dsw-alias-brand-primary, #4d6bfe));
+  opacity: .55;
+}
+.dsh-sa-divide-relay .dsh-sa-divide-line-trail {
+  background: linear-gradient(to left, transparent, var(--dsw-alias-brand-primary, #4d6bfe));
+  opacity: .55;
+}
+.dsh-sa-divide-tag {
+  flex: 0 0 auto;
+  padding: 2px 9px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+`
+
+    /** 一条轮次分隔线。`matched` 由 `selectTurnDivider` 给出；缺失时按普通用户轮次画。 */
+    function TurnDivider(props) {
+      const relay = Boolean(props && props.matched && props.matched.relay)
+      return h(
+        'div',
+        {
+          className: relay ? 'dsh-sa-divide dsh-sa-divide-relay' : 'dsh-sa-divide',
+          'aria-hidden': 'true',
+          'data-divider': relay ? 'relay' : 'turn',
+        },
+        h('style', { key: 'style' }, DIVIDER_STYLE),
+        h('span', { key: 'lead', className: 'dsh-sa-divide-line dsh-sa-divide-line-lead' }),
+        relay
+          ? h('span', { key: 'tag', className: 'dsh-sa-divide-tag' }, tr('divider.relay'))
+          : h('span', { key: 'mark', className: 'dsh-sa-divide-mark' }),
+        h('span', { key: 'trail', className: 'dsh-sa-divide-line dsh-sa-divide-line-trail' }),
+      )
+    }
+
     /* ───────────────────────── 主面板 ───────────────────────── */
 
     /** 顶部的一个指标。 */
@@ -4286,24 +4289,6 @@ window.__ModuleLoader__.load({
        * 语义不丢：归档行的 hover 里仍然会写「只读冻结，续跑会失败」。
        */
       const frozen = frozenAt && !archived
-      /*
-       * 「摘要已截断」：宿主只给布尔（`has_truncated`），正文不出快照。
-       * 上限数值来自 memory 块（`ledger.capPerTask.summary`），拿不到就退化成
-       * 不带数字的说法——**不要**编一个「前 6000 字」出来。
-       *
-       * `truncated_fields`（新宿主才有）说明被裁的是哪一段：真实账本里被裁的几乎都是
-       * `detail`，而这一行展示的 summary 是完整的。只有 summary / headline / brief
-       * 被裁时才能说「摘要已截断」，否则说「详情已截断」——旧宿主不给字段名时按摘要
-       * 处理（与 0.8.x 的行为一致，不能让旧宿主突然少一个标记）。
-       */
-      const truncatedFields = Array.isArray(task.truncated_fields)
-        ? task.truncated_fields.filter((field) => typeof field === 'string')
-        : []
-      const truncated = Boolean(task.has_truncated)
-      const summaryTruncated = truncatedFields.length === 0
-        || truncatedFields.some((field) => field === 'summary' || field === 'headline' || field === 'brief')
-      const summaryCap = num(props.summaryCap, 0)
-      const detailCap = num(props.detailCap, 0)
       /*
        * 归档行**不可点**。根因不在这一行，而在宿主的导航策略：`uiWorkspace.openSession`
        * 会把主视图换成那个会话，而 ui-workspace 的 `watchNavigation` 里有一条
@@ -4578,32 +4563,11 @@ window.__ModuleLoader__.load({
         : null
 
       /*
-       * 截断标记：宿主只投影布尔 `has_truncated`（一位小标记，不搬正文）与被裁的段名
-       * `truncated_fields`。有上限数值就写「前 N 字」，没有就退化成不带数字的说法；
-       * N 取**被裁那一段**的上限（详情走 detail，其余走 summary），
-       * 否则提示里的数字和账本实际裁掉的长度对不上。
-       * 它跟报告数 / 摘要放在同一行，因为「被切掉的是哪段」正是那一行的内容。
+       * 不再渲染「摘要已截断 / 详情已截断」标记。原因只有一句：快照本来就不带正文，
+       * 点进去也看不到被裁掉的部分，这个标记**无法导向任何可读内容**，只会让人以为
+       * 自己漏看了什么。后端仍投影 `has_truncated` / `truncated_fields`（其他消费者
+       * 可能读得到），但界面不再展示；要确认被裁情况请用 `dispatch_inspect`。
        */
-      const truncCap = summaryTruncated ? summaryCap : detailCap
-      const truncHint = truncCap > 0
-        ? fill(tr('truncatedHint'), { n: truncCap })
-        : tr('truncatedHintNoLimit')
-      const truncMark = truncated
-        ? h(
-            'span',
-            {
-              key: 'truncated',
-              className: 'dsh-sa-truncated',
-              title: truncHint,
-              'aria-label': truncHint,
-              'data-truncated': 'true',
-              // 观测口径：哪一段被裁，冒烟与排障直接读这个属性。
-              'data-truncated-scope': summaryTruncated ? 'summary' : 'detail',
-            },
-            tr(summaryTruncated ? 'truncatedTag' : 'truncatedTagDetail'),
-          )
-        : null
-
       const tags = [
         attempt > 1
           ? h('span', { key: 'attempt', className: 'dsh-sa-tag' }, tr('attemptPrefix') + attempt + tr('attemptSuffix'))
@@ -4737,7 +4701,6 @@ window.__ModuleLoader__.load({
               reportCount > 0
                 ? h('span', { key: 'dense-count', className: 'dsh-sa-dense-meta' }, tr('reports') + ' ' + reportCount)
                 : null,
-              truncMark,
             ]
           : h(
               'div',
@@ -4757,7 +4720,6 @@ window.__ModuleLoader__.load({
                 reportLine,
               ),
               reportAgo ? h('span', { key: 'report-at', className: 'dsh-sa-meta' }, reportAgo) : null,
-              truncMark,
             ),
         typeof task.error === 'string' && task.error && props.variant !== 'attention'
           ? h('div', { key: 'error', className: 'dsh-sa-errorline', title: task.error }, task.error)
@@ -6417,15 +6379,6 @@ window.__ModuleLoader__.load({
       'invalid-overdue-hours': 'an.warn.invalidOverdueHours',
       degraded: 'an.warn.degraded',
     }
-    /** 指标口径表：指标 / 分子分母 / 数据可得性，三列逐字来自统计口径。 */
-    const AN_DEFINITIONS = [
-      ['an.def.total', 'an.def.totalFormula', 'an.def.totalSource'],
-      ['an.def.rate', 'an.def.rateFormula', 'an.def.rateSource'],
-      ['an.def.status', 'an.def.statusFormula', 'an.def.statusSource'],
-      ['an.def.overdue', 'an.def.overdueFormula', 'an.def.overdueSource'],
-      ['an.def.trend', 'an.def.trendFormula', 'an.def.trendSource'],
-      ['an.def.owner', 'an.def.ownerFormula', 'an.def.ownerSource'],
-    ]
 
     /** 数字：非法值给 em dash，不把「算不出来」画成 0。 */
     function anNum(value) {
@@ -6509,34 +6462,6 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dsh-sa-an-section-hint' }, props.hint || ''),
         ),
         props.children || null,
-      )
-    }
-
-    /** 口径表：默认收起，但永远在页面上，不是一个藏进 tooltip 的链接。 */
-    function AnDefinitions() {
-      return h(
-        'details',
-        { className: 'dsh-sa-an-defs', 'data-an-defs': 'true' },
-        h('summary', null, tr('an.definitions')),
-        h('div', { className: 'dsh-sa-an-defs-hint' }, tr('an.definitionsHint')),
-        h(
-          'div',
-          { className: 'dsh-sa-tablewrap' },
-          h(
-            'table',
-            { className: 'dsh-sa-table' },
-            h('thead', null, h('tr', null,
-              h('th', { scope: 'col' }, tr('an.def.metric')),
-              h('th', { scope: 'col' }, tr('an.def.formula')),
-              h('th', { scope: 'col' }, tr('an.def.source')),
-            )),
-            h('tbody', null, AN_DEFINITIONS.map(function (row, index) {
-              return h('tr', { key: 'def-' + index }, row.map(function (key, column) {
-                return h('td', { key: column, className: 'dsh-sa-an-defs-cell', scope: column === 0 ? 'row' : undefined }, tr(key))
-              }))
-            })),
-          ),
-        ),
       )
     }
 
@@ -6931,7 +6856,6 @@ window.__ModuleLoader__.load({
         scopeLine,
         strips.length ? strips : null,
         content,
-        AnDefinitions(),
         h('div', { className: 'dsh-sa-an-foot' }, tr('an.foot')),
       )
     }
@@ -7767,10 +7691,6 @@ window.__ModuleLoader__.load({
           baseline: stats.average,
           now: now,
           fetchedAt: fetchedAt,
-          // 截断提示里的「前 N 字」来自 memory.ledger.capPerTask.{summary,detail}；
-          // 宿主没给就是 0，行内退化成不带数字的说法。
-          summaryCap: summaryCapOf(memory),
-          detailCap: detailCapOf(memory),
           busy: busy,
           /*
            * 行内归档的「哪一行在等确认」。只传这一个字符串而不是一个查询函数：
@@ -8748,6 +8668,21 @@ window.__ModuleLoader__.load({
         }, TargetPicker)
       })
 
+      /*
+       * 轮次分隔线：宿主在每条用户消息上方留的装饰槽（chain，会话作用域）。
+       * 它只是装饰，注册失败不该把看板与输入框控件一起拖下水，所以单独 try/catch。
+       */
+      try {
+        ctx.slots.inject('conversation.chat.user.before', function () {
+          return ctx.slots.register({
+            name: 'conversation.chat.user.before',
+            select: selectTurnDivider,
+          }, TurnDivider)
+        })
+      } catch (error) {
+        ctx.logger?.warn?.('%s 轮次分隔线注册失败: %s', 'dsh-mini-superagent:', String(error))
+      }
+
       // @ 工作区：可选能力。inputTriggers 不在（或没有 registerSource）就安静跳过。
       try {
         registerWorkspaceTrigger(ctx)
@@ -8775,7 +8710,13 @@ window.__ModuleLoader__.load({
             headers: { 'content-type': 'application/json', ...AUTH_HEADERS },
             body: JSON.stringify({
               ok: true,
-              registered: ['sidebar.panellist', 'main', 'conversation.input.left', '@workspace'],
+              registered: [
+                'sidebar.panellist',
+                'main',
+                'conversation.input.left',
+                'conversation.chat.user.before',
+                '@workspace',
+              ],
             }),
           }).catch(function () { /* 宿主不在线时忽略 */ })
         }
