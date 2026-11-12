@@ -75,10 +75,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.8.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.9.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.8.0`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.9.0`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
@@ -390,6 +390,23 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 
 完整契约、失败降级与限制见 [docs/composer.md](docs/composer.md)。
 
+## 会话轮次分隔线
+
+0.9.0 起，会话流里**每条用户消息上方**多一条分隔线，长会话滚动时能看见「这一轮从哪开始」。
+
+- 挂 `conversation.chat.user.before`（chain 槽，会话作用域，只声明一个 `select`）；宿主对每条用户消息
+  调用一次选择器，返回非空即由插件渲染那一格。**不新增 Chat 节点类型、不改 `conversation.chat.flow`、
+  不动 `dsh.client`**，所以不需要重启宿主，刷新页面即生效。
+- 选择器只接 `owner.kind === 'user'`；`steering` 行宿主本来就不渲染这个槽（返回 `null` 只是把话说清楚）。
+- 两种外观，判据只有一条：消息 `source.kind === 'dsh-mini-superagent'`（`src/sessions.js` 的
+  `userMessage()` 写的就是这个值）→ 细线换成品牌色 + 中间一枚「派发报告」标签；其余用户输入 →
+  两侧渐隐细线 + 中心小菱形，没有文字。`source` 的其它字段一概不解释，**拿不到 source 时照常画线**。
+- 纯装饰：不读会话投影、不发请求、不碰别家 DOM、不改变任何排版尺寸；`pointer-events: none`、
+  样式走 `--dsw-alias-*` token（明暗自动跟随），类名在 `dsh-sa-` 前缀下，随组件内的 `<style>` 卸载。
+- 注册单独 `try/catch`：这条路失败只丢装饰（记一条 warn），看板、输入框控件与 `@` 工作区不受影响。
+- 限制：分隔线只标示「新的一轮开始」，不带轮次编号——`user.before` 只给 `source` 与 `kind`，
+  没有「这是第几轮」的权威字段，插件不自己数（虚拟化列表里计数会错）。
+
 ---
 
 ## 配置
@@ -636,6 +653,7 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 | 看板 UI：归档视图 / 工作区筛选 / 批次聚合 / 跳转会话 | 0.5.0 | ⚠️ 仅代码审查；接口与快照由单测覆盖，浏览器渲染未验证 |
 | 输入框派发目标选择器、`@` 工作区 | 0.5.0 | ⚠️ 仅代码审查；`/board/target` 与 `targets` 快照有单测覆盖，界面未验证 |
 | 全量单测（`npm test`） | 0.5.0 | ✅ 50 pass / 0 fail（tasks 13 + board 26 + workspaces 11） |
+| 会话轮次分隔线（`conversation.chat.user.before`） | 0.9.0 | ✅ 注册在真实页面生效：`Slots.listSubTree` 的 occupants 出现 `dsh-mini-superagent`（`active: true`），`GET /board/selfcheck` 的 `client.ready.registered` 含 `conversation.chat.user.before`；**线的粗细/间距/主题对比度未截图目视**（ego 浏览器无 GUI 的登录态，打不开 127.0.0.1:10147），见下方「未实测」 |
 
 0.2.0 那组最后一条（并发排队）同时是修复验证：0.1.0 只在派发与插件加载时推进队列，结算后不会补 `pump()`，
 并发位满时后面的任务会一直 `queued`。这个问题是整理代码时被测出来的，修法与依据见 [docs/architecture.md](docs/architecture.md) 的「pump 的触发点」。
@@ -653,6 +671,11 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 - `not-listed` 的真实错误码与错误文本。
 
 装完/更新后需要刷新一次 GUI 页面，看板、选择器与 `@` 才会挂载。
+
+**0.9.0 的分隔线只验到「注册成功」**：真实页面的槽 occupants 与 `client.ready.registered` 都对上了，
+`scripts/client-smoke.mjs` 也把组件树跑了一遍；但**没有在真实窗口里截图确认观感**——ego 浏览器是另一套
+profile，打不开带登录态的 GUI。「线是不是太淡」「22px 上间距在真实行距里会不会显得空」这两条要靠眼睛，
+改 `DIVIDER_STYLE` 里两个数值即可，不涉及注册路径。
 
 `test/tasks.test.js` 覆盖任务表纯逻辑，`test/board.test.js` 覆盖快照与路由（用假的 req/res，不需要起 HTTP 服务），
 `test/workspaces.test.js` 覆盖日期键、安全目录名、根目录与工作区解析顺序（用假注册表）；它们都不是端到端实测的替代。

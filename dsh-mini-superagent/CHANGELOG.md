@@ -4,6 +4,27 @@
 
 ## 未发布
 
+### 新增：会话轮次分隔线（0.9.0）
+
+长会话里最缺的不是状态，而是**锚点**：assistant 的步骤、工具卡片与回流报告连成一片，滚动时
+找不到「这一轮是从哪句话开始的」。0.9.0 在每个用户消息上方画一条分隔线。
+
+- 挂 `conversation.chat.user.before`（chain，会话作用域）：宿主对每条用户消息调用一次 `select`，
+  返回非空即由插件渲染那一格。**没有新增 Chat 节点类型**（`conversation.chat.node` 的 key 是宿主
+  闭集），也不改 `conversation.chat.flow`、不动 `dsh.client`，所以刷新页面即生效、不需要重启。
+- 两种外观，判据只有 `source.kind`：等于 `dsh-mini-superagent`（`src/sessions.js` 的
+  `userMessage()` 写的就是它）→ 品牌色细线 + 「派发报告」标签；其余用户输入 → 渐隐细线 + 中心菱形，
+  无文字。`source` 的其它字段不解释；**没有 source 也照常画线**（绝不让缺字段吃掉分隔线）。
+- 纯装饰：不读会话投影、不发请求、`pointer-events: none`、不改变排版尺寸；样式走 `--dsw-alias-*`
+  token，类名仍在 `dsh-sa-` 前缀下，随组件内 `<style>` 卸载。
+- 注册单独 `try/catch` + warn：这条路失败只丢装饰，看板、输入框控件、`@` 工作区不受影响
+  （`client-ready` 自报的 `registered` 里也加了这一格，便于事后核对到底注册上了没有）。
+- 文案：`divider.relay`（zh/en 各一条），沿用 `TEXT` / `TEXT_EN` 成对硬编码的既有约定。
+- 验收：`scripts/client-smoke.mjs` 新增 10 条断言（注册一次 / 不接管 steering / 普通线与报告线分开 /
+  无 source 也画线 / 样式走 token / 标签文案），当前 440 项全过；`npm test` 593 项全过。
+- 限制：只标示「新的一轮开始」，不带轮次编号——`user.before` 的 owner props 只有 `source` 与 `kind`，
+  没有「第几轮」的权威字段；虚拟化列表里自己数会错，所以不数。
+
 ### 新增：任务级计划透出（PRD-01）
 
 worker 可以在报告里写「这条任务分几步、走到哪一步」：`dispatch_report` 新增可选 `plan`，
