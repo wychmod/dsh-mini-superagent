@@ -61,7 +61,7 @@ ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直�
 
 把这句话交给 DSH 里的任意会话：
 
-> 用 plugin_manager 的 install_bundle，把 `dsh-mini-superagent` 这个目录安装成 bundle，装完确认 9 个 `dispatch_*` 工具已注册。
+> 用 plugin_manager 的 install_bundle，把 `dsh-mini-superagent` 这个目录安装成 bundle，装完确认 10 个 `dispatch_*` 工具已注册。
 
 ### 方式二：手动
 
@@ -78,7 +78,7 @@ dispatch_list()
 → {"version":"0.8.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 是 `0.5.0` 说明跑的是这一版；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.8.0`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
@@ -331,6 +331,25 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 同时给 `workspace` 和 `cwd` 时**工作区路径优先**，`cwd` 被忽略。完全不指定 `workspace` 时：
 先看输入框里选的「派发目标」（见下一节），没有目标才沿用调用者的工作目录。
 先用 `dispatch_workspaces` 看有哪些工作区。
+
+### 计划透出与批次依赖
+
+三件事名字不同、解决的问题也不同，别混：
+
+| 能力 | 解决什么 | 入口 |
+| --- | --- | --- |
+| 计划透出（PRD-01） | worker 自己说「这条任务分几步、走到哪一步」：看板任务行显示 `2/5`，抽屉显示当前步骤 | `dispatch_report` 的可选 `plan`（`[{text,status}]`，整版替换；上限 `maxPlanSteps` 12 步 / `maxPlanStepChars` 120 字，超限截断并返回 `plan_truncated`） |
+| 批次依赖（PRD-02） | 任务之间**有先后关系**：后一步在前一步结算前一直排队（`queued` + `blockedBy`），不占并发位；前置失败则连带取消并写 `cancel_reason` / `error_code` | `dispatch_launch({ depends_on })`；`dispatch_launch_many` 里用 `depends_on_index` 指批内下标 |
+| 复用会话（`handoff_from`） | 上一条已经做完，但**结论与上下文还要接着用**：新建一条任务、沿用来源子会话 | `dispatch_launch({ handoff_from, handoff_reason })` |
+
+- 三者各自独立：计划只改账本（`task.plan`），**不新增会话消息**、不参与投递/合并判定；依赖是**任务开始前**
+  判定（不是派发时），不新增任务状态（等待仍是 `queued`）；`handoff_from` 处理「同一条线索接着做」，不表达先后。
+- 要表达「等它做完再做」用 `depends_on`；要在做完之后**接着同一段上下文**再派活，用 `handoff_from`。
+  两者可以同时用：先声明依赖，等前置结算后再派一条带 `handoff_from` 的新任务。
+- 计划与依赖都不改变「不打扰会话」的前提：`progress` 仍默认只入库，看板上的计划进度不会让主会话多收消息。
+- 已知缺口：计划更新后的「计划已更新」提示没做；`card()` / `detail()` 都不投影 `task.plan`，要看完整步骤
+  目前只能读账本；`dispatch_message` 能绕过依赖把等待中的任务唤醒。逐条见 [../plans/README.md](../plans/README.md)
+  的「PRD-01 / PRD-02 的已知限制」。
 
 ### 自动归档
 
@@ -585,6 +604,8 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 - **归档只收起会话**：不删目录、不删任务、不删报告；归档失败会每轮巡检重试，失败原因只在看板快照的 `archive_error` 里，`dispatch_list` 看不到。
 - **界面未在真浏览器里跑过**：控件对齐/截断、弹层翻转与边缘夹取、`@` 与官方 `@reference` 混排、chip 刷新后恢复、
   `openSession` 成功后视图切换、深浅主题对比度、`not-listed` 错误码，全部未验证（见验证记录）。
+- **依赖顺序对投递同样生效**：对仍在等前置（`depends_on` 未满足、停在 `queued`）的任务，`dispatch_message` 与续派
+  会直接报 `dispatch/conflict`，不再把它拉回 `running`；要放弃它请用 `dispatch_cancel`。`dispatch_wait` 只等结算，不受影响。
 
 ---
 

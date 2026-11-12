@@ -4,6 +4,27 @@
 
 ## 未发布
 
+### 新增：任务级计划透出（PRD-01）
+
+worker 可以在报告里写「这条任务分几步、走到哪一步」：`dispatch_report` 新增可选 `plan`，
+看板据此在任务行显示 `2/5`、在抽屉里显示当前步骤。**计划只写 `task.plan`，不写进每条 report entry**
+——`MAX_REPORTS = 50`，12 步 × 50 条会把账本放大一个量级，而看板只需要「最新一版」，历史计划没有决策价值。
+
+- 形状 `[{ text, status }]`，`status ∈ pending | doing | done`（未知值按 `pending`，空文案丢弃，
+  完全相同的文案最多留 3 条）；上限由新增配置 `maxPlanSteps`（默认 12）/ `maxPlanStepChars`（默认 120）
+  决定，超限**截断不报错**，返回值给 `plan_accepted`（这一版是否落地）与 `plan_truncated`（是否因超限截断）。
+- **整版替换**，不做增量合并（worker 不需要维护 step id）；内容与当前计划完全相同视为幂等，
+  不刷新 `planUpdatedAt`、不额外写盘。
+- **不参与投递 / 合并判定**：`projectReport()` 不读 `plan`，准入（`admissionOf()`）也不看它，
+  所以**不新增任何会话消息**——计划只是账本上的附属事实。
+- 看板任务行显示 `plan_done / plan_total`，抽屉显示 `plan_current`（优先取 `doing`，没有就取第一条
+  `pending`；全 `done` 时是空串）；**已结算任务不下发 `plan_*`**（显示优先级：终态 > 计划 > 报告数），
+  计划本身仍留在账本里。
+- 终态报告可以带计划：先应用、再结算，结算后冻结（`#applyPlan()` 对 `queued` / 终态返回 `false`，
+  迟到的 `progress` 带计划只会拿到 `plan_accepted:false`）。
+- 尚未实现：PRD-01 §6 的「计划更新后显示『计划已更新』一次」——当前客户端没有这个提示，
+  缺口与验收落点见 [`../plans/README.md`](../plans/README.md)。
+
 ### 新增：批次依赖（`depends_on`，PRD-02）
 
 后一步可以等前一步：`dispatch_launch` 增 `depends_on`，`dispatch_launch_many` 的 item 增
@@ -52,6 +73,35 @@
   各加一条 `emptyArchivedHint`。
 - 这是 **bundle 配置层**的改动：配置在宿主启动时读取，运行中的进程不会自动重读，
   因此需要重启宿主后 `dispatch_workspaces` 的 `archive_after_hours` 才会变成 168。
+
+### 修复：截断标记误报、热重载误判与依赖准入绕过（2026-11-12）
+
+三条都是「语义前提错了，代码按前提执行得很正确」，根因与修法分别记在下面。
+
+**截断标记误报「摘要已截断」（`src/board.js`）**
+
+- 根因：判据只看 `entry.truncated` 的真假，把「`detail` 被裁」也算成「摘要被裁」。真实账本里 32 条被裁条目
+  **100% 只裁了 `detail`**（入库上限 4000），而看板行展示的 `summary`（上限 6000）一条都没被裁过——于是每一行都在说
+  「摘要已截断」，一句没发生的话。
+- 修法：`boardTask()` 新增 `truncated_fields` 投影（`summary` / `headline` / `detail` / `brief`，按展示顺序去重），
+  界面据此分段提示；`has_truncated` 原样保留，旧客户端行为不变。
+
+**热重载把仍在跑的 worker 判成 `interrupted`（回归 t-mwcbmq2a-2，`src/dispatch.js`）**
+
+- 根因：`restore()` 的前提是「进程重启 ⇒ 没有活的 worker」，而**插件热重载**只换插件实例、宿主的子会话与它正在跑的
+  回合都还在。于是 `running` 被改写成 `interrupted`（并写下 `settledAt`），worker 之后报的 `done` 被
+  `TaskTable.settle()` 的幂等挡掉，账本永远停在「已中断」；完成率、并发位、看板全错，后继还会被
+  `#failDependents()` 连带取消。
+- 修法：新增 `#liveWorker()`（只问 `ctx.agents` 活引用，活会话且不是 `idle` 才保留），恢复时不再判死；报告到达时
+  撤回那条假定的 `interrupted` 再走正常结算；存量数据按「晚于 `settledAt` 的终态报告」在恢复时自愈，结算时刻取报告自己的时刻。
+
+**依赖准入被 `dispatch_message` 绕过（`src/dispatch.js` / `src/tools.js`）**
+
+- 根因：`message()` 只挡 `cancelled` / `archived`，不看 `blockedBy`；而它后面的 `transition(force)` 会把任务直接改成
+  `running` 并摘出队列——用户看到「还在等 A，B 却开跑了」，声明好的先后顺序被一条追问打乱。
+- 修法：投递前用 `#blockedStateOf()` 现算一次，被挡就以 `dispatch/conflict` 拒绝，状态与队列原样不动；
+  `dispatch_message`、`dispatch_launch({continue_task_id})` 与看板续派三条入口同时受约束（`dispatch_wait` 只等结算，不受影响）。
+  工具描述与 `docs/tools.md` 的错误表同步说明。
 
 ### 修复：后台活生命周期、账本落盘与契约一致性（评估 P0）
 
