@@ -10,9 +10,16 @@
  * - P1-3 自检：`selfCheck().memory` 的五项与 P1 新增的两块都等于实际值。
  *
  * 全部离线（假宿主 + mkdtemp）。时间语义上**不用真实等待去碰运气**：
- * 合并窗口要么配小（几毫秒）后用 `flushNotices()` 精确收尾，要么直接把
- * `noticeMergeWindowMs` 配成 0 来验证「关掉就走旧路径」。唯一真实等待的地方
- * 是「窗口到点会自己发」那条，等的上限是配置的 30ms，不是默认的 1500ms。
+ * 合并窗口全程跑在可控定时器上（`useFakeTimers()`），「什么时候到期」由测试
+ * 用 `tick(n)` 决定，真实时间再久窗口也不会自己到点；需要「不等到点就收尾」的
+ * 用例显式调 `flushNotices()`。`noticeMergeWindowMs: 0` 则用来验证「关掉就走
+ * 旧路径」。
+ *
+ * 为什么不能用「把窗口配大一点」或「加 sleep」兜住：合并窗口之所以红，是因为
+ * 每条 `report()` 都要 `await persistCritical()` 落一次盘，全量并发时一次写盘
+ * 就可能超过 30ms——窗口在三条进度攒齐之前自然到期。把窗口调大只是把这条
+ * 边界推到「更慢一点的机器」，sleep 则把不确定性原样留给下一次负载；两者都让
+ * 「窗口内合并」这条承诺变得不可证。唯一确定的办法是让测试持有时间本身。
  */
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -141,6 +148,32 @@ async function waitFor(label, probe, timeoutMs = 2000) {
   }
 }
 
+/**
+ * 装上可控定时器：P1-1 合并窗口的「确定性时钟」。
+ *
+ * 为什么必须这么做：窗口配置是 30ms，而每条 `report()` 都要
+ * `await persistCritical()` 落一次盘；全量并发（几十个测试文件同跑、写盘争用 CPU）
+ * 时一次写盘就可能超过 30ms，窗口在「三条进度还没攒齐」时自然到期，断言读到的
+ * 是已经发出去的槽位——测试红，但实现是对的。把窗口调大只是把这条边界推到别的
+ * 负载下，加 sleep 更是把不确定留给下一台机器：那两者都不证明「窗口内会合并」。
+ * 唯一确定的办法是**时间由测试推进**。
+ *
+ * 用 Node 内置的 `t.mock.timers`（零依赖、不用改产品代码形状）：它替换
+ * `setTimeout` / `clearTimeout`，真实时间再久窗口也不会自己到点；测试显式
+ * `tick(n)` 才推进，于是「没到点不发」和「到点就发」两边都能断言，而不是靠等。
+ * 作用域由 node:test 保证：本用例结束后自动恢复，不漏给同文件后续用例。
+ *
+ * 注意 `tick()` 触发的投递是 async 的（`flushNotice → relay → deliver`），
+ * 用一次宏任务边界 `afterTimers()` 排空这条只含 promise 的链——它不是等某个
+ * 时间窗口，只是让微任务跑到头。
+ */
+function useFakeTimers(t) {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+}
+
+/** 等被 `tick()` 触发的异步投递跑完（一个宏任务边界，不是时间窗口）。 */
+const afterTimers = () => new Promise(resolve => setImmediate(resolve))
+
 /** 取报告文本某一行的内容（段名之后的部分）。 */
 const sectionOf = (text, section) => {
   const line = String(text).split('\n').find(item => item.startsWith(section))
@@ -183,7 +216,9 @@ test('P1-1 窗口上限：配置超过 2 秒按 2 秒算，配 0 表示关闭', 
 
 // ---------------------------------------------------------------- P1-1：真的减少条数
 
-test('P1-1 合并生效：同任务窗口内 3 条通知只投 1 条，最后一条胜出', async () => {
+test('P1-1 合并生效：同任务窗口内 3 条通知只投 1 条，最后一条胜出', async (t) => {
+  // 窗口到期由本用例推进（见 useFakeTimers 的说明），真实时间不参与。
+  useFakeTimers(t)
   await withDispatch({
     // 显式放开 progress 直通，才轮得到合并（默认 progress 是 ledger，根本不投）。
     directReportStatuses: ['blocked', 'failed', 'progress'],
@@ -212,8 +247,14 @@ test('P1-1 合并生效：同任务窗口内 3 条通知只投 1 条，最后一
     assert.equal(d.pendingNotices.size, 1, '同一任务只留一个待发槽位')
     assert.equal(d.mergeStats.collapsed, 2, '3 条里合并掉 2 条')
 
-    // 到点后自己发出去（等的是配置的 30ms，不是默认 1500ms）。
-    await waitFor('窗口到点投递', () => leadDeliveries(host).length === 1)
+    // 到点后自己发出去（等的是配置的 30ms，不是默认 1500ms）。先把时钟推到
+    // 29ms：不到点就不许有任何消息——这条断言把「延迟」钉在计时器上，而不是
+    // 靠真实等待碰巧成立；再推 1ms 才该投递。
+    t.mock.timers.tick(29)
+    await afterTimers()
+    assert.equal(leadDeliveries(host).length, 0, '窗口 30ms：29ms 时不该有任何消息')
+    t.mock.timers.tick(1)
+    await afterTimers()
     const inLead = leadDeliveries(host)
     assert.equal(inLead.length, 1, `同一任务一个窗口内只能投 1 条，实际 ${inLead.length} 条`)
     assert.match(inLead[0].text, /第三步/, '合并必须保留**最新**那条，而不是最早那条')
@@ -228,7 +269,8 @@ test('P1-1 合并生效：同任务窗口内 3 条通知只投 1 条，最后一
   })
 })
 
-test('P1-1 直通类不参与：blocked 在窗口内立即投，不等 1.5 秒', async () => {
+test('P1-1 直通类不参与：blocked 在窗口内立即投，不等 1.5 秒', async (t) => {
+  useFakeTimers(t)
   await withDispatch({
     directReportStatuses: ['blocked', 'failed', 'progress'],
     progressRelayIntervalMs: 0,
@@ -287,7 +329,8 @@ test('P1-1 关掉合并就回到旧路径：每条通知立即投（可单独回
   })
 })
 
-test('P1-1 不同任务不共享槽位：各自的进度不会被压成一条', async () => {
+test('P1-1 不同任务不共享槽位：各自的进度不会被压成一条', async (t) => {
+  useFakeTimers(t)
   await withDispatch({
     directReportStatuses: ['blocked', 'failed', 'progress'],
     progressRelayIntervalMs: 0,
@@ -304,6 +347,8 @@ test('P1-1 不同任务不共享槽位：各自的进度不会被压成一条', 
     await d.report(host.agents.get(one.workerSessionId), { status: 'progress', summary: '甲任务进度' })
     await d.report(host.agents.get(two.workerSessionId), { status: 'progress', summary: '乙任务进度' })
     assert.equal(d.pendingNotices.size, 2, '合并键是 taskId，两个任务各占一个槽位')
+    assert.equal(leadDeliveries(host).length, 0,
+      '窗口没到点时一条都还没发（时间由测试推进，真实负载不再能冲掉槽位）')
 
     await d.flushNotices()
     const inLead = leadDeliveries(host)
@@ -449,8 +494,9 @@ test('P1-2 投影判据单点：返回值里的 projection 与实际发出去的
   })
 })
 
-test('P1-1 顺序：结论先冲掉窗口里的进度，不制造「先结论、后过程」', async () => {
+test('P1-1 顺序：结论先冲掉窗口里的进度，不制造「先结论、后过程」', async (t) => {
   // 窗口配到 2 秒（硬上限），确保不冲刷就必然读错顺序。
+  useFakeTimers(t)
   await withDispatch({
     directReportStatuses: ['blocked', 'failed', 'progress'],
     progressRelayIntervalMs: 0,
@@ -476,7 +522,8 @@ test('P1-1 顺序：结论先冲掉窗口里的进度，不制造「先结论、
   })
 })
 
-test('P1-1 顺序：批次汇总先冲掉各成员窗口里的进度（键不同，不能靠 notify 自己冲）', async () => {
+test('P1-1 顺序：批次汇总先冲掉各成员窗口里的进度（键不同，不能靠 notify 自己冲）', async (t) => {
+  useFakeTimers(t)
   await withDispatch({
     directReportStatuses: ['blocked', 'failed', 'progress'],
     progressRelayIntervalMs: 0,
@@ -615,7 +662,8 @@ test('§七 2：同一任务 60 秒内未消费通知 ≤ 1 条，且无重复 m
   })
 })
 
-test('§七 2：合并不制造重复 id——合并多次也只用同一个待发槽位投一次', async () => {
+test('§七 2：合并不制造重复 id——合并多次也只用同一个待发槽位投一次', async (t) => {
+  useFakeTimers(t)
   await withDispatch({
     directReportStatuses: ['blocked', 'failed', 'progress'],
     progressRelayIntervalMs: 0,
@@ -630,6 +678,9 @@ test('§七 2：合并不制造重复 id——合并多次也只用同一个待�
     for (let step = 1; step <= 5; step += 1) {
       await d.report(worker, { status: 'progress', summary: `第 ${step} 步` })
     }
+    // 真实时间不再替测试推进窗口：5 条都还在同一个槽位里，没有一条自己跑掉。
+    assert.equal(d.pendingNotices.size, 1, '5 条仍攒在同一个槽位')
+    assert.equal(leadDeliveries(host).length, 0, '窗口未到点，flush 之前一条都不能发')
     await d.flushNotices()
     await d.flushNotices()   // 幂等：第二次不该再投
 
@@ -642,7 +693,9 @@ test('§七 2：合并不制造重复 id——合并多次也只用同一个待�
 
 // ---------------------------------------------------------------- 卸载不丢
 
-test('P1-1 卸载时冲刷窗口：已决定要发的通知不随进程消失', async () => {
+test('P1-1 卸载时冲刷窗口：已决定要发的通知不随进程消失', async (t) => {
+  // 窗口配到 2 秒（硬上限）也不靠真实等待：时间由测试持有，dispose 前窗口必然没到期。
+  useFakeTimers(t)
   const host = makeHost()
   const dir = await mkdtemp(join(tmpdir(), 'mas-p1-flush-'))
   const d = new Dispatch(host.ctx, {

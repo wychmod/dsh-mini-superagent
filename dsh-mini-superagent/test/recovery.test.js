@@ -92,6 +92,27 @@ async function withDispatch(config, fn) {
   }
 }
 
+const tick = () => new Promise(resolve => setTimeout(resolve, 0))
+
+/**
+ * 等到条件成立再断言，而不是固定睡 N 毫秒。
+ *
+ * 为什么：`onWorkerError()` 里是 `void this.failTurn(...)`，而 `failTurn()` 先
+ * `await persistCritical()`（真实写盘）再 `relayFailure()`。固定 10ms 在单文件里够，
+ * 但全量测试会并发跑多个测试文件，CPU 与磁盘排队时偶尔不够——实测全量连跑 10 次
+ * 有 1 次在「非瞬时故障」这条上等到投递 0 条（`delivered.length` 0 !== 1）。
+ * 那是等待方式的问题，不是投递丢了：超时上限给到 2s，条件成立即返回，
+ * 断言仍然是「恰好 1 条」，没有放宽任何事实。
+ */
+async function waitFor(predicate, timeoutMs = 2000) {
+  const started = Date.now()
+  for (;;) {
+    if (predicate()) return true
+    if (Date.now() - started > timeoutMs) return false
+    await tick()
+  }
+}
+
 const workerTask = (extra = {}) => ({
   id: 't-rc', title: '任务', brief: 'b', parentSessionId: 'lead',
   workerSessionId: 'dispatch-t-rc', status: 'running', reports: [],
@@ -236,7 +257,7 @@ test('瞬时故障：退避后续跑，任务保持 running', async () => {
     assert.equal(task.status, 'running', '瞬时故障不该结算任务')
     assert.ok(task.retryAt, '应当记下一个重试时间，看板能看到')
 
-    await new Promise(resolve => setTimeout(resolve, 20))
+    await waitFor(() => delivered.length >= 1)
 
     assert.equal(delivered.length, 1, '退避结束后应当投一条「继续」的消息')
     assert.equal(delivered[0].sessionId, 'dispatch-t-rc')
@@ -257,7 +278,11 @@ test('非瞬时故障：直接 failed 并回报原因，不挂在 running 上', 
     d.table.add(task)
 
     d.onWorkerError(worker, new Error('permission denied'))
-    await new Promise(resolve => setTimeout(resolve, 10))
+    // 等「结算成 failed + 投递落地」，不是固定睡 10ms（见 `waitFor` 的注释）。
+    await waitFor(() => task.status === 'failed' && delivered.length >= 1)
+    // 再多走两拍：重复回报要被下面「恰好 1 条」抓到，不能让轮询抢在第二条之前返回。
+    await tick()
+    await tick()
 
     assert.equal(task.status, 'failed')
     assert.match(task.error, /permission denied/)
@@ -276,11 +301,12 @@ test('瞬时故障用完次数后转 failed', async () => {
 
     const err = Object.assign(new Error('rate limit'), { status: 429 })
     d.onWorkerError(worker, err)
-    await new Promise(resolve => setTimeout(resolve, 15))
+    // 第一次是退避续跑：`resumeAfterError()` 投递完才清 `retryAt`，等它清空即投递落地。
+    await waitFor(() => task.retryAt === undefined)
     assert.equal(task.status, 'running', '第一次应当续跑')
 
     d.onWorkerError(worker, err)
-    await new Promise(resolve => setTimeout(resolve, 15))
+    await waitFor(() => task.status === 'failed')
     assert.equal(task.status, 'failed', '次数用完就该失败，不能无限重试')
     assert.match(task.error, /瞬时故障连续 1 次/)
   })
@@ -296,7 +322,7 @@ test('retryTransient=false 时不续跑，直接失败', async () => {
     d.table.add(task)
 
     d.onWorkerError(worker, Object.assign(new Error('overloaded'), { status: 503 }))
-    await new Promise(resolve => setTimeout(resolve, 10))
+    await waitFor(() => task.status === 'failed')
 
     assert.equal(task.status, 'failed')
   })
