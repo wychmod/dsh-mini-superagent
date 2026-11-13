@@ -20,6 +20,11 @@ ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直�
 从 0.5.0 起，看板补了**归档视图 / 工作区筛选 / 批次聚合 / 点行跳会话**；输入框补了**派发目标选择器**与 **`@` 工作区**，
 两者都写「下一次派发到哪」，不改会话归属。
 
+> **npm 包里不含 `docs/`**：本文中指向 `docs/xxx.md` 的相对链接只在仓库里有效
+> （[github.com/wychmod/dsh-mini-superagent](https://github.com/wychmod/dsh-mini-superagent)）。
+> 从 npm 装到的包只有 `src/`、`client/`、`cordis.patch.yml`、`locale/`、`icon.svg`、`README.md`、
+> `CHANGELOG.md`、`LICENSE` 与 `package.json`；点 `docs/` 链接会 404，请到仓库看。
+
 ---
 
 ## 它解决什么

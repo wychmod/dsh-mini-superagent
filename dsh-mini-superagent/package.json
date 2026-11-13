@@ -4,6 +4,14 @@
   "description": "主会话把任务派给独立的后台子会话执行，子会话完成后把报告投递回主会话；带默认工作区、按工作区派发、输入框选择派发目标、常驻派发工作台与自动归档。",
   "icon": "icon.svg",
   "author": "wychmod",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wychmod/dsh-mini-superagent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wychmod/dsh-mini-superagent/issues"
+  },
+  "homepage": "https://github.com/wychmod/dsh-mini-superagent#readme",
   "license": "MIT",
   "type": "module",
   "main": "src/index.js",
@@ -17,7 +25,6 @@
   "files": [
     "src",
     "client",
-    "docs",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -27,11 +34,12 @@
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node scripts/check-syntax.mjs && node --test && node ../scripts/client-smoke.mjs"
+    "check:dev": "node scripts/check-syntax.mjs && node --test && node ../scripts/client-smoke.mjs"
   },
   "keywords": [
     "dsh",
     "deepseek-harness",
+    "dsh-plugin",
     "plugin",
     "bundle",
     "agent",

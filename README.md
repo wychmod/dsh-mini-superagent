@@ -78,7 +78,8 @@ cd dsh-mini-superagent
 npm test
 
 # 提交前跑这一条：语法检查 + 单测 + 客户端渲染冒烟（CI 用的是同一组命令）
-npm run check
+# 只在仓库里可用（依赖包内 scripts/ 与仓库根 scripts/），npm 包里不带
+npm run check:dev
 
 # 语法检查
 node --check dsh-mini-superagent/src/index.js
