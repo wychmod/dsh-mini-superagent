@@ -169,7 +169,6 @@ dispatch_launch({
 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | CI：语法检查 + 单测 + 客户端离线渲染检查 |
 | [`plans/`](plans/) | 产品规划与 PRD，含已知限制与取证；入口见 [`plans/README.md`](plans/README.md) |
 | [`notes/`](notes/) | 本机 DSH 环境的排查记录，**不是插件文档** |
-| [`analysis/`](analysis/) | 架构对照、会话指标与评审批次 |
 | [`reference/`](reference/README.md) | DSH 上游原型的只读指针；目录内容被 `.gitignore` 排除 |
 
 ## 已知限制（摘要）
