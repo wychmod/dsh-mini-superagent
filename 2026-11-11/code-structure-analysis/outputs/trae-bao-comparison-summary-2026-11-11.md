@@ -1,6 +1,6 @@
 # Trae 宝 × dsh-mini-superagent：对比总结与迭代取舍
 
-> 依据：`analysis/trae-comparison-2026-11-11.md`（核心版）、`analysis/trae-comparison-2026-11-11-detail.md`（详细版），以及本轮对当前工作区代码的静态核对。
+> 依据：本轮对当前工作区代码的静态核对，以及两轮机制对比的原始记录（核心版与详细版；该文件已在公开前移除，含本机会话数据）。
 > 基线：`dsh-mini-superagent` 0.8.0（git `a04733e` + 未提交改动）。
 > 原则：只写文档与代码能支撑的结论；两边信息不足的维度直接标注「信息不足」。
 

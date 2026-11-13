@@ -5,14 +5,14 @@
 [![CI](https://github.com/wychmod/dsh-mini-superagent/actions/workflows/ci.yml/badge.svg)](https://github.com/wychmod/dsh-mini-superagent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](dsh-mini-superagent/LICENSE)
 [![Node](https://img.shields.io/badge/node-%5E22.19.0_%7C%7C_%3E%3D24-339933.svg)](dsh-mini-superagent/package.json)
-[![npm](https://img.shields.io/badge/npm-v0.9.1-blue.svg)](dsh-mini-superagent/package.json)（即将发布）
+[![npm](https://img.shields.io/npm/v/dsh-mini-superagent?color=blue&label=npm)](https://www.npmjs.com/package/dsh-mini-superagent)
 [![runtime deps](https://img.shields.io/badge/runtime_dependencies-0-brightgreen.svg)](dsh-mini-superagent/package.json)
 
 **10** 个工具 · **629** 个单元测试 · **450** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
 
 > **In English**: `dsh-mini-superagent` is a task dispatch and orchestration plugin for DeepSeek Harness (DSH): the main session hands a self-contained brief to an independent background sub-session, and the report flows back automatically. Pure ESM, zero runtime dependencies, 10 tools, a web board and an auditable JSON ledger. Docs live under `dsh-mini-superagent/docs/` and are not shipped in the npm package.
 
-> **版本**：当前工作区版本 0.9.1；已发布版本以 [`CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准。0.9.1 已推送到 `main`，但 **npm 注册表尚未发布**，安装方式见「快速开始」。
+> **版本**：当前工作区版本 0.9.1；已发布版本以 [`CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准。0.9.1 已发布到 npm，并已推送到 `main` 且打了 `v0.9.1` tag；安装方式见「快速开始」。
 
 ## 它解决什么问题
 
@@ -91,17 +91,13 @@ flowchart LR
 
 ### 1. 安装
 
-当前 npm 包尚未发布，从仓库安装：
-
-```bash
-git clone https://github.com/wychmod/dsh-mini-superagent.git
-```
-
-然后在 DSH 里调用（路径换成你的克隆位置）：
+npm 已发布 `0.9.1`，在 DSH 里调用：
 
 ```text
-plugin_manager(action="install_bundle", target="<仓库路径>/dsh-mini-superagent")
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.9.1")
 ```
+
+也可以从仓库安装：先 `git clone https://github.com/wychmod/dsh-mini-superagent.git`，再把 `target` 换成本地路径 `<仓库路径>/dsh-mini-superagent`。
 
 装完确认 **10 个 `dispatch_*` 工具**已注册，并刷新一次 GUI 页面——侧边栏图标与输入框控件要等页面刷新后才加载。
 
@@ -186,23 +182,22 @@ dispatch_launch({
 
 ## Roadmap
 
-### 已发布（0.9.1，GitHub `main`）
+### 已发布（0.9.1，npm + GitHub Release）
 
 - 非阻塞派发、批量派发、并发队列、报告自动回流、自动归档、工作区。
 - 看板四视图 + 独立「已退休」视图 + 分析看板；`retry_health` 与 `/board/stats`。
 - 续派（`continue_task_id`）、交接（`handoff_from`）、计划透出（`plan`）、批次依赖（`depends_on`）。
 - 记忆治理 P0/P1：通知合并窗口、事实与投影分离、账本封顶与退休留痕。
 - 质量闸门：`npm run check:dev`（629 单测 / 450 客户端检查）与 GitHub Actions CI。
+- 发布面：`dsh-mini-superagent@0.9.1` 已上 npm（`latest`），并打 `v0.9.1` tag、发 GitHub Release。
 
 ### 未做（真实缺口）
 
-- **npm 注册表发布**：包元数据（`files` / `exports` / `engines`）已就绪，`npm publish` 尚未执行。
 - **真机视觉验收**：控件对齐、弹层翻转与边缘夹取、深浅色对比度、chip 刷新恢复等未在真实浏览器逐项验证。
 - **token / 成本计量**：需要宿主提供 usage 事件；当前账本没有费用字段，不做估算。
 - **队列持久化**：排队顺序只在内存，没有落盘队列。
 - **多机调度**：本地单写 JSON，不做跨进程协调。
 - **看板分页 / 历史归档**：快照列表上限 200 条。
-- **0.9.x 的 Git tag / GitHub Release**：当前 tag 停在 `v0.6.0`。
 
 ## Contributing
 
