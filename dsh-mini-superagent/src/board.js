@@ -27,6 +27,16 @@ const BASE = BOARD_BASE
 const MAX_TASKS = 200
 
 /**
+ * `/board` 只读过滤参数的取值上限（plans/12 §8.2：trim 后截断到 64 字符）。
+ *
+ * 为什么给上限而不是「拒绝超长」：这两个参数是**精确匹配**的 id，不是搜索框，
+ * 超长的值不可能命中任何任务，截断后去比一次即可得出「空结果」；而返回 400 会让
+ * 一个只读查询变成需要客户端处理的错误分支。截断是幂等的（长度只会变短），
+ * 所以不存在「同一个参数两次请求结果不同」的风险。
+ */
+const MAX_FILTER_CHARS = 64
+
+/**
  * 单次响应最多带多少条退休记录。
  *
  * 与 MAX_TASKS 取同一个数量级：退休**不参与指标**，面板只用它回答「它什么时候、
@@ -348,11 +358,56 @@ function archiveAfterHoursOf(dispatch) {
 }
 
 /**
+ * 归一一个过滤参数：`trim` → 截到 64 字符 → 空串表示「没给」。
+ *
+ * 为什么空串必须等于「没给」：`?group=` 与不带参数是浏览器/拼接代码很容易产生的
+ * 两种写法，如果空串被当成「匹配 group === '' 的任务」，同一次点击会因为多了一个
+ * `=` 而返回空列表；而真正不带 group 的任务本来就**没有** `group` 键（见
+ * `boardTask` 里 `task.group` 的可选展开），所以「匹配空 group」这件事没有意义。
+ */
+function normalizeFilterValue(raw) {
+  return String(raw ?? '').trim().slice(0, MAX_FILTER_CHARS)
+}
+
+/**
+ * 从查询串取出卡片专用的两个只读过滤参数（plans/12 §8.2）。
+ *
+ * 只认 `group` 与 `task` 两个**精确匹配**的参数，**刻意不**做模糊/前缀/排序/分页：
+ * 这是一个「卡片取自己那一小片数据」的窄口，不是通用查询接口（§13 R3）。
+ * 每个参数各自独立归一：空串 drop 掉，避免把「没给」与「给了空值」混成一种语义。
+ *
+ * @param {URLSearchParams|undefined} searchParams
+ * @returns {{group?: string, task?: string}} 没有有效参数时是空对象
+ */
+export function boardFilterOf(searchParams) {
+  const get = value => (typeof searchParams?.get === 'function' ? searchParams.get(value) : null)
+  const group = normalizeFilterValue(get('group'))
+  const task = normalizeFilterValue(get('task'))
+  return {
+    ...(group ? { group } : {}),
+    ...(task ? { task } : {}),
+  }
+}
+
+/**
+ * 这条任务是否命中过滤条件（两个参数同时给就是交集）。
+ * @param {object} task
+ * @param {{group?: string, task?: string}|undefined} filter
+ */
+function matchesFilter(task, filter) {
+  if (!filter) return true
+  if (filter.group && task.group !== filter.group) return false
+  if (filter.task && String(task.id) !== filter.task) return false
+  return true
+}
+
+/**
  * 整块看板的数据。
  * @param {object} dispatch
  * @param {object|null} [memory] 已解析的 memoryStats；省略时尝试同步取（可能得 null）
+ * @param {{group?: string, task?: string}} [filter] 卡片专用的只读过滤（省略 = 全量，与旧响应逐字段一致）
  */
-export function boardSnapshot(dispatch, memory) {
+export function boardSnapshot(dispatch, memory, filter) {
   const all = [...dispatch.table.tasks.values()]
   const counts = { total: all.length, running: 0, queued: 0, done: 0, blocked: 0, failed: 0, cancelled: 0, ended: 0, interrupted: 0, archived: 0, retired: 0 }
   for (const task of all) {
@@ -363,7 +418,24 @@ export function boardSnapshot(dispatch, memory) {
   // 所以只能从 memoryStats 拿；拿不到就是 0（= 这块信息宿主没提供）。
   const stats = memoryOf(dispatch, memory)
   counts.retired = Number.isFinite(stats?.retired?.count) ? stats.retired.count : 0
-  const tasks = all
+  /**
+   * 过滤必须在 `slice(0, MAX_TASKS)` **之前**（plans/12 §8.2「过滤时机」）。
+   *
+   * 这是整块改动里唯一一处顺序有讲究的地方，理由要写下来：`all` 是**全量**活表
+   * （可能上千条），截断只保留展示面能看的 200 条。如果先 `slice` 再按 `group`
+   * 过滤，那么「批次成员排在第 201 名之后」时卡片拿到的是空列表——而任务明明
+   * 在账本里、明明还在跑，卡片却会显示「一条都没有」，且这个现象只在实例里任务
+   * 累积到 200+ 之后才出现（小实例上测不出来，上线很久后才偶发）。
+   *
+   * 过滤后再截断则是「先选出用户真正要的那一小片，再按同一套展示上限截断」：
+   * 单组的成员数远小于 200，所以正常批次永远不会被截；即便真有人造出 200+ 成员的
+   * 组，`truncated` 仍会按**过滤后**的条数如实说出来（下面的 `scoped` 变量）。
+   *
+   * 注意 `counts` **不受过滤影响**：它仍是全量计数（plans/12 §8.2 的 `counts` 一行）。
+   * 改成局部计数会让面板顶部与卡片的数字对不上，而面板展示的本来就是整实例口径。
+   */
+  const scoped = filter ? all.filter(task => matchesFilter(task, filter)) : all
+  const tasks = scoped
     .sort((a, b) => (WEIGHT[a.status] ?? 2) - (WEIGHT[b.status] ?? 2)
       || String(b.updatedAt).localeCompare(String(a.updatedAt)))
     .slice(0, MAX_TASKS)
@@ -382,7 +454,11 @@ export function boardSnapshot(dispatch, memory) {
     // 否则「总计 500 / 列表 200」看起来像数据丢了，用户会去翻根本不存在的条目。
     // 注意 total 取截断前的 all.length（counts.total 是同一份数，这里独立算一份，
     // 免得将来 counts 的定义变了，截断比例跟着漂）。
-    truncated: all.length > MAX_TASKS ? { shown: MAX_TASKS, total: all.length } : null,
+    //
+    // `truncated` 的口径跟着**过滤后**的条数走（`scoped`），与 `tasks` 取自同一份：
+    // 它的语义是「你这次请求的列表被截了多少」，不是「实例全量被截了多少」。
+    // 不带参数时 `scoped === all`，输出与旧版本逐字节一致。
+    truncated: scoped.length > MAX_TASKS ? { shown: MAX_TASKS, total: scoped.length } : null,
     // 工作区列表给看板做「按工作区分组 / 切工作区」用；注册表不可用时为空数组。
     workspaces: (dispatch.workspaces?.list?.() ?? []).map(item => ({ id: item.id, title: item.title, path: item.path })),
     // 每个主会话当前选的「派发目标工作区」；没选的不出现。
@@ -621,11 +697,28 @@ export function createBoardHandler(ctx, dispatch) {
     catch { return send(res, 400, { ok: false, error: '请求地址不合法' }) }
 
     try {
+      /**
+       * `GET /board` —— 整块快照，可带两个**只读**过滤参数（plans/12 §8.2）。
+       *
+       * `?group=` / `?task=` 是给「派发卡」用的窄口：卡片只要自己那一小片
+       * 成员，而 200 条截断会把它挤掉（详见 `boardSnapshot` 里过滤顺序那段）。
+       * 两者同时给取交集；都不给时走的还是原来那条路径，输出逐字段不变。
+       *
+       * 这里**刻意不做**参数白名单校验：未知参数（`?foo=1`）忽略即可，多一个
+       * 参数不该让一个只读端点变成 400。而未知的 `group` / `task` 值也**不是 404**
+       * ——资源（看板）存在，只是这次过滤没有命中，返回 `tasks: []` 是过滤结果，
+       * 不是「看板没了」。
+       */
       if (req.method === 'GET' && pathname === BASE) {
         if (!readAllowed(req)) return send(res, 403, { ok: false, error: '看板只对本机或同源页面开放' })
+        let query
+        try { query = new URL(req.url ?? '', 'http://localhost').searchParams }
+        catch { query = undefined }
+        const filter = boardFilterOf(query)
+        const scoped = filter.group || filter.task ? filter : undefined
         // memoryStats 是 async 的（要读活表与留痕两份），必须先把值 await 出来，
         // 否则 JSON 里会出现一个被序列化成 `{}` 的 Promise。
-        return send(res, 200, boardSnapshot(dispatch, await resolveMemory(dispatch)))
+        return send(res, 200, boardSnapshot(dispatch, await resolveMemory(dispatch), scoped))
       }
 
       if (req.method === 'POST' && pathname === `${BASE}/client-ready`) {

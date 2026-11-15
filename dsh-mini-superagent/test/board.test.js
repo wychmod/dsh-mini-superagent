@@ -672,6 +672,109 @@ test('GET 未知子路径返回 404 而不是快照', async () => {
   assert.equal(result.json.ok, false)
 })
 
+/* ───────────── plans/12 §8.2：卡片专用的两个只读过滤参数 ───────────── */
+
+test('GET /board?group= 只返回该组成员，且在 200 条截断之前过滤（成员排在 200 名之后也能取到）', async () => {
+  // 250 条噪声（updatedAt 比成员新，排在前面）+ 3 条目标组成员（排在 200 名之后）。
+  // 成员刻意全是已结算状态：`running` 会被排序权重提到最前面，那样「排在 200 名之后」
+  // 这个前提就立不住，用例会变成在测别的东西。
+  const noise = Array.from({ length: 250 }, (_, index) => makeTask(`noise-${index}`, {
+    status: 'done',
+    group: 'g-other',
+    updatedAt: new Date(Date.UTC(2026, 0, 2, 0, 0, index)).toISOString(),
+  }))
+  const members = [
+    makeTask('g-member-1', { status: 'done', group: 'g-target', updatedAt: '2026-01-01T00:00:01.000Z' }),
+    makeTask('g-member-2', { status: 'done', group: 'g-target', updatedAt: '2026-01-01T00:00:02.000Z' }),
+    makeTask('g-member-3', { status: 'blocked', group: 'g-target', updatedAt: '2026-01-01T00:00:03.000Z' }),
+  ]
+  const { handler } = fakeHost([...noise, ...members])
+
+  // 先证明前提成立：不带参数时这 3 条**确实**被截掉了。
+  const whole = await call(handler, {})
+  assert.equal(whole.json.tasks.length, 200, '全量快照仍是 200 条')
+  assert.deepEqual(whole.json.tasks.filter(task => task.task_id.startsWith('g-member')), [],
+    '前提：目标组成员确实落在 200 名之外')
+
+  const result = await call(handler, { url: `${BASE}?group=g-target` })
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.json.tasks.map(task => task.task_id).sort(), ['g-member-1', 'g-member-2', 'g-member-3'],
+    '过滤发生在 slice(0, MAX_TASKS) 之前，成员不会被 200 条截断吃掉')
+  assert.equal(result.json.truncated, null, '过滤后只有 3 条，不该报截断')
+  assert.equal(result.json.counts.total, 253, 'counts 仍是全局计数，不随过滤变小')
+})
+
+test('GET /board?task= 只返回一条；group 与 task 同时给取交集', async () => {
+  const a = makeTask('t-a-1', { status: 'running', group: 'g-a' })
+  const b = makeTask('t-a-2', { status: 'done', group: 'g-a' })
+  const c = makeTask('t-b-1', { status: 'done', group: 'g-b' })
+  const { handler } = fakeHost([a, b, c])
+
+  const onlyTask = await call(handler, { url: `${BASE}?task=t-a-2` })
+  assert.equal(onlyTask.status, 200)
+  assert.deepEqual(onlyTask.json.tasks.map(task => task.task_id), ['t-a-2'], '?task= 只返回那一条')
+
+  // 交集：同 group 且同 task → 命中。
+  const hit = await call(handler, { url: `${BASE}?group=g-a&task=t-a-2` })
+  assert.deepEqual(hit.json.tasks.map(task => task.task_id), ['t-a-2'])
+
+  // 交集：group 与 task 指向不同任务 → 空列表（不是「两者之一命中」）。
+  const miss = await call(handler, { url: `${BASE}?group=g-b&task=t-a-2` })
+  assert.deepEqual(miss.json.tasks, [], '同时给就是交集，不是并集')
+  assert.equal(miss.json.truncated, null)
+
+  // 精确匹配：前缀/模糊不算命中。
+  const prefix = await call(handler, { url: `${BASE}?group=g-` })
+  assert.deepEqual(prefix.json.tasks, [], '参数按精确字符串匹配，不做前缀/模糊')
+})
+
+test('GET /board 不带参数时与旧响应逐字段一致（同一份数据深比较）', async () => {
+  const tasks = [
+    makeTask('t-1', { status: 'running', group: 'g-a', updatedAt: '2026-01-01T00:00:03.000Z' }),
+    makeTask('t-2', { status: 'queued', updatedAt: '2026-01-01T00:00:02.000Z' }),
+    makeTask('t-3', { status: 'done', group: 'g-b', updatedAt: '2026-01-01T00:00:01.000Z' }),
+  ]
+  const { handler, dispatch } = fakeHost(tasks)
+  dispatch.memoryStats = () => makeMemoryStats()
+
+  // 「旧响应」= 直接按旧签名 boardSnapshot(dispatch, memory) 生成的那份（无过滤入参）。
+  // 两件事必须先处理掉，否则比的不是本次改动：
+  // 1. 过一遍 JSON —— HTTP 返回的是序列化后的文本，`turn_started_at: undefined`
+  //    这种键在线上根本不存在，拿活对象比会差在「有没有这个 undefined 键」上；
+  // 2. `generatedAt` 与未结算任务的 `elapsed_ms` 都是**随时间变**的量（后者按
+  //    「开始 → 现在」走表，两次调用必然差几十毫秒），它们不是过滤参数的影响面。
+  //    这两个键在冻结时被替换成常量，其余每个字段都原样参与下面的深比较。
+  const freeze = value => JSON.parse(
+    JSON.stringify(value)
+      .replace(/"generatedAt":"[^"]*"/g, '"generatedAt":"<frozen>"')
+      .replace(/"elapsed_ms":\d+/g, '"elapsed_ms":0'),
+  )
+  const legacy = freeze(boardSnapshot(dispatch, makeMemoryStats()))
+  const wired = freeze((await call(handler, {})).json)
+
+  assert.deepEqual(wired, legacy, '不带参数时除 generatedAt / 未结算 elapsed_ms 这两个随时间变的量之外，逐字段完全一致')
+
+  // 空串参数必须等价于「没给」：不能变成「匹配空 group」。
+  for (const suffix of ['?group=', '?task=', '?group=&task=', '?group=%20&task=%20', '?foo=1']) {
+    const empty = freeze((await call(handler, { url: `${BASE}${suffix}` })).json)
+    assert.deepEqual(empty, legacy, `${suffix} 必须与不带参数完全一致`)
+  }
+})
+
+test('GET /board 未知 group / task 返回 { tasks: [], truncated: null } 且仍是 200', async () => {
+  const { handler } = fakeHost([makeTask('t-1', { group: 'g-a' }), makeTask('t-2')])
+
+  for (const suffix of ['?group=g-nope', '?task=t-nope', '?group=g-nope&task=t-1']) {
+    const result = await call(handler, { url: `${BASE}${suffix}` })
+    assert.equal(result.status, 200, `${suffix}：过滤结果为空不是资源不存在，不能 404`)
+    assert.deepEqual(result.json.tasks, [], `${suffix}：空列表`)
+    assert.equal(result.json.truncated, null, `${suffix}：没有列表就没有截断`)
+    // 形状不变：其余顶层字段照旧存在（客户端可以复用同一套解析）。
+    assert.equal(result.json.version, VERSION)
+    assert.equal(result.json.counts.total, 2, 'counts 是全局口径，过滤不影响')
+  }
+})
+
 test('非回环且非同源的 GET 被拒绝（避免暴露任务名与工作目录）', async () => {
   const { handler } = fakeHost([makeTask('a')])
   const result = await call(handler, { headers: { host: '192.168.1.5:3080' } })
