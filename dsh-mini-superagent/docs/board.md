@@ -103,7 +103,7 @@
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
-| GET | `/dsh-mini-superagent/board` | 返回整块快照（含 `memory` 块），响应头 `cache-control: no-store` |
+| GET | `/dsh-mini-superagent/board` | 返回整块快照（含 `memory` 块），响应头 `cache-control: no-store`；可带 `?group=` / `?task=` 两个只读过滤参数（见下） |
 | GET | `/dsh-mini-superagent/board/retired` | 只读：已退休任务的留痕，`{ok, count, dropped, entries[]}` |
 | GET | `/dsh-mini-superagent/board/stats` | 只读：效果 / 拆解视图的全量聚合（plans/09 口径） |
 | GET | `/dsh-mini-superagent/board/analytics` | 只读：分析数据看板的队列聚合（口径见「分析数据看板」） |
@@ -113,7 +113,26 @@
 | POST | `/dsh-mini-superagent/board/archive-task` | body `{"task_id":"t-..."}`，归档**指定**的一条任务 |
 | POST | `/dsh-mini-superagent/board/target` | body `{"session_id":"session-...","workspace":"id/路径/标题或空串"}`，设置/清除派发目标 |
 | GET | `/dsh-mini-superagent/board/selfcheck` | 诊断：宿主侧能力、工作区、默认主会话、`client.inGraph` / `client.ready`、启动图模块列表、`memory` 口径 |
-| POST | `/dsh-mini-superagent/board/client-ready` | 浏览器半边在 `apply` 末尾自报 `{ok, registered:[...]}`，宿主记进 `client.ready` |
+| POST | `/dsh-mini-superagent/board/client-ready` | 浏览器半边在 `apply` 末尾自报 `{ok, registered:[...], cards:{...}}`，宿主记进 `client.ready`；卡片就绪后会**再报一次**覆盖同一个字段 |
+
+`GET /board` 的查询参数（**卡片专用，非通用查询接口**）：
+
+| 参数 | 取值 | 缺省 |
+|---|---|---|
+| `group` | 批次 id，**精确匹配** `task.group` | 不过滤（返回全部，与旧版逐字段一致） |
+| `task` | 任务 id，**精确匹配** `task_id` | 不过滤 |
+
+- **卡片专用，非通用查询接口**：只支持上面两个**精确匹配**参数，**不提供**排序 / 分页 / 字段选择。
+  加参数的目的是让「派发卡」（plans/12）取自己那一小片数据，而不是把 `/board` 扩张成一个查询 API；
+  要聚合口径走 `/stats`，要跨维度筛选走 `/analytics`。
+- **过滤在 200 条截断之前**：先在全量活表上过滤，再 `slice(0, MAX_TASKS)`。
+  否则批次成员排在第 201 名之后时，卡片会拿到空列表——任务明明还在跑。
+- 两个参数**同时给取交集**（同 group 且同 task）；**空串 / 只有空白**等价于未给，
+  **不是**「匹配空 group」；值 `trim` 后截断到 64 字符，按精确字符串比较，不做模糊 / 前缀。
+- **未知 `group` / `task` 仍返回 `200`**，body 是 `{ …, tasks: [], truncated: null }`：
+  资源（看板）存在，只是这次过滤没命中，这不是 404。
+- `counts` / `workspaces` / `targets` / `memory` 等顶层字段**不随过滤变化**（仍是全量口径，
+  否则面板顶部与卡片的数字会对不上）；`truncated` 按**过滤后**的条数算。
 
 请求体上限 64 KiB，必须是合法 JSON（`/archive` 不需要 body）。
 
@@ -132,11 +151,88 @@
 | `client.inGraph` | 宿主是否把本包的浏览器半边编进了 Web 启动图 | `false` = 面板和输入框控件根本不会加载。`dsh.client` 的解析结果是按 Loader 行缓存在进程内存里的（含否定结论），**必须重启宿主**才能刷新。见 `plans/03-client-graph.md` |
 | `client.path` | 编进图时该模块的磁盘路径 | 用来确认装的是哪一份 |
 | `client.ready` | 浏览器半边最近一次 `apply` 自报 | 缺省 = 模块没跑起来或页面还没刷新；`ok:false` = `apply` 抛错了 |
+| `client.ready.cards` | 两张卡各自的注册结论（`batch` / `report`） | 每张卡三态：`on` = 注册成功；`error:<stage>` = 失败；**键不存在** = 宿主没提供这个能力（正常降级，不是故障） |
 | `client.bootAt` | 本插件实例的启动时间 | `ready.at` 早于它，说明那是上一次实例留下的陈旧记录 |
 | `client.probes` | 对 `dsh-context` / `dsh-ppt` 等已知正常包的同样探测 | 用来判断探针本身是否可靠：它们都为空才是方法问题 |
 
 `inGraph` 与 `ready` 是两件事：前者＝模块进了图，后者＝它在页面里真的跑起来了。
 两关都过还没有面板，才轮到看槽注册与渲染。
+
+**卡片为什么没出现：先看 `client.ready.cards` 这两行，再看 `registered`。**
+
+```text
+client.ready.cards.batch  = on
+client.ready.cards.report = error:register
+```
+
+三态读法（`plans/14` §4.1）：
+
+| 值 | 含义 | 下一步 |
+| --- | --- | --- |
+| `on` | 这张卡注册成功 | 卡还是没画出来就去看槽本身与渲染，不用再查注册 |
+| `error:slot` | `inject` 抛错：宿主有 `slots` 服务，但不认这条槽名 | 宿主版本与槽名对不对 |
+| `error:register` | `slots.register` 抛错：槽在、我们动手了、宿主拒收 | 多半是 key 重复或参数形态不符；日志里搜 `dsh-mini-superagent:`（同一原因只 warn 一次） |
+| `error:parse` | 解析阶段降级（报告卡专用） | 内容契约，不是注册问题 |
+| **键不存在** | **宿主没提供这个能力**（旧宿主没有这条槽，或还在加载） | 正常降级，不要当故障修 |
+
+`cards` 是**异步就绪**的：`slots.inject` 的回调可能晚于 `apply` 返回，所以客户端会在
+`apply` 末尾先报一次（只含同步槽），等每张卡有了结论再**补报一次**覆盖同一个
+`client.ready`。两处都省了就会看到 `cards` 整个缺席（宿主侧不会写一个空对象进来，
+见下面「宿主侧的收口」）——按下面三条依次排除：
+
+1. `registered` 里没有 `tool.call.toolview` → 宿主没提供槽（L3 降级），卡片本来就该是通用行；
+2. `registered` 里有、`cards` 里没有 `batch` → `apply` 跑了但注册回调一直没被宿主回放；
+3. `cards.batch` 是 `error:*` → 注册真的失败了，按上表的 stage 处理。
+
+（`cards` 不存在本身也只说明「没有结论可报」；整个 `/selfcheck`
+响应里连 `client.ready` 都没有，才是「模块没进图 / 页面没刷新」。）
+
+`report` 卡尚未实现（`plans/13` 的 spike 未做），当前 `cards.report` **预期缺席**，
+这不是故障；接入后它才会出现 `on` 或 `error:*`。
+
+#### 宿主侧的收口：`cards` 只收白名单键与白名单值
+
+`cards` 是**浏览器发来的、客户端可控的数据**，而它会被原样放进 `GET /selfcheck`
+这个诊断响应里。所以 `POST /client-ready` 收下它时做两层过滤（`src/board.js`
+的 `clientCardsOf()`）：
+
+| 层 | 规则 | 为什么 |
+| --- | --- | --- |
+| 键 | 只认 `batch`、`report`（`plans/14` §4.1 定义的全部卡） | 否则页面可以往宿主诊断快照里塞任意键（`hack: 'x'`），排障时看起来像一条真的能力结论 |
+| 值 | 只认 `on`，或 `error:` + `slot` / `register` / `parse` | 值直接对应「下一步动作」；放 `error:evil` 进来只会让人去查一个不存在的阶段 |
+| 长度 | 每个值截断到 64 字符 | 不给异常客户端留一个往内存/响应里塞长串的口子 |
+
+被过滤掉的东西**静默丢弃，不报错**：这是浏览器自报的存活信号，一条畸形 body
+不该让端点 500 —— 那会让页面进入「自报失败 → 重试 → 再失败」的循环，反而盖住
+它本来要报的问题。不发 `cards`、发 `cards: null`、发字符串或数组，结果都一样：
+**这个字段根本不写**。
+
+**「键不存在 ≠ 失败」是这么保证的**：归一化函数在没有合法结论时返回 `undefined`，
+赋值处据此**条件写入**（与 `registered` / `error` 同一写法）：
+
+```js
+const cards = clientCardsOf(body?.cards)
+dispatch.clientReady = {
+  at: new Date().toISOString(),
+  ok: body?.ok !== false,
+  ...(Array.isArray(body?.registered) ? { registered: … } : {}),
+  ...(body?.error ? { error: … } : {}),
+  ...(cards ? { cards } : {}),   // 没有合法结论 → 这个键不存在
+}
+```
+
+所以旧客户端（压根不发 `cards`）与「两张卡都没结论」都表现为**字段缺席**，
+而不是 `cards: {}` 或 `cards: { batch: 'unknown' }`。排障时的三分法因此成立：
+
+| `client.ready.cards` | 含义 |
+| --- | --- |
+| `cards.batch === 'on'` | 这张卡注册成功，问题在渲染 |
+| `cards.batch` 是 `error:<stage>` | 注册真的失败，按 stage 处理 |
+| **根本没有 `cards` 字段 / 没有该卡的键** | 客户端没给出这张卡的结论（旧客户端、宿主没提供槽、回调还没回放）——**正常降级** |
+
+（这个字段曾经在宿主侧被整段丢掉：客户端的上报与 `client-smoke` 全绿，
+`/selfcheck` 里却永远是空。`test/board.test.js` 里那组「POST → GET」跨链路用例
+就是为了钉住这一环，别只测「客户端发出去了」。）
 
 ### GET 快照
 
@@ -168,7 +264,10 @@
 - `workspaces` 是工作区注册表快照（`id` / `title` / `path`），注册表不可用时为空数组；面板用它做工作区下拉。
 - `targets` 是每个主会话当前的派发目标（`session_id → {workspace_id,title,path}` 或 `{auto:true,…}`）；没有目标的会话不出现。
 - `tasks` 最多 200 条；排序：`running` → `queued` → 其余按 `updated_at` 倒序；同权重按 `updated_at` 倒序。
+  带 `?group=` / `?task=` 时先按参数过滤再套这个上限（见上文「查询参数」），
+  所以那 200 条是**过滤后**的 200 条，不是全量的前 200 条。
 - `truncated`：任务总数超过 200 时为 `{shown, total}`，否则 `null`。**这是给界面的提示**——没有它的时候「总计 500 / 列表 200」看起来像数据丢了。
+  带 `?group=` / `?task=` 时按**过滤后**的条数判断（客户端问的是「我这次的列表被截了多少」）。
 - `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.9.1`）。
 - `memory`：记忆治理口径，**形状逐字冻结**为 `memoryStats()` 的返回值。五块的含义：
   - `window`：指标窗口（最近 `days` 天 / `tasks` 条，`since` 是窗口起点 ISO 串，
@@ -950,6 +1049,9 @@ Host 聚合是纯内存遍历（不读盘、不发网络），
 
 | 现象 | 先查 | 处理 |
 | --- | --- | --- |
+| 派发后还是通用一行 | 先看 `client.ready.cards.batch` | `on` = 注册成功，问题在渲染；`error:register` = key 重复/参数不符；键不存在 = 宿主没有 `tool.call.toolview`（旧版本，正常降级） |
+| `client.ready` 里没有 `cards` 字段 | 再往上看 `client.ready.registered` | 有 `tool.call.toolview` = 注册回调还没被宿主回放；没有 = 宿主不提供这条槽；整个 `client.ready` 都没有 = 客户端没进图/没刷新 |
+| 报告变成一条普通用户消息 | `client.ready.cards.report` | 键缺席 = 报告卡还没接入（当前默认）；`error:slot` / `error:register` = 接了但注册失败 |
 | 侧边栏没有「派发工作台」 | 装/升级后是否刷新过页面；宿主是否 web 形态 | 刷新 GUI 页面；确认 `package.json` 的 `dsh.client` 已生效 |
 | 面板显示「看板数据暂时取不到」 | 浏览器控制台里 GET 的状态码 | 403 → 用同源页面或本机访问；404 → Host 没注册路由（无 `webServer` 或旧版本）；500 → 看日志 `dsh-mini-superagent:` |
 | 点取消/重试后红条提示 | 红条里的中文原因 | 409 → 任务状态不允许（running/queued/cancelled）；404 → 任务已不在表里 |
