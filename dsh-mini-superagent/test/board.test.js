@@ -651,6 +651,17 @@ function fakeHost(tasks, { cancelThrows = false, messageThrows = false } = {}) {
       calls.archive = (calls.archive ?? 0) + 1
       return { scanned: 2, archived: 1, failed: 1 }
     },
+    /**
+     * `/selfcheck` 的真实入口（`src/dispatch.js` 的 `selfCheck()`）。
+     *
+     * 只复刻与 `client.ready` 有关的那一段——`ready: this.clientReady ?? null`——
+     * 因为「POST 进去的东西 GET 得出来」正是这次 bug 的现场：客户端发了、host 丢了，
+     * 而老的测试只验了「客户端发了」，所以漏了一年。这里**不加**任何搬运逻辑，
+     * 免得测试自己把数据补上、掩盖 host 侧的丢字段。
+     */
+    async selfCheck() {
+      return { version: VERSION, client: { inGraph: true, path: '/x/client/index.js', ready: dispatch.clientReady ?? null } }
+    },
   }
   const ctx = { logger: { info() {}, warn() {} } }
   return { ctx, dispatch, calls, handler: createBoardHandler(ctx, dispatch) }
@@ -1032,4 +1043,78 @@ test('POST /cancel 带 message 时仍按取消处理（message 只对 /retry 有
   assert.equal(result.status, 200)
   assert.deepEqual(calls.cancel, [['a', '看板取消']])
   assert.deepEqual(calls.message, [], '取消口不读 message，别让它悄悄变成两条副作用')
+})
+
+/* ───────────── plans/14 §4.1：client-ready 的 cards 必须跨链路到达 selfcheck ───────────── */
+
+/**
+ * 这一组是**跨链路**测试：POST `/client-ready` → GET `/selfcheck`。
+ *
+ * 为什么必须跨链路：原来的测试只验了「客户端把 cards 发出去了」（client-smoke），
+ * 没有任何一条验「宿主收下并记住了它」。于是 host 侧那行只取三项的赋值
+ * 静悄悄把 `cards` 丢了很久——客户端全对、测试全绿、selfcheck 里永远是空。
+ * 所以这里的断言一律走 GET，**不**直接读 `dispatch.clientReady`：读内部字段
+ * 等于假设「存进去了」，也就绕开了这次要钉住的那一环。
+ */
+
+/** POST 一次自报体后返回 selfcheck 里的 `client.ready`。 */
+async function readyAfterPost(body) {
+  const { handler } = fakeHost([])
+  const posted = await call(handler, { method: 'POST', url: `${BASE}/client-ready`, body })
+  assert.equal(posted.status, 200, '自报体本身不该被拒')
+  const result = await call(handler, { url: `${BASE}/selfcheck` })
+  assert.equal(result.status, 200)
+  return result.json.client.ready
+}
+
+test('client-ready 的 cards 经宿主落到 selfcheck（两张卡都在）', async () => {
+  const ready = await readyAfterPost({
+    ok: true,
+    registered: ['main', 'tool.call.toolview'],
+    cards: { batch: 'on', report: 'error:register' },
+  })
+  assert.deepEqual(ready.cards, { batch: 'on', report: 'error:register' })
+})
+
+test('cards 里没有 report 键时，selfcheck 也不能凭空造出它（未提供 ≠ 失败）', async () => {
+  const ready = await readyAfterPost({ ok: true, cards: { batch: 'on' } })
+  assert.deepEqual(ready.cards, { batch: 'on' })
+  assert.equal(Object.hasOwn(ready.cards, 'report'), false, '缺键必须缺席，不能补成 error:* 或 unknown')
+})
+
+test('cards 只收白名单键与白名单值：非法键 / 非法 stage / 非字符串值全部丢弃', async () => {
+  const ready = await readyAfterPost({
+    ok: true,
+    cards: { batch: 'on', hack: 'x', report: 'error:evil', extra: 'on', bogus: 42 },
+  })
+  // `error:evil` 的 stage 不在白名单，`hack` / `extra` / `bogus` 不是这两张卡 → 全丢。
+  assert.deepEqual(ready.cards, { batch: 'on' }, '客户端可控的键不能进宿主诊断快照')
+})
+
+test('cards 里连 batch 都是非法值时，整个 cards 字段不写（不能退化成空对象）', async () => {
+  // 简报里的原始形状：`batch` 的值都不是合法三态，`report` 的 stage 也不在白名单。
+  const ready = await readyAfterPost({ ok: true, cards: { batch: 'nonsense', hack: 'x', report: 'error:evil' } })
+  assert.equal(Object.hasOwn(ready, 'cards'), false, '一个合法结论都没有 → 字段缺席，而不是 cards: {}')
+})
+
+test('cards 的值超长时按 64 字符截断后才判合法性（超长非法值仍被丢弃）', async () => {
+  const ready = await readyAfterPost({
+    ok: true,
+    // 合法值本身很短，截断不影响它；超长的非法值截断后仍不等于 `on`/`error:<stage>`。
+    cards: { batch: 'on', report: 'error:register' + 'x'.repeat(200) },
+  })
+  assert.deepEqual(ready.cards, { batch: 'on' })
+})
+
+test('client-ready 不带 cards 时 selfcheck 里没有 cards 字段（旧客户端兼容）', async () => {
+  const ready = await readyAfterPost({ ok: true, registered: ['main'] })
+  assert.equal(Object.hasOwn(ready, 'cards'), false, '键不存在 = 没上报，不是「两张卡都失败」')
+  assert.equal(ready.ok, true, '既有字段照旧')
+})
+
+test('cards 是字符串 / 数组 / null 时不抛错、不写入', async () => {
+  for (const cards of ['on', ['batch'], null]) {
+    const ready = await readyAfterPost({ ok: true, cards })
+    assert.equal(Object.hasOwn(ready, 'cards'), false, `cards=${JSON.stringify(cards)} 不该落进 selfcheck`)
+  }
 })

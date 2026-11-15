@@ -48,6 +48,35 @@ const MAX_RETIRED = 200
 /** 快照里 worker 最后输出的预览长度。 */
 const PREVIEW_CHARS = 500
 
+/**
+ * `client-ready` 允许上报的卡名（plans/14 §4.1 只定义了这两张卡）。
+ *
+ * 为什么要白名单**键**：这个字段会原样进 `GET /selfcheck`，而 body 是浏览器
+ * 发来的、客户端可控的数据。若原样收下 `Object.keys(body.cards)`，等于给页面开了
+ * 一个往宿主诊断快照里塞任意键的通道（`hack: 'x'` 会一路出现在 selfcheck 里，
+ * 看起来还像一条真的能力结论）。只认这两张卡，排障时读到的每个键都对应一张
+ * 真实存在的卡。
+ */
+const CLIENT_CARD_KEYS = new Set(['batch', 'report'])
+
+/**
+ * `error:<stage>` 里允许的阶段（plans/14 §4.1 的三态）。
+ *
+ * 为什么要白名单**值**：值与「下一步动作」是一一对应的——`error:register` 要改参数、
+ * `error:slot` 要核对宿主版本、`error:parse` 是内容契约问题。放任意串进来
+ * （`error:evil`、`unknown:xxx`）只会让排障的人去查一个不存在的阶段；而**不报错**
+ * 地丢弃它，又保证异常客户端不会把一次自报变成一个 500（自报失败不该反过来干扰页面）。
+ */
+const CLIENT_CARD_STAGES = new Set(['slot', 'register', 'parse'])
+
+/**
+ * 单个卡状态串的长度上限。
+ *
+ * 正常值只有 `on` 或 `error:register` 这类短串；给上限是为了不把异常客户端的长串
+ * 留在内存与自检响应里（超长值截断后必然不等于合法值，随之被下面丢掉）。
+ */
+const MAX_CARD_STATE_CHARS = 64
+
 /** 排序权重：进行中的排最前，其余按更新时间倒序。 */
 const WEIGHT = { running: 0, queued: 1 }
 
@@ -542,6 +571,45 @@ function send(res, status, body) {
 }
 
 /**
+ * 把 `client-ready` body 里的 `cards` 归一成一份「只剩可信结论」的小对象。
+ *
+ * 三件事同时成立才落键（plans/14 §4.1）：
+ * 1. **键在白名单里**（`batch` / `report`）——否则丢弃，见 CLIENT_CARD_KEYS；
+ * 2. **值是 `on` 或 `error:<白名单阶段>`**——否则丢弃，见 CLIENT_CARD_STAGES；
+ * 3. **值先按长度截断**，避免异常客户端塞长串。
+ *
+ * 为什么**没有合法键返回 undefined**（调用方据此**不写** `cards` 字段）：
+ * 「键不存在」是三种含义之一，且是最重要的那一条——它表示客户端根本没给出这张卡的
+ * 结论（旧客户端、宿主没提供那条槽），属**正常降级**，不是失败。若这里回一个
+ * `{}`，`client.ready.cards` 就会永远存在，自检页再也分不清「没上报」与「上报了但
+ * 两张卡都没结论」。
+ *
+ * 为什么整段不抛错：这是浏览器自报的存活信号，一条畸形 body 不该让端点 500——
+ * 那会让页面进入「自报失败 → 重试 → 再失败」的循环，反而掩盖了它要报的问题。
+ *
+ * @param {unknown} raw body.cards 原值（任意形状）
+ * @returns {Record<string, string> | undefined} 合法结论；一个都没有时 undefined
+ */
+function clientCardsOf(raw) {
+  // 字符串/数组/数字/布尔都不是「卡片结论表」；`typeof null === 'object'` 单独挡掉。
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const cards = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (!CLIENT_CARD_KEYS.has(key)) continue
+    if (typeof value !== 'string') continue
+    // 先截断再看合法性：截断本身是幂等的，合法值（都很短）不受影响。
+    const state = value.slice(0, MAX_CARD_STATE_CHARS)
+    if (state === 'on') { cards[key] = state; continue }
+    // `error:<stage>`：前缀必须是字面量 `error:`，stage 必须在白名单里。
+    // 用 `startsWith` + 精确比较而不是正则，是为了让非法值**安静地丢弃**而不是抛错。
+    if (!state.startsWith('error:')) continue
+    if (!CLIENT_CARD_STAGES.has(state.slice('error:'.length))) continue
+    cards[key] = state
+  }
+  return Object.keys(cards).length ? cards : undefined
+}
+
+/**
  * 读请求体并解析 JSON；超限或非法直接拒绝。
  *
  * 超限时**不要** `req.destroy()`：那会让客户端收到 ECONNRESET 而不是
@@ -726,11 +794,17 @@ export function createBoardHandler(ctx, dispatch) {
         let body
         try { body = await readJson(req) }
         catch (error) { return send(res, 400, { ok: false, error: String(error?.message ?? error) }) }
+        // `cards`：客户端里两张卡的注册结论（plans/14 §4.1）。这一项曾经整个被丢掉，
+        // 于是 selfcheck 里永远读不到卡片注册结果——「客户端报了」不等于「宿主记住了」。
+        // 归一化函数对**没有合法结论**的输入返回 undefined，这里据此条件写入：
+        // 键不存在 ≠ 失败（见 clientCardsOf），旧客户端/旧宿主照旧兼容。
+        const cards = clientCardsOf(body?.cards)
         dispatch.clientReady = {
           at: new Date().toISOString(),
           ok: body?.ok !== false,
           ...(Array.isArray(body?.registered) ? { registered: body.registered.slice(0, 20).map(String) } : {}),
           ...(body?.error ? { error: String(body.error).slice(0, 500) } : {}),
+          ...(cards ? { cards } : {}),
         }
         return send(res, 200, { ok: true })
       }
