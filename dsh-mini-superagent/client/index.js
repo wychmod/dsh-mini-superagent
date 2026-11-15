@@ -4706,7 +4706,7 @@ window.__ModuleLoader__.load({
   overflow-wrap: anywhere;
 }
 /*
- * 【说明】：次级色 + 小一号。它通常最长，所以默认只显示 3 行；
+ * 【说明】：次级色 + 小一号。它通常最长，所以默认只显示前 3 行；
  * 折叠的是显示，不是内容（复制与展开后都能拿到全文）。
  */
 .dsh-sa-rc-note-block {
@@ -4722,6 +4722,64 @@ window.__ModuleLoader__.load({
   line-height: calc(18px + var(--dsh-content-font-delta-secondary, 0px));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+/*
+ * 【说明】的折叠体（原生 details，与【细节】同一套机制、同一条铁律：
+ * **不传 open**、不挂 onToggle、不建 state）。
+ *
+ * 与【细节】的差别只有一处：这里的「展开 / 收起」是**文案**而不是箭头，
+ * 而 CSS 改不了文本内容，所以 summary 里并排放两个 span，由 [open] 属性
+ * 的**后代选择器**切换 display——成对 span 是纯 CSS 能做到的唯一办法。
+ * 为什么还是坚持不放 JS：文案一旦由 React 状态决定，它就得靠一次重渲染更新，
+ * 而重渲染正是「点了没反应」那个事故的入口。
+ */
+.dsh-sa-rc-note-detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+}
+.dsh-sa-rc-note-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 1px 4px;
+  margin-left: -4px;
+  border-radius: var(--dsw-radius-sm, 4px);
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.dsh-sa-rc-note-toggle::-webkit-details-marker {
+  display: none;
+}
+.dsh-sa-rc-note-toggle::marker {
+  content: '';
+}
+.dsh-sa-rc-note-toggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+.dsh-sa-rc-note-toggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
+  outline-offset: 1px;
+}
+/* 收起 / 展开两套文案：**只有 CSS** 决定谁显示，JS 不参与。 */
+.dsh-sa-rc-note-when-open {
+  display: none;
+}
+.dsh-sa-rc-note-detail[open] .dsh-sa-rc-note-when-closed {
+  display: none;
+}
+.dsh-sa-rc-note-detail[open] .dsh-sa-rc-note-when-open {
+  display: inline;
+}
+/* 展开后的第二段：只与第一行拉开一点呼吸，不额外限高（折叠本身就是长度管理）。 */
+.dsh-sa-rc-note-rest {
+  margin-top: 2px;
 }
 /*
  * ── 【需要你】：左侧 2px 色条 + 加粗 + 浅底 ──
@@ -4872,28 +4930,12 @@ window.__ModuleLoader__.load({
   overflow: auto;
   overscroll-behavior: contain;
 }
-/* 【说明】的折叠开关（与【细节】无关：那一段的折叠是本地 state，工作正常）。 */
-.dsh-sa-rc-more {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 4px;
-  padding: 1px 4px;
-  margin-left: -4px;
-  border: 0;
-  border-radius: var(--dsw-radius-sm, 4px);
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary, inherit);
-  font: inherit;
-  font-size: var(--dsh-content-font-size-secondary, 13px);
-  cursor: pointer;
-  list-style: none;
-}
-.dsh-sa-rc-more:hover {
-  background: var(--dsw-alias-interactive-bg-hover, transparent);
-  color: var(--dsw-alias-label-secondary, inherit);
-}
-.dsh-sa-rc-more:focus-visible,
+/*
+ * 【说明】的折叠条样式已经并入上面 .dsh-sa-rc-note-detail / .dsh-sa-rc-note-toggle
+ * 那一组：它现在是原生 details，与【细节】同一套机制。
+ * 原来的 .dsh-sa-rc-more（button 版）随「button + useState」写法一起删掉了——
+ * 留着一条没人命中的样式，只会让人以为那个按钮还在。
+ */
 .dsh-sa-rc-btn:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
   outline-offset: 1px;
@@ -11354,6 +11396,34 @@ window.__ModuleLoader__.load({
      */
     const REPORT_NOTE_CHARS = 160
 
+    /**
+     * 把【说明】切成「默认可见的头」+「点了展开才看见的尾」（`head + rest === text`）。
+     *
+     * 为什么是**文本切分**而不是「两套显示状态」：上一版靠 `noteOpen` 这个 React
+     * state 决定渲染 `noteShown`（截断版）还是 `noteText`（全文），于是内容是否
+     * 可见被绑在 state 上，state 一旦被重渲染写回陈旧值，用户点「展开」就毫无反应。
+     * 切成两段纯文本之后，展开与否只由浏览器在 `<details>` 上记录的 `open` 决定，
+     * 重渲染多少次都碰不到它。
+     *
+     * 切点优先取**行边界**：`dispatch.js` 生成的说明常是「摘要一行 + 指针一行」，
+     * 拦腰截断会把一句人话劈成两半。只有「一行却超长」时才退到字符边界——
+     * 那种情况不切的话，单行 500 字照样能把卡片撑开三屏。
+     */
+    function splitNoteText(text) {
+      if (typeof text !== 'string' || !text) return { head: '', rest: '' }
+      const lines = text.split('\n')
+      if (lines.length > REPORT_NOTE_LINES) {
+        return {
+          head: lines.slice(0, REPORT_NOTE_LINES).join('\n'),
+          rest: lines.slice(REPORT_NOTE_LINES).join('\n'),
+        }
+      }
+      if (text.length > REPORT_NOTE_CHARS) {
+        return { head: text.slice(0, REPORT_NOTE_CHARS), rest: text.slice(REPORT_NOTE_CHARS) }
+      }
+      return { head: text, rest: '' }
+    }
+
     /** 复制按钮的三态文案键；`idle` 不显示额外文字。 */
     const REPORT_COPY_IDLE = 'idle'
 
@@ -11857,14 +11927,15 @@ window.__ModuleLoader__.load({
       const isUnknown = shape === REPORT_SHAPE.UNKNOWN
       const title = typeof card.title === 'string' && card.title.trim() ? card.title.trim() : tr('report.fallbackTitle')
       /*
-       * 【细节】没有展开态 state。原 `detailOpen` / `setDetailOpen` / `onToggle`
-       * 已随折叠交互一起删掉（用户决定：把展开按钮删了）。
+       * 这里**一个折叠态 state 都没有**——这是故意的，不是漏了。
        *
-       * 现在这一段**无条件直接渲染**，所以没有任何「展开/收起」的状态需要记：
-       * 不需要 state、不需要 effect、不需要事件处理。少一个状态就少一处
-       * 「浏览器改了、React 又写回去」的打架机会。
+       * 【细节】与【说明】两处折叠都走浏览器原生 `<details>`，展开态挂在 DOM 上、
+       * 不归 React 管。原 `detailOpen` / `noteOpen` 那套 `button + useState` 已经
+       * 连挂 5 次：宿主把渲染当纯函数调、或卡片在报告回流/虚拟滚动重挂时重渲染，
+       * React 会拿陈旧的 state 把用户刚点开的状态**写回去**，表现就是
+       * 「按钮点了没反应」或「点开一眨眼又收回」，而且全程不报错。
+       * 少一个状态就少一处「浏览器改了、React 又写回去」的打架机会。
        */
-      const [noteOpen, setNoteOpen] = useState(false)
       const [copyState, setCopyState] = useState(REPORT_COPY_IDLE)
       /*
        * 状态回查只对**单任务**做：批次汇总的 id 是 `g-…`，它对应一组任务，
@@ -11894,13 +11965,16 @@ window.__ModuleLoader__.load({
       /*
        * 【说明】的折叠：行数 > 3 或 单行过长 才给「展开」（见 `REPORT_NOTE_CHARS`）。
        * 折叠只影响**显示**，复制走 `rawFull`，所以折叠永远不会让内容真的拿不到。
+       *
+       * `noteHead` / `noteRest` 是**纯文本切分**，不是「显示开关」：
+       * 两段加起来永远是完整的 `noteText`，展开与否只决定浏览器把第二段显示在哪里。
+       * 注意这里**没有** `noteLong`：要不要折叠由 `noteRest` 是否为空决定，
+       * 一个判据一处真理，不会出现「state 说有、切分说没有」的分叉。
        */
       const noteText = typeof card.note === 'string' ? card.note : ''
-      const noteLines = noteText ? noteText.split('\n') : []
-      const noteLong = noteLines.length > REPORT_NOTE_LINES || noteText.length > REPORT_NOTE_CHARS
-      const noteShown = noteLong && !noteOpen
-        ? noteLines.slice(0, REPORT_NOTE_LINES).join('\n')
-        : noteText
+      const noteParts = splitNoteText(noteText)
+      const noteHead = noteParts.head
+      const noteRest = noteParts.rest
       const groups = Array.isArray(card.groups) ? card.groups : []
       const raw = typeof card.raw === 'string' ? card.raw : ''
       const rawFull = typeof card.rawFull === 'string' ? card.rawFull : raw
@@ -11963,20 +12037,59 @@ window.__ModuleLoader__.load({
        * 这一段里可能有 `dispatch.js` 生成的「摘要 + 指针」原句（另有 N 字在账本里），
        * 解析器不改写它，渲染层也不改写它。
        */
+      /*
+       * 【说明】的渲染：**短就整段显示；长就头一行可见 + 原生 `<details>` 收着剩下的**。
+       *
+       * ── 为什么这里又回到原生 details（第 3 次改这段，别再改回 button） ──
+       *
+       * 上一版是 `button` + `noteOpen` state。真机上「点了没反应」，与【细节】那次
+       * 连挂 4 次是**同一个真因**：展开态存在 React state 里，而卡片在报告回流、
+       * 状态 chip 变化、宿主虚拟滚动重挂时都会重渲染。渲染如果被当成纯函数调、
+       * 或者 state 被一份陈旧快照写回，`onClick` 更新出来的值下一帧就没了，
+       * 表现就是「按钮点了没反应」——而且**全程不报错**，测试里怎么写都通。
+       *
+       * 所以这里的判据从「有没有 state」换成「有没有可能被 state 写回」：
+       *   · 不建任何折叠态 state / 不挂 onClick —— 折叠归浏览器；
+       *   · **绝不传 `open`** —— 传了就是受控，重渲染会把浏览器刚打开的写回去
+       *     （这条与【细节】那段注释里的事故记录是同一条，改前先读一遍）；
+       *   · 文案「展开 / 收起」由 CSS 按 `[open]` 切换两个 span 的 display，
+       *     JS 里不写这句文案的切换逻辑，否则它又要靠重渲染更新，等于把坑挖回来。
+       *
+       * 保命绳：`head + rest` 恒等于完整 `noteText`，收起时 `rest` 只是被浏览器
+       * 隐藏（仍在 DOM 里、`textContent` 能取到、复制走 `rawFull` 取到的也是全文）。
+       */
       if (noteText) {
         body.push(h(
           'div',
           { key: 'note', className: 'dsh-sa-rc-note-block' },
-          h('p', { key: 'text', className: 'dsh-sa-rc-note', title: noteLong ? noteText : undefined, 'data-report-note': 'true' }, noteShown),
-          noteLong
-            ? h('button', {
-              key: 'more',
-              type: 'button',
-              className: 'dsh-sa-rc-more',
-              'data-report-note-toggle': 'true',
-              'aria-expanded': noteOpen,
-              onClick: function () { setNoteOpen(function (value) { return !value }) },
-            }, noteOpen ? tr('showLess') : tr('report.expand'))
+          /*
+           * 头段（1–3 行）**永远可见**：它不是「要点的东西」，是用户第一眼该读到的
+           * 那部分说明。所以它必须在 `<details>` 外面——放进内容区的话，收起态会
+           * 连它一起被浏览器隐藏，用户就只剩一条「展开」按钮可看，等于把说明藏了。
+           */
+          h('p', { key: 'text', className: 'dsh-sa-rc-note', title: noteText, 'data-report-note': 'true' }, noteHead),
+          noteRest
+            ? h(
+              'details',
+              {
+                key: 'note-more',
+                className: 'dsh-sa-rc-note-detail',
+                'data-report-note-detail': 'true',
+                /* ⚠️ 绝不在这里加 `open` —— 见上面这段注释与【细节】那块的记录。 */
+              },
+              h(
+                'summary',
+                {
+                  key: 'toggle',
+                  className: 'dsh-sa-rc-note-toggle',
+                  'data-report-note-toggle': 'true',
+                },
+                h('span', { key: 'caret', className: 'dsh-sa-rc-caret', 'aria-hidden': 'true' }),
+                h('span', { key: 'when-closed', className: 'dsh-sa-rc-note-when-closed' }, tr('report.expand')),
+                h('span', { key: 'when-open', className: 'dsh-sa-rc-note-when-open' }, tr('showLess')),
+              ),
+              h('p', { key: 'rest', className: 'dsh-sa-rc-note dsh-sa-rc-note-rest', 'data-report-note-rest': 'true' }, noteRest),
+            )
             : null,
         ))
       }

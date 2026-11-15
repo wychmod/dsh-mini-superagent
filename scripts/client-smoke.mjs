@@ -34,6 +34,44 @@ const source = readFileSync(CLIENT_PATH, 'utf8')
 console.log(`被测文件: ${CLIENT_PATH}`)
 console.log(`大小: ${source.split('\n').length} 行\n`)
 
+/**
+ * 剥掉注释后的源码，供**源码反向断言**使用。
+ *
+ * 为什么需要：那些断言是「不许出现 `onToggle` / `noteOpen` / `open:` 这类写法」，
+ * 但这份文件里到处是**记录事故经过**的注释——它们会原样写出「不挂 `onToggle`、
+ * 不建 `detailOpen` state」这种句子。拿含注释的源码去比对，断言就会被自己的文档
+ * 命中：实现是对的，测试却红，而且红得像是实现回退了。
+ *
+ * 只做「去注释」，不改变断言语义：真正要防的是**代码里**写出受控写法 / JS 管展开态。
+ * 正则刻意保守：模板字符串里的 `//` 不会被当成注释行首（只剥「整行注释」与块注释），
+ * 宁可少剥也不要误剥掉真实代码。
+ */
+const sourceNoComments = (() => {
+  const blankLineComment = /^\s*\/\//
+  const out = []
+  let inBlock = false
+  for (const line of source.split('\n')) {
+    if (inBlock) {
+      if (line.includes('*/')) inBlock = false
+      out.push('')
+      continue
+    }
+    const openAt = line.indexOf('/*')
+    const closeAt = line.indexOf('*/', openAt < 0 ? 0 : openAt)
+    if (openAt >= 0 && closeAt < 0) {
+      inBlock = true
+      out.push(line.slice(0, openAt))
+      continue
+    }
+    if (openAt >= 0) {
+      out.push(line.slice(0, openAt) + line.slice(closeAt + 2))
+      continue
+    }
+    out.push(blankLineComment.test(line) ? '' : line)
+  }
+  return out.join('\n')
+})()
+
 /* ───────────────────────── 迷你 React ───────────────────────── */
 
 /**
@@ -6118,9 +6156,9 @@ check('【细节】收起后原文再次不可见',
  * 或者被一个 spread 带进来，运行时那条 `hasOwnProperty` 未必拦得住同样的坑。
  */
 const detailSourceBlock = (() => {
-  const at = source.indexOf("'details'")
-  const end = source.indexOf('const foot = []', at)
-  return at < 0 || end < 0 ? '' : source.slice(at, end)
+  const at = sourceNoComments.indexOf("'details'")
+  const end = sourceNoComments.indexOf('const foot = []', at)
+  return at < 0 || end < 0 ? '' : sourceNoComments.slice(at, end)
 })()
 check('★[反] details 那一段源码里没有 open: 赋值（防受控回归）',
   detailSourceBlock.length > 0 && !/[{,]\s*open\s*:/.test(detailSourceBlock),
@@ -6203,7 +6241,244 @@ unmount(remountCard.row)
 
 
 
-/* ── ⑦ 复制按钮复制的是完整原文（rawFull），不是渲染后的文本 ── */
+/* ── J. 【说明】原生 <details> 折叠（非受控） ── */
+
+/*
+ * ⚠️ 这一节守的是一条**被误判过 5 次**的结论。改之前先把上面【细节】那一节
+ * 和下面这段话读完。
+ *
+ * 用户原话（第 5 次报同一件事）：
+ *   「不是说细节能展开，而是细节按钮上面有个展开按钮，点了没效果。」
+ *
+ * 也就是说：【细节】那条 `<details>` 一直是**好的**，坏的是【说明】下面那个
+ * 「展开」——它当时是 `button` + `noteOpen` state。这与【细节】早期的受控 bug
+ * 是**同一个真因**，只是换了控件：展开态存在 React state 里，而卡片在报告回流、
+ * 状态 chip 变化、宿主虚拟滚动重挂时都会重渲染；渲染一旦被当成纯函数调、
+ * 或者 state 被一份陈旧快照写回，`onClick` 更新出来的值下一帧就没了——
+ * 于是「点了没反应」，而且**全程不报错**。
+ *
+ * 所以这里的断言与【细节】同构，用同一个 `makeDetailsDom` 模型：
+ *   · 初始：长说明有折叠条、且 details 的 props 里**没有** open（非受控）；
+ *   · 点一下：第二段出现；
+ *   · ★ 点开 → 强制父级重渲染两次 → 仍然展开（受控写法的唯一检测器）；
+ *   · 内容完整性：head + rest 恒等于全文，收起时也不丢字。
+ */
+
+/** 【说明】长到需要折叠的样例：5 行说明，超过 REPORT_NOTE_LINES = 3。 */
+const LONG_NOTE = [
+  '第一行说明：按简报先跑一遍离线用例，确认基线是绿的。',
+  '第二行说明：然后只改 client/index.js 与 scripts/client-smoke.mjs 两个文件。',
+  '第三行说明：不要碰 src/** 与 package.json，也不要 git commit。',
+  '第四行说明：这一行是折叠起来的部分，展开后才应该看见。',
+  '第五行说明：这一行也是折叠起来的部分，用来验证尾部没有丢字。',
+].join('\n')
+/*
+ * ⚠️ 每一行都必须带 `【说明】` 前缀。解析器（`parseReportSingle`）遇到**任何**
+ * 认不出的行就整份退回原文卡——那是它故意的严格性（见 `parseReportText` 注释），
+ * 不是这里要测的东西。曾经这里把 `LONG_NOTE` 整段接在第一个 `【说明】` 后面，
+ * 于是第 2–5 行成了「意外行」，卡片退化成原文卡、`note-more` 根本不存在，
+ * 十来个断言一起红且看起来像实现坏了。与 ⑤ 段 `IDLE_TEXT` 的写法保持一致：
+ * 多行说明 = 多行 `【说明】`，解析器会用 `\n` 把它们接回完整说明。
+ */
+const FIXTURE_LONG_NOTE = [
+  '【任务】说明折叠验证',
+  '【结果】按钮换成原生 details',
+  ...LONG_NOTE.split('\n').map((line) => '【说明】' + line),
+  '【细节】dispatch_inspect t-rc-note',
+].join('\n')
+
+const noteCard = renderReport(FIXTURE_LONG_NOTE)
+const noteDom = makeDetailsDom(noteCard.row)
+noteDom.sync()
+
+/* ── J-1. 初始状态：折叠条在、内容被收起、头部仍然可见 ── */
+
+const noteDetails = noteDom.node('note-more')
+check('★【说明】长说明渲染出 details 折叠体（不再是 button + state）',
+  Boolean(noteDetails) && noteDetails.type === 'details',
+  noteDetails ? String(noteDetails.type) : 'missing')
+check('★【说明】初始是收起的：details 的 props 里没有 open 属性（非受控）',
+  Boolean(noteDetails) && !Object.prototype.hasOwnProperty.call(noteDetails.props, 'open'),
+  noteDetails ? JSON.stringify({ hasOwnOpen: Object.prototype.hasOwnProperty.call(noteDetails.props, 'open') }) : 'missing')
+
+const noteToggle = reportMarks(noteCard.row, 'data-report-note-toggle')[0]
+check('★【说明】折叠条是 summary（原生可点，不需要 JS 事件）',
+  Boolean(noteToggle) && noteToggle.type === 'summary',
+  noteToggle ? String(noteToggle.type) : 'missing')
+check('【说明】折叠条上没有 onClick（展开态不交给 React 管）',
+  Boolean(noteToggle) && noteToggle.props.onClick === undefined,
+  noteToggle ? typeof noteToggle.props.onClick : 'missing')
+check('【说明】折叠条文案是「展开」（report.expand 仍在用）',
+  Boolean(noteToggle) && text(noteToggle).includes('展开'),
+  noteToggle ? text(noteToggle).trim() : 'missing')
+check('【说明】折叠条里没有 JS 写死的字形（箭头仍由 CSS 提供）',
+  (() => {
+    const caret = noteToggle
+      ? findAll(noteToggle, (item) => item && item.props && item.props.className === 'dsh-sa-rc-caret')[0]
+      : undefined
+    return Boolean(caret) && text(caret) === ''
+  })())
+
+/*
+ * 头部（前 3 行）**必须在 details 外面**：塞进去的话收起态的浏览器会把
+ * 它一起隐藏，用户就只剩一条「展开」按钮可看——那等于把说明藏了。
+ */
+const noteHeadMarks = reportMarks(noteCard.row, 'data-report-note')
+check('★【说明】收起态下头部说明仍然可见（头部不在 details 里）',
+  noteHeadMarks.length === 1
+    && !findAll(noteDetails, (item) => item === noteHeadMarks[0]).length
+    && text(noteHeadMarks[0]).includes('第一行说明'),
+  noteHeadMarks.length ? text(noteHeadMarks[0]).replace(/\s+/g, ' ').slice(0, 120) : 'missing')
+check('【说明】收起态下头部只显示前 3 行（折叠真的截断了显示）',
+  noteHeadMarks.length === 1
+    && !text(noteHeadMarks[0]).includes('第四行说明')
+    && !text(noteHeadMarks[0]).includes('第五行说明'),
+  noteHeadMarks.length ? text(noteHeadMarks[0]).replace(/\s+/g, ' ').slice(0, 160) : 'missing')
+
+const noteRestMark = reportMarks(noteCard.row, 'data-report-note-rest')[0]
+check('【说明】折叠体里是尾段（第四 / 第五行都在，收起只是被浏览器隐藏）',
+  Boolean(noteRestMark)
+    && text(noteRestMark).includes('第四行说明')
+    && text(noteRestMark).includes('第五行说明'),
+  noteRestMark ? text(noteRestMark).replace(/\s+/g, ' ').slice(0, 160) : 'missing')
+
+/* ── J-2. 点一下：完整说明可见 ── */
+
+noteDom.click('note-more')
+update(noteCard.row)
+noteDom.sync()
+
+check('★【说明】点 summary 后 details 打开（open = true）',
+  noteDom.isOpen('note-more') === true, String(noteDom.isOpen('note-more')))
+check('★【说明】展开后完整说明可见（五段一行不少）',
+  noteDom.isOpen('note-more') === true
+    && LONG_NOTE.split('\n').every((line) => text(noteCard.row.tree).includes(line)),
+  text(noteCard.row.tree).replace(/\s+/g, ' ').slice(0, 240))
+
+/* ── J-3. ★ 关键回归：展开后再重渲染两次，仍然展开 ── */
+
+/*
+ * ⭐ 这一条是整节的触发器。它与【细节】那条是**同一个检测器**，只是换了控件。
+ *
+ *   · 非受控（不传 open）→ 渲染不碰 open 属性 → 浏览器保持展开 → 绿；
+ *   · 受控（传了 open: noteOpen）→ 每次渲染把 open 写回陈旧值 → 收回 → 红。
+ *
+ * 开发时已按简报第 4 条做过**反向验证**：临时把实现改回受控写法
+ * （给 details 加 `open: false`，等价于陈旧 state），这条断言立刻变红，
+ * 然后已还原。没有那次反向验证，这条断言可能只是「永远不会失败的摆设」。
+ */
+update(noteCard.row)
+update(noteCard.row)
+noteDom.sync()
+
+check('★【说明】点击展开 → 强制重渲染两次 → 仍然展开（受控写法会在这里红）',
+  noteDom.isOpen('note-more') === true,
+  JSON.stringify({ open: noteDom.isOpen('note-more') }))
+check('★【说明】两次重渲染后完整说明仍然在（没有被收回或截断）',
+  noteDom.isOpen('note-more') === true
+    && LONG_NOTE.split('\n').every((line) => text(noteCard.row.tree).includes(line)),
+  text(noteCard.row.tree).replace(/\s+/g, ' ').slice(0, 200))
+
+/* ── J-4. 自检：这个模型真的能抓到「传了 open」的写法 ── */
+
+/*
+ * 与 D 段同一个思路，但**用的是【说明】这个 key**：手工构造一棵受控的
+ * note-more 树喂给同一个模型，证明 J-3 那条断言对受控实现是有牙的。
+ */
+const noteControlledProbeRow = {
+  tree: {
+    type: 'div',
+    props: {
+      children: [
+        { type: 'p', props: { children: ['第一行说明'] } },
+        {
+          type: 'details',
+          props: {
+            key: 'note-more',
+            open: false,
+            children: [
+              { type: 'summary', props: { children: ['展开'] } },
+              { type: 'p', props: { children: ['第四行说明'] } },
+            ],
+          },
+        },
+      ],
+    },
+  },
+}
+const noteControlledProbe = makeDetailsDom(noteControlledProbeRow)
+noteControlledProbe.sync()
+noteControlledProbe.click('note-more')
+noteControlledProbe.sync()
+noteControlledProbe.sync()
+check('★[自检]【说明】受控写法（传 open:false）点开后重渲染会被收回 —— 证明上一条断言有牙',
+  noteControlledProbe.isOpen('note-more') === false,
+  JSON.stringify({ openAfterRerender: noteControlledProbe.isOpen('note-more') }))
+
+/* ── J-5. 再点一下收起 ── */
+
+noteDom.click('note-more')
+update(noteCard.row)
+noteDom.sync()
+check('★【说明】再点 summary 收起（open = false）',
+  noteDom.isOpen('note-more') === false, String(noteDom.isOpen('note-more')))
+
+/* ── J-6. 内容完整性：折叠不改变说明文本本身 ── */
+
+const noteBlockNode = findAll(noteCard.row.tree, (item) => hasClass(item, 'dsh-sa-rc-note-block'))[0]
+const noteBlockText = text(noteBlockNode || noteCard.row.tree).replace(/\s+/g, ' ')
+const flatNote = LONG_NOTE.replace(/\s+/g, ' ')
+check('★【说明】折叠/展开状态变化不影响说明文本（完整文本恒在 DOM 里）',
+  flatNote.split('。').filter(Boolean).every((part) => noteBlockText.includes(part.trim())),
+  noteBlockText.slice(0, 240))
+
+/* ── J-7. 短说明：不给折叠条（没有藏起来的内容就不该有「展开」） ── */
+
+/*
+ * 死按钮是最糟的形态：用户点了没反应，还以为功能坏了。短说明整段显示，
+ * 一条折叠条都不渲染——`data-report-note-toggle` 必须为 0。
+ */
+const shortNoteCard = renderReport(FIXTURE_REPORT)
+check('【说明】短说明不给折叠条（没有可展开的内容就不渲染「展开」）',
+  reportMarks(shortNoteCard.row, 'data-report-note-toggle').length === 0
+    && reportMarks(shortNoteCard.row, 'data-report-note-detail').length === 0
+    && reportMarks(shortNoteCard.row, 'data-report-note').length === 1,
+  JSON.stringify({
+    toggle: reportMarks(shortNoteCard.row, 'data-report-note-toggle').length,
+    detail: reportMarks(shortNoteCard.row, 'data-report-note-detail').length,
+    note: reportMarks(shortNoteCard.row, 'data-report-note').length,
+  }))
+check('【说明】短说明整段显示（一行不多一行不少）',
+  text(reportMarks(shortNoteCard.row, 'data-report-note')[0]).includes('Start-Sleep 10 秒'))
+unmount(shortNoteCard.row)
+unmount(noteCard.row)
+
+/* ── J-8. 源码反向断言：不许再写成受控 / 不许再回到 button + state ── */
+
+/*
+ * 切片的结束边界用**代码**标记 `key: 'need'`，不用 `需要你`：后者是中文文案，
+ * 剥掉注释后一个都不剩（注释里才有），`indexOf` 会返回 -1、切片为空，
+ * 断言就会以一个看不懂的「slice failed」红掉。
+ */
+const noteSourceBlock = (() => {
+  const at = sourceNoComments.indexOf("key: 'note-more'")
+  const end = sourceNoComments.indexOf("key: 'need'", at)
+  return at < 0 || end < 0 ? '' : sourceNoComments.slice(at, end)
+})()
+check('★[反]【说明】details 那一段源码里没有 open: 赋值（防受控回归）',
+  noteSourceBlock.length > 0 && !/[{,]\s*open\s*:/.test(noteSourceBlock),
+  noteSourceBlock ? 'len=' + noteSourceBlock.length : 'slice failed')
+check('[反]【说明】details 上没有 onToggle / onClick（展开态不交给 JS 管）',
+  noteSourceBlock.length > 0 && !/onToggle/.test(noteSourceBlock) && !/onClick/.test(noteSourceBlock))
+check('★[反]【说明】不再用 button + useState 折叠（连挂 5 次的那条路）',
+  !/setNoteOpen|noteOpen/.test(sourceNoComments),
+  (sourceNoComments.match(/setNoteOpen|noteOpen/g) || []).slice(0, 4).join(','))
+check('★[反]【说明】的拍开文案由 CSS 的 [open] 后代选择器切换（JS 不写切换逻辑）',
+  /\.dsh-sa-rc-note-detail\[open\]\s+\.dsh-sa-rc-note-when-closed\s*\{[^}]*display:\s*none/s.test(CARD_STYLE_TEXT)
+    && /\.dsh-sa-rc-note-detail\[open\]\s+\.dsh-sa-rc-note-when-open\s*\{[^}]*display:\s*inline/s.test(CARD_STYLE_TEXT),
+  '需要成对 span + [open] 后代选择器，两条缺一不可')
+
+
 
 /*
  * 为什么必须复制 `raw` 而不是 DOM 文本：卡片里【说明】可能被折叠到 3 行、
@@ -6275,7 +6550,6 @@ check('chip 用的是 ?task= 这条窄口，不是全量快照',
   reportTaskRequests().length >= 1, `实际 ${reportTaskRequests().length} 次`)
 unmount(chipCard.row)
 
-/*
 /*
  * 下面三条**都换一个新的 taskId**。
  *
