@@ -277,6 +277,14 @@ let getMode = 'ok'
 let cardBoardResponse = { tasks: [] }
 let cardBoardMode = 'ok'
 const cardBoardRequests = () => requests.filter((item) => String(item.url).includes('?group='))
+/**
+ * `GET /board?task=` 的请求（单条派发的卡片用）。
+ *
+ * 必须和 `?group=` 分开数：单条派发没有 group，轮询走的是 `?task=`，而
+ * 「批次卡不许额外发 ?task= 请求」那条反向断言就是在数这个列表。混在一起数，
+ * 两条断言会互相污染。
+ */
+const cardTaskRequests = () => requests.filter((item) => String(item.url).includes('?task='))
 let postReply = { ok: true, target: null }
 /** GET /board/retired 的响应；默认「宿主不提供」，需要时由各段自己覆盖。 */
 let retiredResponse = { ok: true, count: 0, dropped: 0, entries: [] }
@@ -320,6 +328,22 @@ globalThis.fetch = async (url, options) => {
      * 于是「卡片只拉自己那一组」这条断言永远在拿全量数据自证。
      */
     if (String(url).includes('?group=')) {
+      if (cardBoardMode === 'fail') return { ok: false, status: 500, async json() { return { ok: false, error: 'boom' } } }
+      if (cardBoardMode === 'bad') return { ok: true, status: 200, async json() { return {} } }
+      return {
+        ok: true,
+        status: 200,
+        async json() { return JSON.parse(JSON.stringify(cardBoardResponse)) },
+      }
+    }
+    /*
+     * 派发卡的窄口 `GET /board?task=`（单条派发用；报告卡的状态 chip 也走这条）。
+     *
+     * 判在 `?group=` 之后、面板快照之前：三者同一个路径，靠查询串区分。
+     * 落错地方的表现是「单条卡的轮询拿到了面板那份全量 fixture」，于是
+     * 「running → done」永远等不到——正是要修的 bug 在测试里的复现。
+     */
+    if (String(url).includes('?task=')) {
       if (cardBoardMode === 'fail') return { ok: false, status: 500, async json() { return { ok: false, error: 'boom' } } }
       if (cardBoardMode === 'bad') return { ok: true, status: 200, async json() { return {} } }
       return {
@@ -1159,7 +1183,13 @@ check('自报体必带 cards 字段（无结论时是空对象，不是缺字段
   Boolean(readyBody) && readyBody.cards !== null && typeof readyBody.cards === 'object'
     && !Array.isArray(readyBody.cards),
   readyBody ? JSON.stringify(readyBody.cards) : 'null')
-check('当前基线里 report 卡还不存在，cards.report 键必须缺席（不是 error:slot）',
+/*
+ * 报告卡的 Definition 只从 `ctx.inject(['uiConversation'], …)` 里注册（`ctx.get` 读到的是
+ * 时序快照，读不到 ≠ 服务不存在，见 `registerReportCard` 的头注释）。共用 `fakeCtx`
+ * 恰恰**没有** `ctx.inject`，所以这条宿主上它一次都不该注册——`cards.report` 必须缺席，
+ * 而不是 `error:slot`（plans/14 §4.1：键不存在 = 能力没出现，不是失败）。
+ */
+check('宿主没有 ctx.inject 通道时 cards.report 键必须缺席（未提供 ≠ 失败）',
   Boolean(readyBody) && readyBody.cards && !('report' in readyBody.cards),
   readyBody ? JSON.stringify(readyBody.cards) : 'null')
 
@@ -4646,6 +4676,140 @@ try {
     `新增 ${cardBoardRequests().length - beforeResume} 次`)
   unmount(visA)
   unmount(visB)
+
+  /* ═══ 17. ★ 单条派发（没有 group）：状态必须能从 running 变成 done ═══ */
+
+  /*
+   * ── 这条断言的由来（真机 bug，必须读） ──
+   *
+   * 用户实测：任务已经完成、报告都回来了，**派发卡上仍然显示「运行中」**。
+   * 账本是正确的：`GET /board?task=t-mwi1e45s-1` 返回 `status: "done"`、
+   * `settled_at: "2026-11-15T16:16:49.632Z"`；错的是客户端。
+   *
+   * 根因（真因是 A + C 的组合，A 是触发条件）：
+   *
+   *   A. **轮询根本没启动。** `group` 只由 `dispatch_launch_many` 生成
+   *      （`src/tools.js`：`const group = \`g-${newTaskId()}\``）；单条
+   *      `dispatch_launch` 返回 `{ task: card(task) }`，而 `card()` **不投影
+   *      `group`**。所以单条卡的 `view.group === ''`，旧实现在这里
+   *      `if (!group) return undefined`——**一个请求都不发**。卡片永远停在工具
+   *      返回那一瞬间的快照上，而那个快照是派发瞬间的 `running`。
+   *      证据：真机账本里那条任务 `group` 字段是空的（`?task=` 响应里没有
+   *      `group` 键），而批量派发的任务都有 `g-…`。
+   *
+   *   C. **即使轮询起了，也没机会覆盖。** 这是同一个 bug 的第二半：卡片渲染时
+   *      先拿 `block.content`（工具返回的一次性快照）算行，`/board` 数据只是
+   *      「按 task_id 补充」。一旦 L1 的订阅条件为假，那段合并代码一次都不会跑，
+   *      初始的 `running` 就永远是 `running`。
+   *
+   * 所以修复必须同时做两件事，缺一条这条断言就红：
+   *   1. 作用域不再只看 group：没有 group 但有 task_id 时按 `?task=` 订阅；
+   *   2. 合并仍然是**覆盖**语义（`mergeBatchRows` 里 `if (board.status) row.status = board.status`），
+   *      不是「只补缺失字段」——只补缺失的话初始 `running` 永远盖不掉。
+   *
+   * ── 这条断言为什么在旧实现上一定红 ──
+   *
+   * 旧实现在 `group === ''` 时直接 `return undefined`，**连一次 fetch 都不会发**。
+   * 下面的断言三件事一起查：
+   *   ① 卡片确实发出了 `?task=t-solo-1` 的请求（旧实现：0 次 → 直接红）；
+   *   ② 服务端把状态从 running 改成 done 后，卡片行文字变成「已完成」；
+   *   ③ `data-card-ratio` 从 0/1 变成 1/1（聚合也真的重算了）。
+   * ①②③ 里任何一条单独就够让旧实现红，三条一起是为了说清「不是碰巧过」。
+   */
+  const soloPayload = {
+    // 注意：**没有 group 键**——这就是单条派发的真实返回体形状。
+    task: { task_id: 't-solo-1', title: '单条派发的那一条', status: 'running' },
+    depends_on: [],
+    note: '',
+  }
+  cardBoardMode = 'ok'
+  // 第一版响应：任务还在跑（卡片此刻的真实状态）。
+  let soloStatus = 'running'
+  cardBoardResponse = {
+    version: '0.9.1',
+    generatedAt: new Date().toISOString(),
+    concurrency: { running: 1, queued: 0, max: 6 },
+    counts: {},
+    archive_after_hours: 168,
+    tasks: [cardBoardRow('t-solo-1', undefined, soloStatus)],
+    truncated: null,
+  }
+  const soloRequestsBefore = cardTaskRequests().length
+  const soloCard = mount(cardReg('dispatch_launch').component, {
+    phase: 'result',
+    callId: 'c-solo',
+    toolName: 'dispatch_launch',
+    block: { argsRaw: '', args: { title: '单条派发的那一条', brief: 'b' }, content: cardContent(soloPayload), isError: false },
+  })
+  update(soloCard)
+  await clock.flush()
+  update(soloCard)
+
+  const soloRequests = cardTaskRequests().slice(soloRequestsBefore)
+  check('★ 单条派发（没有 group）也会轮询：发出 ?task= 请求（旧实现 0 次，这条直接红）',
+    soloRequests.length >= 1 && soloRequests.every((item) => item.url.includes('?task=t-solo-1')),
+    JSON.stringify(soloRequests.map((item) => item.url)))
+  check('（前置）单条卡此时显示「运行中」（来自 /board 的 running）',
+    cardRowsOf(soloCard).some((row) => text(row).includes('运行中')),
+    JSON.stringify(cardRowsOf(soloCard).map((row) => text(row).replace(/\s+/g, ' ').trim())))
+  check('（前置）单条派发没有 group 时不显示 group 标记（不编造批次）',
+    !findAll(soloCard.tree, (item) => item.props && item.props['data-card-group'])[0])
+
+  /*
+   * 服务端那边任务结算了：下一次轮询必须把 done **覆盖**上去。
+   * 顺序刻意照真机走：先改响应、再推进时钟、等 tick 落地、再重渲染。
+   */
+  soloStatus = 'done'
+  cardBoardResponse = {
+    version: '0.9.1',
+    generatedAt: new Date().toISOString(),
+    concurrency: { running: 0, queued: 0, max: 6 },
+    counts: {},
+    archive_after_hours: 168,
+    tasks: [cardBoardRow('t-solo-1', undefined, soloStatus, { settled_at: new Date().toISOString() })],
+    truncated: null,
+  }
+  clock.advance(2000)
+  await clock.flush()
+  update(soloCard)
+
+  const soloRows = cardRowsOf(soloCard)
+  const soloRatio = findAll(soloCard.tree, (item) => item && item.props && item.props['data-card-ratio'] === 'true')[0]
+  check('★★ 单条派发：初始 running → 轮询返回 done → 卡片显示「已完成」（本次 bug 的回归断言）',
+    soloRows.length === 1 && text(soloRows[0]).includes('已完成') && !text(soloRows[0]).includes('运行中'),
+    JSON.stringify(soloRows.map((row) => text(row).replace(/\s+/g, ' ').trim())))
+  check('★ 单条派发：聚合也跟着从 0/1 变成 1/1（状态覆盖后聚合真的重算了）',
+    Boolean(soloRatio) && text(soloRatio).trim() === '1/1',
+    soloRatio ? text(soloRatio).trim() : 'missing')
+  check('单条派发：结算后行不再可点（已结算的行点不开，与批量同一口径）',
+    soloRows.length === 1 && soloRows[0].props['data-card-open'] === undefined,
+    soloRows.length === 1 ? String(soloRows[0].props['data-card-open']) : 'missing')
+  unmount(soloCard)
+
+  /*
+   * 反面：一条**批次**卡不能因为这条修复而多发一份 ?task= 请求。
+   * 批次的成员本来就在 ?group= 那份数据里；再按 id 各订一遍，就是 N+1 次请求。
+   */
+  cardBoardMode = 'ok'
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-p1-1', 'g-nosolo', 'running'),
+    cardBoardRow('t-p1-2', 'g-nosolo', 'queued'),
+  ])
+  const noSoloBefore = cardBoardRequests().length
+  const noSoloCard = mount(cardReg('dispatch_launch_many').component, p1Props(p1Payload('g-nosolo', ['queued', 'queued']).group
+    ? { group: 'g-nosolo', launched: [
+        { task_id: 't-p1-1', title: '甲', status: 'queued', depends_on: [] },
+        { task_id: 't-p1-2', title: '乙', status: 'queued', depends_on: [] },
+      ], note: '' }
+    : {}))
+  update(noSoloCard)
+  await clock.flush()
+  update(noSoloCard)
+  const noSoloReqs = cardBoardRequests().slice(noSoloBefore)
+  check('★ 有 group 的批次卡不再额外发 ?task= 请求（修复没有引入 N+1）',
+    noSoloReqs.length >= 1 && noSoloReqs.every((item) => item.url.includes('?group=g-nosolo')),
+    JSON.stringify(noSoloReqs.map((item) => item.url)))
+  unmount(noSoloCard)
 } finally {
   clock.uninstall()
   documentStub.visibilityState = 'visible'
@@ -5249,6 +5413,1209 @@ const dispatchTailCode = dispatchTailSrc.replace(/\/\*[\s\S]*?\*\//g, '').replac
 check('DispatchTail 外层不做有条件 hook 调用（先判 useChat，再有 hook 的子组件）',
   !dispatchTailCode.includes('useChat(') && dispatchTailCode.includes('DispatchTailBody'),
   dispatchTailCode.replace(/\s+/g, ' ').slice(0, 200))
+
+/* ═════════════ 报告卡（plans/13）：Definition / 认领范围 / 注册顺序 / 降级 ═════════════ */
+
+/*
+ * 这块只证明**认领链路**：一个最小 Definition 能注册、`match` 只命中自己的报告、
+ * 独占认领的参数对、渲染器在 Definition 之前就位、以及三种降级各自成立。
+ *
+ * 它**不能**证明 G2 的五条真机标准（报告只出现一次 / 轮次导航正常 / compact 折叠
+ * 一致 / 刷新后还在 / 热重载不重注册）——那五条只能在浏览器里看。特别是
+ * 「先注册渲染器、再认领」这个顺序，离线只能验到「调用先后的观察顺序」，
+ * 真正后果（认领了却没渲染器 = 消息消失）要真机才会暴露。
+ */
+console.log('\n报告卡：Definition / 认领范围 / 注册顺序 / 降级（plans/13 §8 / plans/14 §3.2）')
+
+/**
+ * 造一个能跑报告卡注册流程的宿主 ctx。
+ *
+ * 与前面的 `pendingCtx` 分开写，是因为这里要验的东西不一样：那条要验的是
+ * 「槽什么时候回放」，这条要验的是**服务与槽的有无**，以及**调用先后**。
+ *
+ * @param {object} options
+ * - `withService`：是否提供 `uiConversation`（`false` = 旧宿主，没有这个服务）；
+ * - `withNodeSlot`：是否提供 `conversation.chat.node` 槽；
+ * - `throwOnRenderer`：渲染器注册抛错的槽名；
+ * - `throwOnDefinition`：`events.register` 抛错；
+ * - `throwOnInject`：`ctx.inject` 自己抛（依赖名不认）。
+ */
+function reportCtx(options) {
+  const opts = options || {}
+  const order = []
+  const rendererRegs = []
+  const definitions = []
+  const disposals = []
+  const warns = []
+  const ctx = {
+    order,
+    rendererRegs,
+    definitions,
+    disposals,
+    warns,
+    get(name) {
+      if (name === 'uiWorkspace') return uiWorkspace
+      if (name === 'inputTriggers') return inputTriggers
+      return undefined
+    },
+    effect(builder, label) {
+      const dispose = typeof builder === 'function' ? builder() : undefined
+      if (typeof dispose === 'function') disposals.push({ label, dispose })
+      return () => { if (typeof dispose === 'function') dispose() }
+    },
+    logger: { info() {}, warn() { warns.push(Array.prototype.slice.call(arguments).join(' ')) } },
+    slots: {
+      inject(name, register) {
+        if (name === 'conversation.chat.node' && opts.withNodeSlot === false) return
+        register()
+      },
+      register(registerOptions, component) {
+        if (opts.throwOnRenderer && registerOptions && registerOptions.name === opts.throwOnRenderer) {
+          throw new Error('duplicate key')
+        }
+        // `order` 只记报告卡这条链上的两个动作：别的槽（看板/图标/派发卡）与此无关，
+        // 记进来只会让「先渲染器后认领」这条断言被七八个无关条目淹没。
+        if (registerOptions && registerOptions.name === 'conversation.chat.node') order.push('renderer')
+        rendererRegs.push({ options: registerOptions, component })
+        return () => { order.push('dispose-renderer') }
+      },
+    },
+  }
+  if (opts.withService !== false) {
+    ctx.uiConversation = {
+      events: {
+        register(definition) {
+          if (opts.throwOnDefinition) throw new Error('duplicate kind')
+          order.push('definition')
+          definitions.push(definition)
+          return () => {}
+        },
+      },
+    }
+  }
+  if (opts.throwOnInject) {
+    ctx.inject = function () { throw new Error('unknown dependency uiConversation') }
+  } else {
+    /*
+     * 宿主真实的 `ctx.inject(['uiConversation'], cb)`：服务就绪后**在子 scope 上调** cb。
+     * 这里同步回放（最常见的情形），并把同一个 ctx 传进去——子 scope 继承全部服务，
+     * 所以 `scopeCtx.slots` 与本 ctx 等价。
+     */
+    ctx.inject = function (deps, callback) {
+      if (opts.withService === false) return
+      callback(ctx)
+    }
+  }
+  return ctx
+}
+
+/**
+ * 一条本插件 relay 报告的假 `user/message` 事件（形状照 SessionEvent）。
+ *
+ * ⚠️ `id` 必须是**真机那种两层拼接**的形状，不能是 `t-xxx:relay:...`：
+ * `dispatch.js:2548` 先算 `requestId = nextMessageId(task.id,'relay')`，然后
+ * `sessions.js:105,115` 又把它拼成 `` `${SOURCE_KIND}:${requestId}` ``。落到事件上的
+ * `data.id` 因此是 `dsh-mini-superagent:<taskId>:relay:<BOOT>:<seq>`。
+ * 用短 fixture 会让「取第一段」这个真机 bug 在离线断言里**照样通过**——那正是它当初
+ * 漏过去的原因。
+ */
+function relayEvent(overrides) {
+  const base = {
+    type: 'user/message',
+    seq: 42,
+    time: 1700000000000,
+    data: {
+      id: 'dsh-mini-superagent:t-m0abc-1:relay:boot:1',
+      role: 'user',
+      content: [{ type: 'text', text: '【任务】做完了\n总结：全部通过' }],
+      source: { kind: 'dsh-mini-superagent', form: 'relay' },
+    },
+  }
+  const patch = overrides || {}
+  return Object.assign({}, base, patch, {
+    data: Object.assign({}, base.data, patch.data || {}),
+  })
+}
+
+/**
+ * `ui-chat` 的 `groupTree` 深度表（`contract/group-tree.ts` 的 `DEPTH` 逐字照抄）。
+ *
+ * 为什么要在这里重建它：断言 `groupTree === 'turn'` 只锁住「写的是哪个字」，
+ * 锁不住「这个字意味着什么」——而真机出问题的恰恰是语义（`undefined` 被理解成
+ * 「并入 step run」，于是被算成过程内容）。所以再补一层语义断言：
+ * 节点必须 **at-or-outside `'turn'`**，这才是 `ChatNodeSeat` / `turn-process-presentation`
+ * 判定「不进过程区」的真正判据。
+ */
+const GROUP_TREE_DEPTH = { exchange: 0, input: 1, turn: 2, process: 3 }
+
+/** 与 `ui-chat` 的 `isAtOrOutside` 同义：位置在该处或更外层。 */
+function isAtOrOutside(node, position) {
+  return node.groupTree !== undefined && GROUP_TREE_DEPTH[node.groupTree] <= GROUP_TREE_DEPTH[position]
+}
+
+/* ── ① 有 uiConversation 时注册一次，kind / target 对 ── */
+
+const reportHost = reportCtx({})
+let reportThrew = null
+try { mod.apply(reportHost) } catch (error) { reportThrew = error }
+check('宿主有 uiConversation 时 apply 不抛错', reportThrew === null, reportThrew ? String(reportThrew) : 'ok')
+check('events.register 被调用一次', reportHost.definitions.length === 1,
+  `实际 ${reportHost.definitions.length}`)
+const reportDef = reportHost.definitions[0]
+check('Definition kind === dispatch-report', Boolean(reportDef) && reportDef.kind === 'dispatch-report',
+  reportDef ? String(reportDef.kind) : 'missing')
+check('Definition target === chat', Boolean(reportDef) && reportDef.target === 'chat',
+  reportDef ? String(reportDef.target) : 'missing')
+check('Definition 声明了 buildViewNode（target 与它必须成对出现）',
+  Boolean(reportDef) && typeof reportDef.buildViewNode === 'function')
+
+/* ── ② match 命中本插件 relay 消息 → exclusive: true ── */
+
+const hit = reportDef ? reportDef.match(relayEvent()) : null
+check('match 命中本插件 relay 消息', hit !== null && hit.role === 'start', JSON.stringify(hit))
+check('命中的 match 返回 exclusive: true（独占认领，不然会和 context 行重复）',
+  Boolean(hit) && hit.exclusive === true, JSON.stringify(hit))
+check('命中的 match 用 message id 当 id',
+  Boolean(hit) && hit.id === 'dsh-mini-superagent:t-m0abc-1:relay:boot:1', hit ? String(hit.id) : 'missing')
+
+/* ── ③ match 不命中：人类消息 / 非 relay / 别的 source.kind / developer/message ── */
+
+const humanHit = reportDef ? reportDef.match(relayEvent({ data: { source: { kind: 'user' } } })) : 'no-def'
+check('match 不命中人类消息（source.kind=user）', humanHit === null, JSON.stringify(humanHit))
+const formHit = reportDef
+  ? reportDef.match(relayEvent({ data: { source: { kind: 'dsh-mini-superagent', form: 'message' } } }))
+  : 'no-def'
+check('match 不命中 form !== relay（认领范围必须只剩报告）', formHit === null, JSON.stringify(formHit))
+const otherKindHit = reportDef
+  ? reportDef.match(relayEvent({ data: { source: { kind: 'dsh-free-search', form: 'relay' } } }))
+  : 'no-def'
+check('match 不命中别的插件 source.kind（不许抢别家的消息）', otherKindHit === null, JSON.stringify(otherKindHit))
+const devHit = reportDef ? reportDef.match(relayEvent({ type: 'developer/message' })) : 'no-def'
+check('match 不命中 developer/message', devHit === null, JSON.stringify(devHit))
+const noSourceHit = reportDef ? reportDef.match(relayEvent({ data: { source: undefined } })) : 'no-def'
+check('match 不命中没有 source 的用户消息（不能靠 undefined 猜）',
+  noSourceHit === null, JSON.stringify(noSourceHit))
+
+/* ── ④ buildViewNode：groupTree 必须在 'turn' 层、anchorSeq 等于事件 seq ── */
+
+const startMatch = { event: relayEvent(), role: 'start', location: { kind: 'step', turn: {}, step: {} } }
+const state = reportDef ? reportDef.start({}, startMatch) : null
+const viewNode = reportDef
+  ? reportDef.buildViewNode({ key: 'k:1', kind: 'dispatch-report', id: hit && hit.id, start: startMatch, state, matches: [startMatch] })
+  : null
+check('buildViewNode 返回 kind=dispatch-report 的节点',
+  Boolean(viewNode) && viewNode.kind === 'dispatch-report', viewNode ? String(viewNode.kind) : 'missing')
+check('buildViewNode 的 target 是 chat', Boolean(viewNode) && viewNode.target === 'chat')
+check('anchorSeq 等于事件 seq（轮次分隔线/导航按它定位）',
+  Boolean(viewNode) && viewNode.anchorSeq === 42, viewNode ? String(viewNode.anchorSeq) : 'missing')
+/*
+ * 真机返工点（plans/14 §5 G2 第 3 条）：`groupTree` 曾经是 `undefined`，
+ * 于是被 `ui-chat` 当成「并入 step run」→ 算进过程内容 → 随工作详情一起折叠。
+ * 这里同时锁「值」和「语义」：值必须逐字是 `'turn'`，且 must be at-or-outside `'turn'`。
+ */
+check('groupTree === "turn"（留在本轮、但不属于本轮过程区，不被折叠）',
+  Boolean(viewNode) && viewNode.groupTree === 'turn', viewNode ? String(viewNode.groupTree) : 'missing')
+check('groupTree 的语义是 at-or-outside "turn"（这才是 ui-chat 判定「不进过程区」的判据）',
+  Boolean(viewNode) && isAtOrOutside(viewNode, 'turn'),
+  viewNode ? `groupTree=${String(viewNode.groupTree)}` : 'missing')
+check('groupTree 不是 "input"（否则会触发 hasInterleavedInput，把整轮工作详情强制展开）',
+  Boolean(viewNode) && viewNode.groupTree !== 'input')
+check('groupTree 不是 "exchange"（否则这条报告会开启新 exchange、重分轮次段）',
+  Boolean(viewNode) && viewNode.groupTree !== 'exchange')
+check('location 原样透传 start.location（不自己算）',
+  Boolean(viewNode) && viewNode.location === startMatch.location)
+check('visibility 是 visible', Boolean(viewNode) && viewNode.visibility === 'visible')
+/*
+ * taskId 必须剥掉包名前缀再取段：真机 `data.id` 是
+ * `dsh-mini-superagent:t-m0abc-1:relay:boot:1`，取第一段会得到包名本身
+ * （S3 真机上看到的就是「任务 dsh-mini-superagent」这个错值）。
+ */
+check('data 里带得出来 task id（先剥包名前缀，再取下一段）',
+  Boolean(viewNode) && viewNode.data && viewNode.data.taskId === 't-m0abc-1',
+  viewNode && viewNode.data ? String(viewNode.data.taskId) : 'missing')
+check('taskId 不是包名（这个 bug 真机上出现过：显示成 dsh-mini-superagent）',
+  Boolean(viewNode) && viewNode.data && viewNode.data.taskId !== 'dsh-mini-superagent',
+  viewNode && viewNode.data ? String(viewNode.data.taskId) : 'missing')
+check('state 没准备好时 buildViewNode 返回 null（不许画一个空壳）',
+  Boolean(reportDef) && reportDef.buildViewNode({ key: 'k', kind: 'dispatch-report', id: 'i', start: undefined, state: undefined, matches: [] }) === null)
+
+/* ── 注册顺序：渲染器必须在 Definition 之前 ── */
+
+check('注册顺序是「先 renderer、后 definition」（反了会丢消息）',
+  reportHost.order.join('>') === 'renderer>definition', reportHost.order.join('>'))
+check('渲染器注册在 conversation.chat.node 上、key 等于 Definition 的 kind',
+  reportHost.rendererRegs.filter((item) => item.options && item.options.name === 'conversation.chat.node').length === 1
+    && reportHost.rendererRegs.filter((item) => item.options && item.options.name === 'conversation.chat.node')[0].options.key === 'dispatch-report',
+  JSON.stringify(reportHost.rendererRegs.map((item) => item.options)))
+check('渲染器是可渲染的函数组件', (() => {
+  const reg = reportHost.rendererRegs.find((item) => item.options && item.options.name === 'conversation.chat.node')
+  return Boolean(reg) && typeof reg.component === 'function'
+})())
+check('注册成功后 cards.report === on（键存在且是 on，不是「未提供」）',
+  Boolean(lastReadyBody()) && lastReadyBody().cards.report === 'on',
+  JSON.stringify(lastReadyBody() ? lastReadyBody().cards : null))
+
+/* ── 渲染器：正式版的卡片（plans/13 §七）── */
+
+/*
+ * 这一段开始验**卡片内容**（S3 验的是认领链路）。
+ *
+ * 用户对这一版的核心诉求写在最前面，也是下面每条断言背后的判据：
+ * 「**做完必须比原来的灰色 context 行信息更多、可读性更好**。如果只是位置变好
+ * 但内容变少，不值得。」原来的 context 行会显示完整四段正文，所以这里最先钉住的
+ * 不是「卡片长得对」，而是「**内容一点都不少**」。
+ */
+
+const reportReg = reportHost.rendererRegs.find((item) => item.options && item.options.name === 'conversation.chat.node')
+const reportRow = reportReg ? mount(reportReg.component, { node: viewNode }) : null
+const reportTreeText = reportRow ? text(reportRow.tree) : ''
+check('渲染器画的是卡片根（data-report-card），不是 spike 那行替身',
+  Boolean(reportRow) && findAll(reportRow.tree, (item) => item && item.props && item.props['data-report-card'] === 'true').length === 1,
+  reportTreeText.slice(0, 120))
+check('spike 的临时标记已彻底移除（data-report-spike 一个都不许剩）',
+  Boolean(reportRow) && findAll(reportRow.tree, (item) => item && item.props && item.props['data-report-spike'] !== undefined).length === 0)
+check('卡头显示任务短标签（来自【任务】段），不是 task id',
+  reportTreeText.includes('做完了'), reportTreeText.replace(/\s+/g, ' ').slice(0, 120))
+check('卡头显示短 task id 且已剥包名前缀',
+  Boolean(reportRow) && findAll(reportRow.tree, (item) => item && item.props && item.props['data-report-id'] === 't-m0abc-1').length === 1
+    && !reportTreeText.includes('dsh-mini-superagent'),
+  reportTreeText.replace(/\s+/g, ' ').slice(0, 160))
+if (reportRow) unmount(reportRow)
+
+/* ═════════════════════ 报告卡正式版：四形态解析 + 结构化渲染 ═════════════════════ */
+
+/*
+ * 判据来源：plans/13 §3.2（四种文本形态）、§8.2（解析契约）、§十二（验收）。
+ *
+ * 这里的 fixture **照 `voice.js` 的产出形状写**，不是手写的理想文本：
+ *   `reportText()`  → 【任务】/【结果】/【说明】?/【需要你】?/【细节】
+ *   `batchText()`   → 【批次】/ 比例行 / · 成了：… / · 没成：… /【需要你】?/【细节】?
+ *   `failureText()` → `<标签>：没能开始——<原因>。要我重试吗？`
+ *   `idleText()`    → `<标签>：它跑完了，但没给结论——…` /【说明】?/【细节】
+ *
+ * 为什么不用「手写的漂亮文本」：那样断言只能证明「我的解析器认识我的 fixture」，
+ * 而真实报告是 `voice.js` 拼出来的，漏掉任何一个真实形状（比如 idleText 会推
+ * **两行**【说明】、batchText 的比例行没有段名）都会在真机上才暴露。
+ */
+console.log('\n报告卡正式版：四形态解析 / 原文兜底 / 缺段 / 折叠 / 复制 / 状态 chip')
+
+/** 挂一张报告卡：走 Definition 的 start → buildViewNode → 渲染器，端到端一条链。 */
+function renderReport(rawText, options) {
+  const opts = options || {}
+  const id = opts.id || 'dsh-mini-superagent:t-rc-1:relay:boot:7'
+  const event = relayEvent({ data: { id, content: [{ type: 'text', text: rawText }] } })
+  const match = { event, role: 'start', location: { kind: 'step', turn: {}, step: {} } }
+  const state = reportDef.start({}, match)
+  const node = reportDef.buildViewNode({ key: 'k:rc', kind: 'dispatch-report', id, start: match, state, matches: [match] })
+  return { state, node, row: mount(reportReg.component, { node }) }
+}
+
+/** 直接打解析器（`content` 可以故意是脏形状，验「任何输入都不抛错」）。 */
+function parseReportForTest(rawText) {
+  const content = rawText === undefined || rawText === null
+    ? rawText
+    : (typeof rawText === 'string' ? [{ type: 'text', text: rawText }] : rawText)
+  const event = relayEvent({ data: { content } })
+  return reportDef.start({}, { event, role: 'start', location: { kind: 'step', turn: {}, step: {} } }).card
+}
+
+/** 卡片里所有带某个 `data-report-*` 标记的元素。 */
+function reportMarks(row, key) {
+  return findAll(row.tree, (item) => item && item.props && item.props[key] !== undefined)
+}
+
+/* ── ① 单任务报告：段名齐全、内容出现在正确位置 ── */
+
+const FIXTURE_REPORT = [
+  '【任务】报告卡修复验证',
+  '【结果】占位文件已建好，报告卡可检查',
+  '【说明】按简报先 Start-Sleep 10 秒；这一步只是为了让卡片在真机上停留可看',
+  '【需要你】定一下：要不要把 10 秒去掉？',
+  '【细节】dispatch_inspect t-rc-1',
+].join('\n')
+const singleReportCard = renderReport(FIXTURE_REPORT)
+check('单任务报告被识别成 shape=report（不是原文兜底）',
+  singleReportCard.state.card.shape === 'report', String(singleReportCard.state.card.shape))
+check('单任务报告：标题取【任务】的值',
+  singleReportCard.state.card.title === '报告卡修复验证', singleReportCard.state.card.title)
+check('单任务报告：结果取【结果】的值',
+  singleReportCard.state.card.result === '占位文件已建好，报告卡可检查', String(singleReportCard.state.card.result))
+check('单任务报告：说明原样保留（不压缩、不改写）',
+  singleReportCard.state.card.note === '按简报先 Start-Sleep 10 秒；这一步只是为了让卡片在真机上停留可看',
+  String(singleReportCard.state.card.note))
+check('单任务报告：需要你取【需要你】的值',
+  singleReportCard.state.card.need === '定一下：要不要把 10 秒去掉？', String(singleReportCard.state.card.need))
+check('单任务报告：inspectId 从【细节】里取到（校验过 t-/g- 形状）',
+  singleReportCard.state.card.inspectId === 't-rc-1', String(singleReportCard.state.card.inspectId))
+const singleReportText = text(singleReportCard.row.tree).replace(/\s+/g, ' ')
+check('单任务卡渲染出结果段（data-report-result）',
+  reportMarks(singleReportCard.row, 'data-report-result').length === 1)
+check('单任务卡渲染出需要你段（data-report-need）',
+  reportMarks(singleReportCard.row, 'data-report-need').length === 1)
+check('单任务卡渲染出说明段（data-report-note）',
+  reportMarks(singleReportCard.row, 'data-report-note').length === 1)
+check('单任务卡的正文里四段内容全都在（标题 / 结果 / 说明 / 需要你）',
+  singleReportText.includes('占位文件已建好') && singleReportText.includes('Start-Sleep 10 秒')
+    && singleReportText.includes('要不要把 10 秒去掉') && singleReportText.includes('报告卡修复验证'),
+  singleReportText.slice(0, 240))
+/*
+ * 段落 DOM 顺序是**信息重要性顺序**（plans/13 §7.4）：结果在最上面（用户第一眼要读到
+ * 的那句），说明在中间，需要你紧贴折叠的细节之下（它是唯一要人动手的地方，
+ * 不能沉在正文中部被跳读略过）。
+ */
+check('单任务卡段落顺序是 结果 → 说明 → 需要你',
+  (() => {
+    const seen = []
+    walk(singleReportCard.row.tree, (item) => {
+      if (!item || !item.props) return
+      if (item.props['data-report-result'] !== undefined) seen.push('result')
+      if (item.props['data-report-note'] !== undefined) seen.push('note')
+      if (item.props['data-report-need'] !== undefined) seen.push('need')
+    })
+    return seen.join('>') === 'result>note>need'
+  })())
+unmount(singleReportCard.row)
+
+/* ── ② 解析不了 → 原文卡，且内容**完整**（本组最重要的一条） ── */
+
+/*
+ * 这条是本块最高优先的断言。为什么它比「四种形态都渲染对」更重要：
+ * 四种形态渲染错，用户看到的是「排版怪」；兜底丢内容，用户看到的是
+ * **「它说过的话不见了」**，而且不会有人去比对原文。
+ *
+ * 三种触发方式都验：首行不认识 / 行首认识但中段混入意外行 / 完全不是报告。
+ */
+const UNKNOWN_FIXTURES = [
+  ['首行不是任何已知段名', '这是一段完全不像报告的自由文本\n第二行\n第三行'],
+  ['首行像报告但中段混入意外行', '【任务】某任务\n【结果】做完了\n这一行没有段名，解析器不该吞掉它'],
+  ['旧版本写入的老消息', '老格式报告：\n结论：好\n说明：无'],
+  ['单行乱码', '??'],
+]
+for (const [why, fixture] of UNKNOWN_FIXTURES) {
+  const card = renderReport(fixture)
+  const shown = findAll(card.row.tree, (item) => item && item.props && item.props['data-report-raw'] === 'true')
+  const shownText = shown.length ? text(shown[0]) : ''
+  check(`解析不了 → 原文卡（${why}）`,
+    card.state.card.shape === 'unknown' && shown.length === 1,
+    `shape=${card.state.card.shape} rawBlocks=${shown.length}`)
+  check(`原文卡内容完整、一行不少（${why}）`,
+    fixture.split('\n').every((line) => shownText.includes(line.trim())),
+    `期望每行都在，实际：${shownText.replace(/\s+/g, ' ').slice(0, 200)}`)
+  unmount(card.row)
+}
+const emptyCard = renderReport('')
+check('空正文不崩、也不画一张空白卡（给一句「没有正文」）',
+  emptyCard.state.card.shape === 'unknown'
+    && findAll(emptyCard.row.tree, (item) => item && item.props && item.props['data-report-empty'] === 'true').length === 1,
+  text(emptyCard.row.tree))
+unmount(emptyCard.row)
+
+/* ── ③ 缺段不占位 ── */
+
+const NO_NEED = ['【任务】只成了一半', '【结果】跑完了', '【说明】没需要你', '【细节】dispatch_inspect t-rc-2'].join('\n')
+const noNeedCard = renderReport(NO_NEED)
+check('缺【需要你】时不渲染那个区块（不是渲染一个空盒子）',
+  noNeedCard.state.card.need === undefined
+    && reportMarks(noNeedCard.row, 'data-report-need').length === 0,
+  text(noNeedCard.row.tree).replace(/\s+/g, ' ').slice(0, 160))
+check('缺段不影响其它段（结果 / 说明仍然在）',
+  text(noNeedCard.row.tree).includes('跑完了') && text(noNeedCard.row.tree).includes('没需要你'))
+unmount(noNeedCard.row)
+
+const headOnlyCard = renderReport('【任务】只有首行')
+check('只有首行时只显示卡头，不崩、不画空段',
+  headOnlyCard.state.card.shape === 'report'
+    && headOnlyCard.state.card.result === undefined
+    && reportMarks(headOnlyCard.row, 'data-report-result').length === 0
+    && text(headOnlyCard.row.tree).includes('只有首行'),
+  text(headOnlyCard.row.tree).replace(/\s+/g, ' ').slice(0, 160))
+unmount(headOnlyCard.row)
+
+/* ── ④ 批次汇总：3/4 比例 + 成了 / 没成 两组 ── */
+
+const FIXTURE_BATCH = [
+  '【批次】重构这批 4 条',
+  '4 条成了 3 条，1 条没成。',
+  '· 成了：登录超时、接口重试、日志清理',
+  '· 没成：补集成测试（连不上压测环境）',
+  '【需要你】1 条没成，看看要重试、换做法，还是先放着？',
+  '【细节】dispatch_inspect 按任务查（批次 g-t-rc-9）',
+].join('\n')
+const batchCard = renderReport(FIXTURE_BATCH, { id: 'dsh-mini-superagent:g-t-rc-9:relay:boot:8' })
+const batchCardText = text(batchCard.row.tree).replace(/\s+/g, ' ')
+check('批次汇总被识别成 shape=batch', batchCard.state.card.shape === 'batch', String(batchCard.state.card.shape))
+check('批次卡头显示 3/4 比例（来自报告文本本身，不是聚合猜的）',
+  Boolean(batchCard.state.card.ratio) && batchCard.state.card.ratio.ok === 3 && batchCard.state.card.ratio.total === 4
+    && reportMarks(batchCard.row, 'data-report-ratio').length === 1,
+  JSON.stringify(batchCard.state.card.ratio))
+check('批次卡渲染「成了」组',
+  reportMarks(batchCard.row, 'data-report-group').some((item) => item.props['data-report-group'] === 'ok'))
+check('批次卡渲染「没成」组',
+  reportMarks(batchCard.row, 'data-report-group').some((item) => item.props['data-report-group'] === 'failed'))
+check('批次卡里两组的名单都在（登录超时 / 补集成测试）',
+  batchCardText.includes('登录超时') && batchCardText.includes('补集成测试'), batchCardText.slice(0, 240))
+check('批次卡的 group id 取到的是 g-t-rc-9（不是包名）',
+  batchCard.state.card.taskId === 'g-t-rc-9', String(batchCard.state.card.taskId))
+check('批次卡也渲染【需要你】',
+  reportMarks(batchCard.row, 'data-report-need').length === 1)
+unmount(batchCard.row)
+
+/*
+ * 认不出的组名**不猜语义**（plans/13 §8.2 第 3 条）：归 `other` 并保留原标签与原文。
+ * 这一条守的是「将来文案加了新组」的场景——那种情况下内容仍然看得见。
+ */
+const OTHER_GROUP = ['【批次】新组名', '2 条成了 1 条，1 条部分完成。', '· 部分完成：半个活'].join('\n')
+const otherGroupCard = renderReport(OTHER_GROUP)
+check('认不出的组名归 other 且原标签、原文都保留',
+  otherGroupCard.state.card.groups.length === 1
+    && otherGroupCard.state.card.groups[0].kind === 'other'
+    && otherGroupCard.state.card.groups[0].label === '部分完成'
+    && otherGroupCard.state.card.groups[0].text === '半个活'
+    && text(otherGroupCard.row.tree).includes('部分完成'),
+  JSON.stringify(otherGroupCard.state.card.groups))
+unmount(otherGroupCard.row)
+
+/* ── ⑤ 启动失败 / 跑完没结论 ── */
+
+const failureCard = renderReport('auth 令牌刷新：没能开始——模型侧 503。要我重试吗？')
+check('启动失败被识别成 shape=failure',
+  failureCard.state.card.shape === 'failure', String(failureCard.state.card.shape))
+check('启动失败：卡头是任务短标签（只取冒号前那一段）',
+  failureCard.state.card.title === 'auth 令牌刷新', String(failureCard.state.card.title))
+check('启动失败：原因原样显示（含「没能开始」与「要我重试吗」）',
+  text(failureCard.row.tree).includes('没能开始——模型侧 503') && text(failureCard.row.tree).includes('要我重试吗'),
+  text(failureCard.row.tree).replace(/\s+/g, ' ').slice(0, 160))
+unmount(failureCard.row)
+
+const IDLE_TEXT = [
+  '日志清理：它跑完了，但没给结论——要我追问一句吗？',
+  '【说明】它最后动过 logs/ 目录；没有别的文本输出',
+  '【说明】这是第二条说明（idleText 会推两行）',
+  '【细节】dispatch_inspect t-rc-3',
+].join('\n')
+const idleCard = renderReport(IDLE_TEXT)
+check('跑完没结论被识别成 shape=idle',
+  idleCard.state.card.shape === 'idle', String(idleCard.state.card.shape))
+check('idle 卡：两行【说明】都保留（不是后者覆盖前者）',
+  Boolean(idleCard.state.card.note)
+    && idleCard.state.card.note.includes('logs/ 目录')
+    && idleCard.state.card.note.includes('第二条说明'),
+  String(idleCard.state.card.note))
+check('idle 卡：卡头是任务短标签',
+  idleCard.state.card.title === '日志清理', String(idleCard.state.card.title))
+unmount(idleCard.row)
+
+/* ── ⑥ 【细节】原生 <details> 折叠（非受控） ── */
+
+/*
+ * ⚠️ 这一节守的是一条**被误判过 4 次**的结论，改之前先把来龙去脉读完。
+ *
+ * 事实：`<details>` + `<summary>` 这条折叠条一直是**好的**，用户原话是
+ * 「细节按钮是完全有效的，也是折叠的」。真正坏的是别的东西，而当时的修复
+ * 把这段折叠整个删成了「直接铺开原文 + max-height 滚动」——删错了对象。
+ *
+ * 那次误判的**真因**（后来定位到的）：渲染时给 `<details>` 传了 `open`。
+ * 那是受控写法。卡片在报告回流、状态 chip 变化、宿主虚拟滚动重挂时都会
+ * 重渲染，React 每次都用那个陈旧的 `open` 值把浏览器刚展开的属性**写回去**，
+ * 用户看到的是「点开了，一眨眼又收回去」，而且**全程不报错**。
+ *
+ * 所以这一节的断言不是「点一下能展开」——那条在离线 stub 里怎么写都通，
+ * 证明不了真机（这正是第二版 785 项全绿、真机仍然没反应的教训）。
+ * 真正有牙的是第 3 条：**点开 → 强制父级重渲染两次 → 仍然展开**。
+ * 它专门检测「受控 open 把展开态写回」这个唯一的真因：
+ *
+ *   · 非受控实现（不传 open）：重渲染不碰 open 属性 → 断言绿；
+ *   · 受控实现（传了 open）：重渲染把它写回 false → 断言红。
+ *
+ * 为了让这条断言真的能区分两者，下面写了一个**极简 details DOM 模型**：
+ * 它按真实 React 的规则更新 open——只有 props 里**存在** `open` 键时才写回，
+ * 不存在就一律不动（浏览器自己管）。下面还有一条自检断言，把 `open: false`
+ * 喂给这个模型，证明它确实会红——一条永远不会红的回归断言等于没有。
+ */
+
+/**
+ * 极简 `<details>` 语义模型（模拟真实 DOM 上那个 `open` 属性）。
+ *
+ * 为什么要自己建模型而不是直接看 props：`open` 到底有没有生效，取决于它
+ * **跨重渲染**是保留还是被写回——那是 DOM 节点上的状态，不是元素对象上的字段。
+ * stub 每次渲染都造新元素，所以需要一张按 `key` 索引的「DOM 侧」状态表。
+ */
+function makeDetailsDom(row) {
+  const openState = new Map()
+  const nodes = new Map()
+  function sync() {
+    let index = 0
+    findAll(row.tree, (item) => Boolean(item) && item.type === 'details').forEach((node) => {
+      const key = node.props && node.props.key !== undefined ? String(node.props.key) : '#' + (index++)
+      nodes.set(key, node)
+      // React 的受控判定：props 里**存在** open 键才算受控，不存在就不碰 DOM 属性。
+      const controlled = Object.prototype.hasOwnProperty.call(node.props || {}, 'open')
+      if (!openState.has(key) || controlled) {
+        openState.set(key, controlled ? Boolean(node.props.open) : (openState.get(key) || false))
+      }
+    })
+    return nodes
+  }
+  return {
+    sync,
+    keys: () => Array.from(nodes.keys()),
+    node: (key) => nodes.get(key),
+    isOpen: (key) => Boolean(openState.get(key)),
+    /** 浏览器原生行为：点一次 summary 翻转 open（不经过任何 JS 状态）。 */
+    click(key) {
+      if (!nodes.has(key)) throw new Error('没有 details 节点：' + key)
+      openState.set(key, !openState.get(key))
+    },
+  }
+}
+
+const detailCard = renderReport(FIXTURE_REPORT)
+const detailMarks = (key) => reportMarks(detailCard.row, key)
+const detailDom = makeDetailsDom(detailCard.row)
+detailDom.sync()
+
+/**
+ * 报告卡样式表的源码切片。
+ *
+ * 离线 stub 不解析 CSS，「箭头由 [open] 驱动」「折叠体不再叠 max-height」
+ * 这类约定只能用源码断言。取 `const CARD_STYLE =` 到样式块结束之间那一段，
+ * 与上面几节的做法一致（同一份切片规则，避免两处漂移）。
+ */
+const CARD_STYLE_TEXT = (() => {
+  const start = source.indexOf('const CARD_STYLE =')
+  const end = source.indexOf('卡片样式的单例节点', start)
+  return start < 0 || end < 0 ? '' : source.slice(start, end)
+})()
+
+/* ── A. 初始状态：收起 ── */
+
+/*
+ * 收起态判据用两条：`details` 节点在、且它的 props 里**没有** open。
+ * 不看「有没有 open 属性且为 false」——传 `open: false` 也是受控，正是要防的写法。
+ */
+const detailDetails = detailDom.keys().map((key) => detailDom.node(key))[0]
+check('★【细节】卡片里有 details 折叠体（细节按钮回来了）',
+  Boolean(detailDetails) && detailDetails.type === 'details',
+  detailDetails ? String(detailDetails.type) : 'missing')
+check('★【细节】初始是收起的：details 的 props 里没有 open 属性',
+  Boolean(detailDetails) && !Object.prototype.hasOwnProperty.call(detailDetails.props, 'open'),
+  detailDetails ? JSON.stringify({ hasOwnOpen: Object.prototype.hasOwnProperty.call(detailDetails.props, 'open') }) : 'missing')
+check('★【细节】初始收起时原文不可见（浏览器收起 details 就不显示内容区）',
+  detailDom.isOpen('detail') === false && Boolean(detailMarks('data-report-detail-raw')[0]),
+  JSON.stringify({ open: detailDom.isOpen('detail'), raw: Boolean(detailMarks('data-report-detail-raw')[0]) }))
+
+const detailToggle = detailMarks('data-report-detail-toggle')[0]
+check('【细节】折叠条是 summary（原生可点，不需要 JS 事件）',
+  Boolean(detailToggle) && detailToggle.type === 'summary',
+  detailToggle ? String(detailToggle.type) : 'missing')
+check('【细节】折叠条上的文案是「细节」（report.detail 还在）',
+  Boolean(detailToggle) && text(detailToggle).includes('细节'),
+  detailToggle ? text(detailToggle).trim() : 'missing')
+const detailCaret = detailToggle
+  ? findAll(detailToggle, (item) => item && item.props && item.props.className === 'dsh-sa-rc-caret')[0]
+  : undefined
+check('【细节】折叠条里有一个 caret 元素（箭头挂点）',
+  Boolean(detailCaret),
+  detailCaret ? 'present' : 'missing')
+check('★【细节】caret 里没有 JS 写死的字形（▸/▾ 由 CSS 的 content 提供）',
+  Boolean(detailCaret) && text(detailCaret) === '',
+  detailCaret ? JSON.stringify(text(detailCaret)) : 'missing')
+
+/* ── B. 点一下展开 ── */
+
+detailDom.click('detail')
+update(detailCard.row)
+detailDom.sync()
+
+check('★【细节】点 summary 后 details 打开（open = true）',
+  detailDom.isOpen('detail') === true, String(detailDom.isOpen('detail')))
+const openedRaw = detailMarks('data-report-detail-raw')[0]
+check('★【细节】展开后原文可见，且是**完整 raw**（四段全在，一行不少）',
+  detailDom.isOpen('detail') === true && Boolean(openedRaw)
+    && FIXTURE_REPORT.split('\n').every((line) => text(openedRaw).includes(line)),
+  openedRaw ? text(openedRaw).replace(/\s+/g, ' ').slice(0, 200) : 'missing')
+check('【细节】原文是 pre（等宽 + pre-wrap，缩进换行与原文一致）',
+  Boolean(openedRaw) && openedRaw.type === 'pre',
+  openedRaw ? String(openedRaw.type) : 'missing')
+check('【细节】原文节点上没有 onClick（它是内容，不是控件）',
+  Boolean(openedRaw) && openedRaw.props.onClick === undefined,
+  openedRaw ? typeof openedRaw.props.onClick : 'missing')
+
+/* ── C. ★ 关键回归：展开后再重渲染两次，仍然展开 ── */
+
+/*
+ * ⭐ 这一条是整节的**触发器**，也是那 4 次失败唯一能离线复现的检测器。
+ *
+ * 做法就是真实宿主的做法：展开之后卡片还会因为别的原因重渲染（报告回流、
+ * 状态 chip 变化、虚拟滚动重挂）。这里连续 `update()` 两次，等价于那两帧。
+ *
+ *   · 非受控（不传 open）→ 渲染不碰 open 属性 → 浏览器保持展开 → 绿；
+ *   · 受控（传了 open）→ 每次渲染把 open 写回陈旧值 → 收回 → 红。
+ *
+ * 下面的 D 段还有一条**自检**：把 `open: false` 喂给同一个模型，证明它确实会红。
+ * 没有那条自检，这条断言可能只是「永远不会失败的摆设」。
+ */
+update(detailCard.row)
+update(detailCard.row)
+detailDom.sync()
+
+check('★【细节】点击展开 → 强制重渲染两次 → 仍然展开（受控写法会在这里红）',
+  detailDom.isOpen('detail') === true,
+  JSON.stringify({ open: detailDom.isOpen('detail') }))
+const settledRaw = detailMarks('data-report-detail-raw')[0]
+check('★【细节】两次重渲染后原文仍然完整（没有被收回或截断）',
+  detailDom.isOpen('detail') === true && Boolean(settledRaw)
+    && FIXTURE_REPORT.split('\n').every((line) => text(settledRaw).includes(line)),
+  settledRaw ? text(settledRaw).replace(/\s+/g, ' ').slice(0, 160) : 'missing')
+
+/* ── D. 自检：这个模型真的能抓到「传了 open」的写法 ── */
+
+/*
+ * 用一棵**手工构造的受控树**喂给同一个模型：`open: false` 写在 props 里。
+ * 模拟「用户点开 → 父级重渲染」，模型按 React 的规则把 open 写回 false——
+ * 于是展开态被收回。这证明 C 段那条断言对受控实现是**有牙的**。
+ */
+const controlledProbeRow = {
+  tree: {
+    type: 'div',
+    props: {
+      children: [{
+        type: 'details',
+        props: {
+          key: 'detail',
+          open: false,
+          children: [{ type: 'summary', props: { children: ['细节'] } }, { type: 'pre', props: { children: ['原文'] } }],
+        },
+      }],
+    },
+  },
+}
+const controlledProbe = makeDetailsDom(controlledProbeRow)
+controlledProbe.sync()
+controlledProbe.click('detail')
+controlledProbe.sync()
+controlledProbe.sync()
+check('★[自检] 受控写法（传 open:false）点开后重渲染会被收回 —— 证明上一条断言有牙',
+  controlledProbe.isOpen('detail') === false,
+  JSON.stringify({ openAfterRerender: controlledProbe.isOpen('detail') }))
+
+/* ── E. 再点一下收起 ── */
+
+detailDom.click('detail')
+update(detailCard.row)
+detailDom.sync()
+
+check('★【细节】再点 summary 收起（open = false）',
+  detailDom.isOpen('detail') === false, String(detailDom.isOpen('detail')))
+check('【细节】收起后原文再次不可见',
+  detailDom.isOpen('detail') === false, String(detailDom.isOpen('detail')))
+
+/* ── F. 源码反向断言：不许再写成受控 ── */
+
+/*
+ * 运行时断言只能守住「现在没传」，源码断言守住「将来也别传回来」。
+ * 之所以要两条：`open` 可以写成 `open: undefined`、`open: detailOpen`、
+ * 或者被一个 spread 带进来，运行时那条 `hasOwnProperty` 未必拦得住同样的坑。
+ */
+const detailSourceBlock = (() => {
+  const at = source.indexOf("'details'")
+  const end = source.indexOf('const foot = []', at)
+  return at < 0 || end < 0 ? '' : source.slice(at, end)
+})()
+check('★[反] details 那一段源码里没有 open: 赋值（防受控回归）',
+  detailSourceBlock.length > 0 && !/[{,]\s*open\s*:/.test(detailSourceBlock),
+  detailSourceBlock ? 'len=' + detailSourceBlock.length : 'slice failed')
+check('[反] details 上没有 onToggle（展开态不交给 JS 管）',
+  detailSourceBlock.length > 0 && !/onToggle/.test(detailSourceBlock))
+check('[反] details 上没有 open 变量的绑定（不存在 detailOpen 之类的 state）',
+  detailSourceBlock.length > 0 && !/detailOpen|setDetailOpen|open:\s*[A-Za-z_$]/.test(detailSourceBlock))
+check('[反] 兜底原文卡与折叠卡用的是不同的 class（折叠卡不再被限高）',
+  source.includes('dsh-sa-rc-raw dsh-sa-rc-raw-plain'),
+  'data-report-raw 需要独有的 dsh-sa-rc-raw-plain')
+
+/* ── G. 箭头 / 折叠条的 CSS 约定 ── */
+
+/*
+ * 箭头必须由 CSS 的 `[open]` 后代选择器驱动，不能写死在 JS 里：
+ * 字形一旦变成 React 状态，就又要靠一次重渲染去更新它，而重渲染正是
+ * 上面那段事故的入口。让 CSS 跟着 DOM 属性走，浏览器自己管。
+ */
+check('★【细节】箭头默认是 ▸（CSS ::before 提供）',
+  /\.dsh-sa-rc-caret::before\s*\{[^}]*content:\s*'▸'/s.test(CARD_STYLE_TEXT),
+  '需要 .dsh-sa-rc-caret::before { content: \'▸\' }')
+check('★【细节】展开时箭头变成 ▾，由 [open] 后代选择器驱动',
+  /\.dsh-sa-rc-detail\[open\]\s+\.dsh-sa-rc-caret::before\s*\{[^}]*content:\s*'▾'/s.test(CARD_STYLE_TEXT),
+  '需要 .dsh-sa-rc-detail[open] .dsh-sa-rc-caret::before { content: \'▾\' }')
+check('★【细节】折叠条去掉了浏览器默认 marker（display:flex + list-style:none + ::-webkit-details-marker）',
+  /\.dsh-sa-rc-detail-toggle\s*\{[^}]*display:\s*flex[^}]*list-style:\s*none/s.test(CARD_STYLE_TEXT)
+    && /\.dsh-sa-rc-detail-toggle::-webkit-details-marker\s*\{[^}]*display:\s*none/s.test(CARD_STYLE_TEXT),
+  '三条缺一不可，否则原生三角会和 CSS 箭头同时出现')
+check('★[反] 折叠体不再叠 max-height + overflow（避免两层滚动）',
+  !/\.dsh-sa-rc-raw\s*\{[^}]*max-height:/s.test(CARD_STYLE_TEXT),
+  '折叠本身就是长度管理，.dsh-sa-rc-raw 不该再限高')
+check('【细节】兜底原文卡仍有限高 + 滚动（它没有折叠，长文必须收住）',
+  /\.dsh-sa-rc-raw-plain\s*\{[^}]*max-height:[^;}]+;[^}]*overflow:\s*auto;/s.test(CARD_STYLE_TEXT)
+    && /\.dsh-sa-rc-raw-plain\s*\{[^}]*overscroll-behavior:\s*contain/s.test(CARD_STYLE_TEXT),
+  'raw-plain 需同时有 max-height、overflow: auto 与 overscroll-behavior: contain')
+
+/* ── H. 兜底卡（解析失败）不受影响 ── */
+
+/*
+ * 兜底卡（`shape === 'unknown'`）走的是**另一条渲染分支**（data-report-raw），
+ * 与【细节】折叠无关。这条守的是「改了【细节】别把兜底卡带坏」——
+ * 兜底卡是整张卡最后的保命绳，它坏了就是真的丢内容。
+ */
+const unknownStill = renderReport('这行不是任何已知段名\n第二行\n第三行')
+check('【细节】改动不影响解析失败卡（data-report-raw 仍在、content 完整）',
+  findAll(unknownStill.row.tree, (item) => item && item.props && item.props['data-report-raw'] === 'true').length === 1
+    && text(unknownStill.row.tree).includes('第二行'),
+  text(unknownStill.row.tree).replace(/\s+/g, ' ').slice(0, 160))
+check('【细节】未知形态**不**额外渲染折叠块（原文已经整段显示过了，不该重复一遍）',
+  reportMarks(unknownStill.row, 'data-report-detail-raw').length === 0
+    && findAll(unknownStill.row.tree, (item) => item && item.type === 'details').length === 0,
+  JSON.stringify({
+    raw: reportMarks(unknownStill.row, 'data-report-detail-raw').length,
+    details: findAll(unknownStill.row.tree, (item) => item && item.type === 'details').length,
+  }))
+unmount(unknownStill.row)
+
+unmount(detailCard.row)
+
+/* ── I. 宿主会反复挂/摘：重挂回来是**收起**态，不是半开 ── */
+
+/*
+ * 宿主虚拟滚动会把卡片整棵摘掉再挂回来。因为展开态完全归浏览器管（没有
+ * 任何 React 状态缓存它），重挂回来必然是收起的初值——这是**正确**行为，
+ * 也是「没有任何旧 state 能把展开态弄成半开」的证明。
+ */
+const remountCard = renderReport(FIXTURE_REPORT)
+const remountDom = makeDetailsDom(remountCard.row)
+remountDom.sync()
+update(remountCard.row)
+update(remountCard.row)
+remountDom.sync()
+check('★【细节】重挂载后是收起态（展开态不由任何 JS state 缓存）',
+  remountDom.isOpen('detail') === false, String(remountDom.isOpen('detail')))
+check('★【细节】重挂载后原文仍完整在 DOM 里（收起不等于丢内容）',
+  FIXTURE_REPORT.split('\n').every((line) => text(remountCard.row.tree).includes(line)),
+  text(remountCard.row.tree).replace(/\s+/g, ' ').slice(0, 160))
+unmount(remountCard.row)
+
+
+
+/* ── ⑦ 复制按钮复制的是完整原文（rawFull），不是渲染后的文本 ── */
+
+/*
+ * 为什么必须复制 `raw` 而不是 DOM 文本：卡片里【说明】可能被折叠到 3 行、
+ * 【细节】默认收起，DOM 文本是**残缺**的。用户点「复制」想要的显然是那份完整报告。
+ */
+const copied = []
+const savedNavigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+Object.defineProperty(globalThis, 'navigator', {
+  configurable: true,
+  value: { clipboard: { writeText(value) { copied.push(String(value)); return Promise.resolve() } } },
+})
+const copyCard = renderReport(FIXTURE_REPORT)
+const rcCopyBtn = reportMarks(copyCard.row, 'data-report-copy')[0]
+check('有剪贴板时渲染复制按钮', Boolean(rcCopyBtn))
+if (rcCopyBtn) rcCopyBtn.props.onClick()
+await tick()
+await tick()
+update(copyCard.row)
+check('复制按钮复制的是完整原文（含【任务】与【需要你】两行）',
+  copied.length === 1 && copied[0] === FIXTURE_REPORT,
+  copied.length ? JSON.stringify(copied[0]).slice(0, 200) : '没有调用 writeText')
+check('复制成功后按钮文字给出结论（不是静默）',
+  text(copyCard.row.tree).includes('已复制'), text(copyCard.row.tree).replace(/\s+/g, ' ').slice(-120))
+unmount(copyCard.row)
+
+/* ── ⑧ 没有 navigator.clipboard 时**不渲染**复制按钮 ── */
+
+/*
+ * plans/14 §6 第 7 条：不是「渲染了但点了没用」，而是**根本不渲染**。
+ * 上一版给了一个按钮，点下去走 execCommand 兜底失败后弹「复制失败」——
+ * 用户看到的仍然是「有个按钮，点了没用」。
+ */
+Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {} })
+const noCopyCard = renderReport(FIXTURE_REPORT)
+check('没有 navigator.clipboard 时不渲染复制按钮',
+  reportMarks(noCopyCard.row, 'data-report-copy').length === 0,
+  text(noCopyCard.row.tree).replace(/\s+/g, ' ').slice(-160))
+unmount(noCopyCard.row)
+if (savedNavigatorDescriptor) Object.defineProperty(globalThis, 'navigator', savedNavigatorDescriptor)
+else delete globalThis.navigator
+
+/* ── ⑨ 状态 chip：查得到显示、查不到不显示、批次不查 ── */
+
+/** `/board?task=` 的响应与模式；与派发卡的 `?group=` 各自独立。 */
+let reportStatusMode = 'ok'
+let reportStatusResponse = { tasks: [] }
+const reportTaskRequests = () => requests.filter((item) => String(item.url).includes('?task='))
+const realFetchForReport = globalThis.fetch
+globalThis.fetch = async (url, options) => {
+  if (String(url).includes('?task=')) {
+    requests.push({ url, method: 'GET', body: undefined })
+    if (reportStatusMode === 'fail') return { ok: false, status: 500, async json() { return { ok: false } } }
+    if (reportStatusMode === 'empty') return { ok: true, status: 200, async json() { return { tasks: [] } } }
+    return { ok: true, status: 200, async json() { return JSON.parse(JSON.stringify(reportStatusResponse)) } }
+  }
+  return realFetchForReport(url, options)
+}
+reportStatusResponse = { tasks: [{ task_id: 't-rc-1', status: 'done' }] }
+const chipCard = renderReport(FIXTURE_REPORT)
+await tick()
+await tick()
+update(chipCard.row)
+check('查得到状态时显示 chip（用 TEXT.status.done 的中文，不是英文枚举）',
+  reportMarks(chipCard.row, 'data-report-chip').length === 1
+    && reportMarks(chipCard.row, 'data-report-chip')[0].props['data-report-chip'] === 'done'
+    && text(chipCard.row.tree).includes('已完成'),
+  text(chipCard.row.tree).replace(/\s+/g, ' ').slice(0, 120))
+check('chip 用的是 ?task= 这条窄口，不是全量快照',
+  reportTaskRequests().length >= 1, `实际 ${reportTaskRequests().length} 次`)
+unmount(chipCard.row)
+
+/*
+/*
+ * 下面三条**都换一个新的 taskId**。
+ *
+ * 为什么不能继续用 t-rc-1：前面那条「查得到就显示 chip」已经把 t-rc-1 的
+ * done 写进了 10s 缓存（plans/13 §8.3 要求缓存），后面的卡会在 TTL 内直接命中
+ * 那份缓存——于是「查不到时不显示 chip」会因为**缓存里有旧答案**而假失败。
+ * 这不是测试技巧，正是真机上会发生的事：同一任务的两张卡（重放/重挂）在 TTL 内
+ * 必须给出**相同**的结论，否则用户会看到两张卡状态不一。
+ */
+reportStatusMode = 'empty'
+const noChipCard = renderReport(FIXTURE_REPORT, { id: 'dsh-mini-superagent:t-rc-empty:relay:boot:11' })
+await tick()
+await tick()
+update(noChipCard.row)
+check('/board 查不到时不显示 chip，也不编一个「未知」',
+  reportMarks(noChipCard.row, 'data-report-chip').length === 0
+    && text(noChipCard.row.tree).includes('占位文件已建好'),
+  text(noChipCard.row.tree).replace(/\\s+/g, ' ').slice(0, 160))
+unmount(noChipCard.row)
+
+/* 请求失败：静默降级（不弹错、不阻塞渲染、卡片照常完整）。 */
+reportStatusMode = 'fail'
+const failChipCard = renderReport(FIXTURE_REPORT, { id: 'dsh-mini-superagent:t-rc-fail:relay:boot:12' })
+await tick()
+await tick()
+update(failChipCard.row)
+check('/board 请求失败时静默：无 chip，但卡片内容照常完整',
+  reportMarks(failChipCard.row, 'data-report-chip').length === 0
+    && text(failChipCard.row.tree).includes('占位文件已建好'),
+  text(failChipCard.row.tree).replace(/\\s+/g, ' ').slice(0, 160))
+unmount(failChipCard.row)
+reportStatusMode = 'ok'
+
+/*
+ * 批次卡**不查**状态：g-… 是一组任务，没有一个「批次状态」字段可查。
+ * 给批次编一个聚合状态就是「猜状态」（plans/13 §8.3 明令禁止）。
+ */
+const beforeBatchChip = reportTaskRequests().length
+const batchChipCard = renderReport(FIXTURE_BATCH, { id: 'dsh-mini-superagent:g-t-rc-9:relay:boot:8' })
+await tick()
+await tick()
+update(batchChipCard.row)
+check('批次卡不发 ?task= 请求（批次没有单一状态，不许猜）',
+  reportTaskRequests().length === beforeBatchChip
+    && reportMarks(batchChipCard.row, 'data-report-chip').length === 0,
+  '新增 ' + (reportTaskRequests().length - beforeBatchChip) + ' 次请求')
+unmount(batchChipCard.row)
+
+/*
+ * 状态缓存：同一 taskId 在 TTL 内只查一次。
+ *
+ * 为什么这条不能省（真机现象）：transcript 是虚拟滚动的，一张卡滚出视口会卸载、
+ * 滚回来会重挂。没有缓存的话「往上翻一屏再翻回来」就是一次新的 ?task=，
+ * 而它拿的还是同一份数据——用户体感是「翻回去就转圈」。
+ */
+reportStatusResponse = { tasks: [{ task_id: 't-rc-cache', status: 'done' }] }
+const cacheBefore = reportTaskRequests().length
+const cacheA = renderReport(FIXTURE_REPORT, { id: 'dsh-mini-superagent:t-rc-cache:relay:boot:13' })
+await tick()
+await tick()
+update(cacheA.row)
+unmount(cacheA.row)
+const cacheB = renderReport(FIXTURE_REPORT, { id: 'dsh-mini-superagent:t-rc-cache:relay:boot:13' })
+await tick()
+await tick()
+update(cacheB.row)
+check('同一 taskId 的第二次挂载命中缓存（不重复发 ?task=）',
+  reportTaskRequests().length - cacheBefore === 1,
+  '实际 ' + (reportTaskRequests().length - cacheBefore) + ' 次')
+unmount(cacheB.row)
+globalThis.fetch = realFetchForReport
+
+/* ── ⑩ 超长正文：截断 + 提示，且复制仍取完整原文 ── */
+
+/*
+ * plans/14 §3.2：`raw` > 32KB → 截断 + 提示，**不许正则扫全文导致卡顿**。
+ * 所以解析前先 `slice`（解析成本有上界），但复制走 `rawFull`（一个字符都不少）。
+ */
+const hugeCard = renderReport('【任务】巨长报告\n【结果】' + '很长的结果'.repeat(8000) + '\n【细节】dispatch_inspect t-rc-1')
+check('超长正文被截断到 32KB 以内（解析成本有上界）',
+  hugeCard.state.card.truncated === true && hugeCard.state.card.raw.length <= 32 * 1024,
+  `truncated=${hugeCard.state.card.truncated} len=${hugeCard.state.card.raw.length}`)
+check('超长正文有「内容过长」提示（不是静默认丢）',
+  reportMarks(hugeCard.row, 'data-report-truncated').length === 1,
+  text(hugeCard.row.tree).replace(/\s+/g, ' ').slice(-160))
+check('超长正文时 rawFull 仍是完整原文（复制不会只剩前半段）',
+  hugeCard.state.card.rawFull.length === hugeCard.state.card.truncatedFrom
+    && hugeCard.state.card.rawFull.length > 32 * 1024,
+  `rawFull=${hugeCard.state.card.rawFull.length} truncatedFrom=${hugeCard.state.card.truncatedFrom}`)
+unmount(hugeCard.row)
+
+/* ── ⑪ 长文本省略与 title 全文 ── */
+
+const LONG_TITLE = '很长的任务标题'.repeat(12)
+const longTitleCard = renderReport('【任务】' + LONG_TITLE + '\n【结果】完成')
+const titleNode = reportMarks(longTitleCard.row, 'data-report-title')[0]
+check('长标题在 DOM 里保留全文，靠 CSS 省略（不是先截断再渲染）',
+  Boolean(titleNode) && text(titleNode) === LONG_TITLE)
+check('长标题的 title 属性是全文（悬停能看完整）',
+  Boolean(titleNode) && titleNode.props.title === LONG_TITLE)
+unmount(longTitleCard.row)
+
+/* 长 id：显示层截到 14 字 + 省略号，title 属性仍是完整 id。 */
+const longIdCard = renderReport(FIXTURE_REPORT, { id: 'dsh-mini-superagent:t-very-long-task-id-xyz:relay:boot:9' })
+const longIdNode = reportMarks(longIdCard.row, 'data-report-id')[0]
+check('长 id 显示成短形式（≤15 字），title 属性保留完整 id',
+  Boolean(longIdNode) && text(longIdNode).length <= 15
+    && text(longIdNode).endsWith('…')
+    && longIdNode.props.title === 't-very-long-task-id-xyz',
+  longIdNode ? `${text(longIdNode)} / ${longIdNode.props.title}` : 'missing')
+unmount(longIdCard.row)
+
+/* ── ⑫ 旧消息 / 脏输入：一律不抛错，且仍能看到原文 ── */
+
+const legacyCard = renderReport('【任务】升级前的老报告\n【结果】老消息也得好好的')
+check('升级前写入的老消息不报错、能显示',
+  legacyCard.state.card.shape === 'report' && text(legacyCard.row.tree).includes('老消息也得好好的'))
+unmount(legacyCard.row)
+
+/*
+ * 解析器对**任何输入**都不得抛错：`start` 里抛错会被宿主当作「这个节点建不起来」，
+ * 而报告正文是模型写的自由文本，什么都可能出现。
+ */
+const NASTY_INPUTS = [
+  ['undefined', undefined],
+  ['null', null],
+  ['非字符串对象', { hello: 1 }],
+  ['只有换行', '\n\n\n'],
+  ['段名后面什么都没有', '【任务】\n【结果】\n【说明】\n【需要你】\n【细节】'],
+  ['段名重复', '【任务】甲\n【结果】1\n【结果】2\n【说明】x\n【说明】y'],
+  ['Windows 换行', '【任务】甲\r\n【结果】1\r\n【细节】dispatch_inspect t-rc-1'],
+]
+for (const [why, input] of NASTY_INPUTS) {
+  let threw = null
+  let card = null
+  try {
+    card = parseReportForTest(input)
+  } catch (error) {
+    threw = error
+  }
+  check(`解析器对脏输入不抛错（${why}）`, threw === null, threw ? String(threw) : 'ok')
+  check(`脏输入仍然有内容可看、不返回 undefined（${why}）`,
+    Boolean(card) && typeof card.raw === 'string' && typeof card.rawFull === 'string',
+    card ? String(card.shape) : 'missing')
+}
+check('重复段名不丢内容（两行都留着，后者不覆盖前者）',
+  (() => {
+    const card = parseReportForTest('【任务】甲\n【结果】1\n【结果】2\n【说明】x\n【说明】y')
+    return card.result === '1\n2' && card.note === 'x\ny'
+  })())
+check('Windows 换行（\\r\\n）也能正确分段、不留 \\r',
+  (() => {
+    const card = parseReportForTest('【任务】甲\r\n【结果】1\r\n【细节】dispatch_inspect t-rc-1')
+    return card.shape === 'report' && card.title === '甲' && card.result === '1'
+      && card.inspectId === 't-rc-1' && !/\r/.test(card.result)
+  })())
+
+/* ── ⑬ 只在不该认领时才不认领：surfaceOp / 人类消息 / 别家插件 ── */
+
+check('surfaceOp 是显式的替换型 surface 时不认领（对齐 isAppendSurfaceEvent）',
+  reportDef.match(relayEvent({ surfaceOp: 'replace' })) === null)
+check('surfaceOp 缺失（老宿主 / 离线 fixture）时放行——拒绝 undefined 会让旧宿主一张卡都不出',
+  reportDef.match(relayEvent({ surfaceOp: undefined })) !== null)
+
+/* ── ⑭ 样式：只用主题令牌、不写死主色、复用同一个 <style> 节点 ── */
+
+/*
+ * 样式断言用**源码切片**而不是渲染树（离线 stub 不解析 CSS）。取 `const CARD_STYLE`
+ * 到「卡片样式的单例节点」之间的那一段，再切出 `.dsh-sa-rc {` 之后属于报告卡的部分。
+ *
+ * 为什么这条必须存在：写死颜色（`#3b82f6` 之类）在明暗两套主题下必有一边糊掉，
+ * 而那种问题肉眼很难在一种主题里发现——它通常是在暗色主题下被用户报上来的。
+ */
+const reportCss = (() => {
+  const start = source.indexOf('const CARD_STYLE =')
+  const end = source.indexOf('卡片样式的单例节点', start)
+  if (start < 0 || end < 0) return ''
+  const styleBlock = source.slice(start, end)
+  const at = styleBlock.indexOf('.dsh-sa-rc {')
+  return at < 0 ? '' : styleBlock.slice(at)
+})()
+check('报告卡样式块存在（.dsh-sa-rc 起，到卡片样式块结束）', reportCss.length > 0,
+  String(reportCss.length))
+check('报告卡样式只含 --dsw-alias-* / --dsw-* 主题令牌（不写死主色）',
+  reportCss.includes('--dsw-alias-') && !/#[0-9a-fA-F]{3,8}|rgb\(|hsl\(/.test(reportCss),
+  (reportCss.match(/#[0-9a-fA-F]{3,8}|rgb\(|hsl\(/g) || []).slice(0, 5).join(','))
+check('报告卡宽度跟随 --dsh-chat-content-width（不写死 680px）',
+  reportCss.includes('--dsh-chat-content-width') && !/680px/.test(reportCss))
+check('报告卡尊重 prefers-reduced-motion',
+  reportCss.includes('prefers-reduced-motion'))
+check('报告卡正文可选中复制（user-select: text，不用 canvas / 图片）',
+  /user-select:\s*text/.test(reportCss) && !/background-image/.test(reportCss))
+/*
+ * 【需要你】的视觉权重必须是**至少两个通道**：左侧色条 + 加粗（+ 浅底）。
+ * 只靠一种（比如只加粗）在长报告里仍然会被跳读——而这一段是唯一需要人动手的。
+ */
+check('【需要你】有左侧 2px 色条 + 加粗 + 浅底（多个视觉通道，不靠单一手段）',
+  (() => {
+    const at = reportCss.indexOf('.dsh-sa-rc-need {')
+    if (at < 0) return false
+    const rule = reportCss.slice(at, reportCss.indexOf('}', at) + 1)
+    const label = (() => {
+      const la = reportCss.indexOf('.dsh-sa-rc-need-text {')
+      return la < 0 ? '' : reportCss.slice(la, reportCss.indexOf('}', la) + 1)
+    })()
+    return /border-left:\s*2px/.test(rule)
+      && /background:\s*var\(--dsw-alias-/.test(rule)
+      && /font-weight:\s*(600|700|bold)/.test(label)
+  })())
+check('报告卡只有一个 data-plugin-css 节点（与派发卡共用 ensureCardStyles，不另插一份）',
+  source.split("const CARD_STYLE_ATTR = 'dsh-mini-superagent/cards'").length - 1 === 1)
+check('报告卡源码里没有第二处 STYLE 常量（复用 CARD_STYLE，不新增第二个 <style>）',
+  source.split('const CARD_STYLE =').length - 1 === 1
+    && source.split("createElement('style')").length - 1 === 1,
+  `CARD_STYLE 定义 ${source.split('const CARD_STYLE =').length - 1} 处；createElement('style') ${source.split("createElement('style')").length - 1} 处`)
+
+/*
+ * 段名漂移防护（plans/13 FR-13 的客户端一侧）：六个段名必须**全部**出现在客户端源码里，
+ * 少任何一个 = 那一段永远解析不出来，而界面上的表现只是「卡片少了半截」。
+ * 权威定义在 `src/constants.js` 的 REPORT_SECTIONS，服务端一侧由
+ * `test/voice-contract.test.js` 反向钉住（它读本文件、断言六个段名都在）。
+ */
+for (const [key, value] of [
+  ['任务', '【任务】'], ['结果', '【结果】'], ['说明', '【说明】'],
+  ['需要你', '【需要你】'], ['细节', '【细节】'], ['批次', '【批次】'],
+]) {
+  check(`客户端报告卡识别段名「${key}」（${value}）`,
+    source.includes(`'${value}'`), `源码里找不到 ${value}`)
+}
+
+/* ── ④' taskId 提取：批次汇总的 group id（`g-t-xxx`）与「没有前缀的旧形态」都要对 ── */
+
+/*
+ * 批次汇总的 task.id 形如 `g-t-mwgp38pt-1`（`dispatch.js:294` 用 `g-${newTaskId()}`）。
+ * 它和单条任务走同一条 relay，所以提取规则必须同时对两种 id 成立；另外要守住
+ * 「没有包名前缀时不要多切一刀」——把 `t-xxx:relay:...` 当成有前缀会切掉真 id。
+ */
+const batchState = reportDef ? reportDef.start({}, { event: relayEvent({ data: { id: 'dsh-mini-superagent:g-t-mwgp38pt-1:relay:q5k3of:1' } }), role: 'start', location: { kind: 'step', turn: {}, step: {} } }) : null
+check('批次汇总 id（g-t-xxx）同样剥前缀取到 group id',
+  Boolean(batchState) && batchState.taskId === 'g-t-mwgp38pt-1',
+  batchState ? String(batchState.taskId) : 'missing')
+const bareState = reportDef ? reportDef.start({}, { event: relayEvent({ data: { id: 't-bare-1:relay:boot:1' } }), role: 'start', location: { kind: 'step', turn: {}, step: {} } }) : null
+check('没有包名前缀时不误切（t-xxx:relay:... 仍取 t-xxx）',
+  Boolean(bareState) && bareState.taskId === 't-bare-1',
+  bareState ? String(bareState.taskId) : 'missing')
+
+/* ── ⑤ 没有 uiConversation：apply 不抛错，其余槽照常注册 ── */
+
+const noService = reportCtx({ withService: false })
+let noServiceThrew = null
+try { mod.apply(noService) } catch (error) { noServiceThrew = error }
+check('没有 uiConversation 时 apply 不抛错', noServiceThrew === null,
+  noServiceThrew ? String(noServiceThrew) : 'ok')
+check('没有 uiConversation 时一个 Definition 都不注册', noService.definitions.length === 0,
+  `实际 ${noService.definitions.length}`)
+check('没有 uiConversation 时也没有 conversation.chat.node 渲染器',
+  !noService.rendererRegs.some((item) => item.options && item.options.name === 'conversation.chat.node'))
+check('没有 uiConversation 时其余槽照常注册（看板 / 图标 / 输入框控件 / 分隔线）',
+  ['sidebar.panellist', 'main', 'conversation.input.left', 'conversation.chat.user.before']
+    .every((name) => noService.rendererRegs.some((item) => item.options && item.options.name === name)),
+  JSON.stringify(noService.rendererRegs.map((item) => item.options && item.options.name)))
+check('没有 uiConversation 时 cards.report 键缺席（未提供 ≠ 失败）',
+  !('report' in (lastReadyBody() ? lastReadyBody().cards : {})),
+  JSON.stringify(lastReadyBody() ? lastReadyBody().cards : null))
+
+/* ── ⑥ events.register 抛错：error:register，且 context 行还在（不黑屏） ── */
+
+const defThrows = reportCtx({ throwOnDefinition: true })
+let defThrew = null
+try { mod.apply(defThrows) } catch (error) { defThrew = error }
+check('events.register 抛错时 apply 不抛错（不黑屏）', defThrew === null, defThrew ? String(defThrew) : 'ok')
+check('events.register 抛错后 cards.report === error:register',
+  Boolean(lastReadyBody()) && lastReadyBody().cards.report === 'error:register',
+  JSON.stringify(lastReadyBody() ? lastReadyBody().cards : null))
+check('events.register 抛错后渲染器被撤掉（不留没有 Definition 的死渲染器）',
+  defThrows.order.includes('dispose-renderer'), defThrows.order.join('>'))
+check('events.register 抛错只 warn 一次（不许刷日志）',
+  defThrows.warns.length === 1, JSON.stringify(defThrows.warns))
+check('events.register 抛错时其余槽照常注册（只降自己）',
+  ['sidebar.panellist', 'main', 'conversation.input.left']
+    .every((name) => defThrows.rendererRegs.some((item) => item.options && item.options.name === name)),
+  JSON.stringify(defThrows.rendererRegs.map((item) => item.options && item.options.name)))
+
+/* ── ⑥' 渲染器注册抛错：error:register，且绝不认领 ── */
+
+const rendererThrows = reportCtx({ throwOnRenderer: 'conversation.chat.node' })
+let rendererThrew = null
+try { mod.apply(rendererThrows) } catch (error) { rendererThrew = error }
+check('渲染器注册抛错时 apply 不抛错', rendererThrew === null, rendererThrew ? String(rendererThrew) : 'ok')
+check('渲染器注册抛错后不注册 Definition（没有渲染器就绝不认领）',
+  rendererThrows.definitions.length === 0, `实际 ${rendererThrows.definitions.length}`)
+check('渲染器注册抛错后 cards.report === error:register',
+  Boolean(lastReadyBody()) && lastReadyBody().cards.report === 'error:register',
+  JSON.stringify(lastReadyBody() ? lastReadyBody().cards : null))
+
+/* ── ⑥'' 宿主没有 conversation.chat.node 槽：不认领，消息保持 context 行 ── */
+
+const noNodeSlot = reportCtx({ withNodeSlot: false })
+let noSlotThrew = null
+try { mod.apply(noNodeSlot) } catch (error) { noSlotThrew = error }
+check('没有 chat.node 槽时 apply 不抛错', noSlotThrew === null, noSlotThrew ? String(noSlotThrew) : 'ok')
+check('没有 chat.node 槽时不注册 Definition（先有渲染器才认领）',
+  noNodeSlot.definitions.length === 0, `实际 ${noNodeSlot.definitions.length}`)
+
+/* ── ⑦ CARD_FEATURES.report = false：完全不注册 ── */
+
+/*
+ * 这一条**必须改源码再跑一次模块**：`CARD_FEATURES` 是工厂作用域里的常量，
+ * 外面拿不到（这正是它作为 kill switch 的形状——用户改的是文件，不是运行时状态）。
+ * 用字符串替换把 `report: true` 改成 `report: false`，重新走一遍 ModuleLoader，
+ * 断言「一个 Definition / 渲染器都没有，且 cards.report 键缺席」。
+ * 顺手守一件事：替换必须真的命中了那一行，否则这条断言会在假前提上通过。
+ */
+const offSource = source.replace('CARD_FEATURES = { batch: true, report: true }', 'CARD_FEATURES = { batch: true, report: false }')
+check('（前置）CARD_FEATURES 的源码形状可被 kill switch 命中',
+  offSource !== source && offSource.includes('report: false'))
+let offMod = null
+const savedLoader = globalThis.window.__ModuleLoader__
+globalThis.window.__ModuleLoader__ = {
+  load(definition) {
+    const requireFn = (id) => {
+      if (id === 'react') return React
+      if (id === 'react-dom') return ReactDOM
+      throw new Error(`unexpected require: ${id}`)
+    }
+    offMod = definition.factory(requireFn)
+  },
+}
+try { new Function(offSource)() } finally { globalThis.window.__ModuleLoader__ = savedLoader }
+const offCtx = reportCtx({})
+let offThrew = null
+try { if (offMod) offMod.apply(offCtx) } catch (error) { offThrew = error }
+check('CARD_FEATURES.report = false 时 apply 不抛错', offThrew === null, offThrew ? String(offThrew) : 'ok')
+check('CARD_FEATURES.report = false 时完全不注册 Definition',
+  offCtx.definitions.length === 0, `实际 ${offCtx.definitions.length}`)
+check('CARD_FEATURES.report = false 时也不注册 chat.node 渲染器',
+  !offCtx.rendererRegs.some((item) => item.options && item.options.name === 'conversation.chat.node'))
+check('CARD_FEATURES.report = false 时派发卡照常注册（只关自己）',
+  offCtx.rendererRegs.filter((item) => item.options && item.options.name === 'tool.call.toolview').length === 2,
+  JSON.stringify(offCtx.rendererRegs.map((item) => item.options && item.options.name)))
 
 /* ═════════════════════ 文案成对（zh/en） ═════════════════════ */
 

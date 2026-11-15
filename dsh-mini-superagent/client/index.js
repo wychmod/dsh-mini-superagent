@@ -70,14 +70,22 @@ window.__ModuleLoader__.load({
     const RELAY_SOURCE_KIND = 'dsh-mini-superagent'
 
     /*
-     * ── 派发卡（plans/12 P0） ──
+     * ── 卡片能力的 kill switch（plans/12 P0 派发卡 / plans/13 报告卡） ──
      *
-     * `CARD_FEATURES` 是**常量级**的 kill switch（plans/14 §5 G3）：把 batch 改 false
-     * 就不再注册视图，宿主回退到内置通用工具行，看板/输入框/@ 源一点不受影响。
+     * `CARD_FEATURES` 是**常量级**的开关（plans/14 §5 G3），两个键各自独立（§2 的 L2/L3）：
+     * - `batch`：派发卡 + 轮次尾部摘要。改 false 就不再注册视图，宿主回退到内置通用
+     *   工具行，看板/输入框/@ 源一点不受影响；
+     * - `report`：报告卡（plans/13 正式版：四段解析 + 结构化渲染 + 原文兜底）。
+     *
+     * 为什么 `report` 默认也是 `true`：报告的形态由**模型**写，段名/形态一旦漂移，
+     * 真机才能看出来（离线只能守住已知的四种）。常量必须存在、且是唯一入口——
+     * 真机上发现某一形态解析不对时，用户改这一个字就能回到 L2（context 行 +
+     * 现成「派发报告」分隔线），不用回滚版本、不用等发布。
+     *
      * 为什么不读宿主配置：客户端拿不到 `cordis.patch.yml`，要做运行时开关就得先加
      * 一条 host→client 的配置通道，那会让「卡片出不出现」多一个网络依赖（plans/14 §5 G3）。
      */
-    const CARD_FEATURES = { batch: true }
+    const CARD_FEATURES = { batch: true, report: true }
     /** 卡片默认可见行数；超过就折叠（plans/12 §7.3，与设计稿一致）。 */
     const CARD_VISIBLE_ROWS = 4
     /**
@@ -103,6 +111,16 @@ window.__ModuleLoader__.load({
      * 顺序即注册顺序：`dispatch_launch` 在前，单条派发的卡也走这个组件（row 数 1）。
      */
     const CARD_TOOLS = ['dispatch_launch', 'dispatch_launch_many']
+    /**
+     * 报告卡的 Conversation **Node kind**（plans/13 §8.4）。
+     *
+     * 一个值必须在三处逐字一致，写歪任意一处都只会「安静地不好使」：
+     * ① `uiConversation.events.register({ kind })`；
+     * ② `buildViewNode` 返回的 `kind`（Chat 按它找 keyed 渲染器）；
+     * ③ `slots.register({ key })` 的 key。
+     * 后两者的对应关系由宿主按字符串匹配，没有任何校验能替你发现拼错。
+     */
+    const REPORT_NODE_KIND = 'dispatch-report'
     /**
      * 派发卡的轮询节奏（plans/12 §8.4）。
      *
@@ -760,6 +778,28 @@ window.__ModuleLoader__.load({
       'card.tailLess': '收起 · 共 {n} 条',
       'card.tailExpandAria': '展开全部 {n} 条任务',
       'card.tailCollapseAria': '收起，回到前 {n} 条',
+      /*
+       * 报告卡（plans/13 正式版）。**这里没有一条是新的状态词**：卡头的 chip 仍然只走
+       * `TEXT['status.*']`，下面这些说的是「哪一段」「哪个按钮」「兜底卡叫什么」。
+       *
+       * `report.fallbackTitle` 为什么是「派发报告」而不是拿 id 当标题：报告卡认领的是
+       * **本插件自己投递的报告**，来源是确定的；而一个解析不出标题的报告，用户最需要
+       * 知道的是「这是什么」而不是「它叫什么编号」。id 仍然在卡头右侧以 mono 小字显示。
+       */
+      'report.fallbackTitle': '派发报告',
+      'report.detail': '细节',
+      'report.copy': '复制',
+      'report.copied': '已复制',
+      'report.copyFailed': '复制失败',
+      'report.expand': '展开',
+      'report.needLabel': '需要你',
+      'report.groupsOk': '成了',
+      'report.groupsFailed': '没成',
+      'report.groupsNotRun': '未执行',
+      'report.groupsCancelled': '已取消',
+      'report.empty': '这条报告没有正文',
+      'report.truncated': '内容过长，只显示前 {n} 字；复制按钮仍取完整原文',
+      'report.aria': '派发报告：{title}',
     }
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
@@ -1290,6 +1330,21 @@ window.__ModuleLoader__.load({
       'card.tailLess': 'Show less · {n} total',
       'card.tailExpandAria': 'Show all {n} tasks',
       'card.tailCollapseAria': 'Collapse to the first {n} rows',
+      /* 与 TEXT 的 report.* 一一对应；缺一条英文界面就会静默退回中文。 */
+      'report.fallbackTitle': 'Dispatch report',
+      'report.detail': 'Details',
+      'report.copy': 'Copy',
+      'report.copied': 'Copied',
+      'report.copyFailed': 'Copy failed',
+      'report.expand': 'Expand',
+      'report.needLabel': 'Needs you',
+      'report.groupsOk': 'Finished',
+      'report.groupsFailed': 'Failed',
+      'report.groupsNotRun': 'Never ran',
+      'report.groupsCancelled': 'Cancelled',
+      'report.empty': 'This report has no body',
+      'report.truncated': 'Content is too long; showing the first {n} characters. Copy still takes the full text',
+      'report.aria': 'Dispatch report: {title}',
     }
 
     /** 当前翻译函数；attachLocale 成功后会替换成 locale 绑定的 t()。 */
@@ -4535,6 +4590,344 @@ window.__ModuleLoader__.load({
   font-size: 9px;
   line-height: 1;
 }
+/*
+ * ── 报告卡（plans/13 §9.5）──
+ *
+ * 类名 'dsh-sa-rc-'（rc = report card），与派发卡 'dsh-sa-dc-'、轮次尾部摘要
+ * 'dsh-sa-dr-' 同族但不重叠。
+ *
+ * 三条硬约束（都是「离线断言也得能守」的形状）：
+ *   1. 颜色**只**用 'var(--dsw-alias-*)' 主题令牌，明暗自动跟随；写死主色在暗色主题下
+ *      必有一边糊掉，而那种问题肉眼很难在一种主题里发现；
+ *   2. 宽度跟随 chat 内容宽度 '--dsh-chat-content-width'，不写死 680px；
+ *   3. 正文是真实文本节点 + 'pre-wrap'，可选中复制，不用 canvas / 图片。
+ *
+ * 为什么卡片用 '--dsw-alias-bg-layer-1' 做底：这正是宿主自己的卡片表面色
+ * （派发卡同款），报告卡要长成「会话里的一张卡」而不是「一段带框的文本」。
+ */
+.dsh-sa-rc {
+  display: flex;
+  flex-direction: column;
+  margin: 8px 0;
+  max-width: var(--dsh-chat-content-width, 100%);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.22));
+  border-radius: var(--dsw-radius-l, var(--dsw-radius-md, 10px));
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: var(--dsw-font-s-13, 13px);
+  overflow: hidden;
+}
+.dsh-sa-rc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+}
+.dsh-sa-rc-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.dsh-sa-rc-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 状态 chip：圆点已经给了一次颜色，这里只给文字——状态不能只靠颜色表意（§7.6）。 */
+.dsh-sa-rc-chip {
+  flex: none;
+  font-size: var(--dsw-font-xxs-12, 12px);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.dsh-sa-rc-ratio {
+  flex: none;
+  color: var(--dsw-alias-state-success-primary, inherit);
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-rc-id {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-sa-rc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+/*
+ * 【结果】：主字号 + 主色，**不折叠、不省略**。
+ * 这是整张卡里唯一「用户一定要读到」的一段，多两行也不会挤掉别的内容。
+ */
+.dsh-sa-rc-result {
+  margin: 0;
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: var(--dsh-content-font-size, 14px);
+  line-height: calc(20px + var(--dsh-content-font-delta, 0px));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* 批次分组：一组一行「标签 + 名单」，标签用状态色，名单走正文色。 */
+.dsh-sa-rc-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dsh-sa-rc-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.dsh-sa-rc-group-label {
+  flex: none;
+  min-width: 3.5em;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-weight: 600;
+}
+.dsh-sa-rc-group-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/*
+ * 【说明】：次级色 + 小一号。它通常最长，所以默认只显示 3 行；
+ * 折叠的是显示，不是内容（复制与展开后都能拿到全文）。
+ */
+.dsh-sa-rc-note-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+.dsh-sa-rc-note {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(18px + var(--dsh-content-font-delta-secondary, 0px));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/*
+ * ── 【需要你】：左侧 2px 色条 + 加粗 + 浅底 ──
+ *
+ * 这一段是**唯一需要用户动手**的部分，视觉权重必须比正文高。为什么不是「加个红框」：
+ * 红框会让人以为出错了；而很多「需要你」只是「定个方向」，不是故障。
+ * 用左侧色条 + 浅底是「请读这一块」的语义，不是「这里坏了」。
+ * 色条走 '--dsw-alias-state-warn-primary'：需要人介入属于提醒级，不是错误级。
+ */
+.dsh-sa-rc-need {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--dsw-alias-state-warn-primary, currentColor);
+  border-radius: var(--dsw-radius-sm, 4px);
+  background: var(--dsw-alias-state-warn-tertiary, rgba(217,119,6,.08));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.dsh-sa-rc-need-label {
+  flex: none;
+  color: var(--dsw-alias-state-warn-primary, inherit);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dsh-sa-rc-need-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+/*
+ * 兜底原文卡 / 【细节】展开体：等宽 + pre-wrap。
+ * 等宽不是为了好看，是为了让「解析失败时看到的就是原文」这件事一眼可证：
+ * 缩进、换行、对齐全部保留，用户能自己判断有没有少东西。
+ */
+.dsh-sa-rc-raw {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.18));
+  border-radius: var(--dsw-radius-sm, 4px);
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.06));
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: var(--dsw-font-xxs-12, 12px);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+/*
+ * 【细节】：原生 <details> 折叠，<summary> 是那条「▸ 细节」折叠条。
+ *
+ * ── ⚠️ 为什么绝不传 open（这段话记录一次真实事故，别删） ──
+ *
+ * 这块折叠条本身一直是**好的**：走浏览器原生展开，不依赖任何 React 状态。
+ * 之前连挂 4 次「点了没反应」，真因不是 <details> 不行，而是渲染时给它传了
+ * open——那是**受控**写法。卡片在报告回流时会重渲染（列表滚动、状态 chip 变化、
+ * 宿主虚拟滚动重挂都会触发），一旦重渲染，React 就用那个 open 值把浏览器刚
+ * 展开的状态**写回去**——用户看到的是「点开了，一眨眼又收回去」，且全程不报错。
+ *
+ * 所以这里三条铁律，改动前先读一遍：
+ *   1. <details> 上**不传 open**，一个字节都不传；
+ *   2. **不挂 onToggle、不建 detailOpen state**——展开/收起完全交给浏览器；
+ *   3. 箭头不用 JS 切换字形，由下面的 CSS [open] 后代选择器驱动。
+ * 只要遵守这三条，重渲染对展开态就是**无操作**，展开一次就一直开着。
+ *
+ * ── 为什么不再叠 max-height + overflow ──
+ *
+ * 折叠本身就是长度管理：收起时只有一行标题，展开时用户已经明确表示「我要看全文」。
+ * 再套一层 320px 滚动区就变成「两层滚动」——外有卡片、内有 pre，滚轮落在哪一层
+ * 取决于指针位置，用起来像是滚不动。所以 .dsh-sa-rc-raw 只负责排版，不再限高；
+ * 兜底原文卡（data-report-raw）不走折叠，它仍然需要自己的滚动区，由
+ * .dsh-sa-rc-raw-plain 那条规则单独管。
+ */
+.dsh-sa-rc-detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+/*
+ * 折叠条本体（<summary>）。
+ *
+ * display: flex + list-style: none + ::-webkit-details-marker 三个一起用，
+ * 才能把浏览器默认那个「黑色小三角 + 缩进」彻底按住——否则我们的 CSS 箭头会和
+ * 原生 marker 同时出现，变成两个三角。list-style: none 管 Firefox/新标准，
+ * ::-webkit-details-marker 管 Chromium（本宿主就是它），两个都要写。
+ */
+.dsh-sa-rc-detail-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 1px 4px;
+  margin-left: -4px;
+  border-radius: var(--dsw-radius-sm, 4px);
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  font-weight: 600;
+  letter-spacing: .02em;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.dsh-sa-rc-detail-toggle::-webkit-details-marker {
+  display: none;
+}
+.dsh-sa-rc-detail-toggle::marker {
+  content: '';
+}
+.dsh-sa-rc-detail-toggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+.dsh-sa-rc-detail-toggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
+  outline-offset: 1px;
+}
+/*
+ * 箭头：**只由 CSS 驱动**，JS 里不写死字形。
+ *
+ * 默认收起 → ▸；<details> 被浏览器打开后命中 [open] 后代选择器 → ▾。
+ * 为什么坚持不放进 JS：字形一旦变成 React 状态，就又要靠一次重渲染去更新它，
+ * 而重渲染正是上面那段事故的入口。让 CSS 跟着 DOM 属性走，浏览器自己管，
+ * 重渲染多少次都不会把箭头和实际展开态弄反。
+ */
+.dsh-sa-rc-caret::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  text-align: center;
+  transition: none;
+}
+.dsh-sa-rc-detail[open] .dsh-sa-rc-caret::before {
+  content: '▾';
+}
+/* 展开后的原文块：只留一条上边距，与折叠条拉开一行呼吸。 */
+.dsh-sa-rc-detail > .dsh-sa-rc-raw {
+  margin-top: 4px;
+}
+/*
+ * 兜底原文卡（shape === 'unknown'，data-report-raw）专用：它**没有折叠**，
+ * 所以长文本必须有上限，否则一张卡能把整屏撑满、把下面的按钮顶出去。
+ * 折叠卡里的 .dsh-sa-rc-raw 不受这条影响，因为它外面有 [open] 在管长度。
+ */
+.dsh-sa-rc-raw-plain {
+  max-height: 320px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+/* 【说明】的折叠开关（与【细节】无关：那一段的折叠是本地 state，工作正常）。 */
+.dsh-sa-rc-more {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 1px 4px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 4px);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: inherit;
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  cursor: pointer;
+  list-style: none;
+}
+.dsh-sa-rc-more:hover {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+.dsh-sa-rc-more:focus-visible,
+.dsh-sa-rc-btn:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
+  outline-offset: 1px;
+}
+.dsh-sa-rc-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-size: var(--dsw-font-xxxs-11, 11px);
+}
+.dsh-sa-rc-btn {
+  padding: 1px 8px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
+  border-radius: var(--dsw-radius-sm, 4px);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12, 12px);
+  cursor: pointer;
+}
+.dsh-sa-rc-btn:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.dsh-sa-rc-truncated {
+  color: var(--dsw-alias-state-warn-primary, inherit);
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 这张卡本来没有动效；留一条显式规则，避免以后加过渡时忘掉这条媒体查询。 */
+  .dsh-sa-rc { transition: none; }
+}
 @keyframes dsh-sa-dc-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: .4; transform: scale(.78); }
@@ -4624,9 +5017,9 @@ window.__ModuleLoader__.load({
     /* ─────────────────── 派发卡的实时状态（plans/12 P1 §8.4） ─────────────────── */
 
     /**
-     * 一个 group 一个 feed：`Map<group, entry>`。
+     * 一批「实时状态订阅」：`Map<scopeKey, entry>`。
      *
-     * **为什么按 group 聚合而不是每张卡各自轮询**：同一批任务可能在 transcript 里
+     * **为什么按作用域聚合而不是每张卡各自轮询**：同一批任务可能在 transcript 里
      * 出现两张卡（分页重复、重放、宿主重挂），它们要的是**同一份**数据。各拉一份的
      * 后果不是「多一次请求」这么轻：两张卡会在不同时刻落状态，用户看到同一批任务
      * 在两条消息里处于不同状态，会以为账本出了问题。共享之后，一次响应同时喂给所有
@@ -4635,12 +5028,41 @@ window.__ModuleLoader__.load({
      * 每个 entry 的生命周期由 refcount 决定：最后一个订阅者卸载时删条目、清定时器、
      * 中止在途请求。**不做「超时自动回收」**——卡片滚出视口不等于卸载（虚拟滚动
      * 才会卸载），凭猜测停表会让滚回来时看到一段空窗。
+     *
+     * ── 为什么作用域有两种（group / task），而不是只有 group ──
+     *
+     * **这正是「派发卡状态永远停在运行中」的根因。** `group` 只由
+     * `dispatch_launch_many` 生成（`src/tools.js` 里 `g-${newTaskId()}`）；单条
+     * `dispatch_launch` 的返回体是 `{ task: card(task) }`，而 `card()` **不投影
+     * `group`**。于是单条派发的卡片 `view.group === ''`，旧实现在这里直接
+     * `return undefined`——**一个请求都不发**，卡片永远停在工具返回那一瞬间的
+     * 快照（`queued` / `running`）上。任务其实早就 `done` 了（账本对、
+     * `/board?task=` 也对），界面却一直说「运行中」。
+     *
+     * 修法不是给单条也编一个 group（那是伪造批次语义，还会让批次汇总误判），
+     * 而是**让订阅作用域跟着数据走**：有 group 就按 group 订阅（一批共享一份数据），
+     * 没有 group 但拿到了 `task_id` 就按 task 订阅（单条只订阅自己那一条）。
+     * `/board` 本来就同时支持 `?group=` 与 `?task=`（同一份契约、同一条路由，
+     * 见 `src/board.js` 的 `boardFilterOf`），所以不需要新增任何服务端接口。
      */
-    const groupFeeds = new Map()
+    const cardFeeds = new Map()
 
-    /** `/board?group=` 的 URL。`group` 里理论上可能有需要转义的字符，统一 encode。 */
-    function cardBoardUrl(group) {
-      return API + '?group=' + encodeURIComponent(group)
+    /**
+     * 作用域 → 订阅键。两种作用域拼进同一个 Map 时**必须**带前缀：
+     * 一个 group 的 id 和一条 task 的 id 在字符串上未必不会撞（脏数据/手写 id），
+     * 撞了就会让两张毫不相干的卡共享一份 feed，那是比不刷新更糟的错。
+     */
+    function feedKeyOf(scope) {
+      if (!scope || !scope.value) return ''
+      return scope.kind + ':' + scope.value
+    }
+
+    /**
+     * `/board?group=` / `/board?task=` 的 URL。
+     * 值里理论上可能有需要转义的字符，统一 encode。
+     */
+    function cardBoardUrl(scope) {
+      return API + '?' + (scope.kind === 'task' ? 'task=' : 'group=') + encodeURIComponent(scope.value)
     }
 
     /** 把当前 entry 归一成订阅者能安全持有的快照（不让外面拿到可变数组）。 */
@@ -4758,13 +5180,13 @@ window.__ModuleLoader__.load({
     /**
      * 把一次 `/board` 响应合并进 entry。
      *
-     * **旧宿主兜底（plans/12 §10 第 4 行）**：旧版 `/board` 忽略 `?group=`，返回的是
-     * 全量快照（且被 200 条上限截断）。前端必须自己按 group 过滤；一旦发现「过滤后
-     * 成员数 < 卡片行数」，说明这一批的成员已经被截断吃掉——这时候**必须停止轮询**
+     * **旧宿主兜底（plans/12 §10 第 4 行）**：旧版 `/board` 忽略 `?group=` / `?task=`，
+     * 返回的是全量快照（且被 200 条上限截断）。前端必须自己按作用域过滤；一旦发现
+     * 「过滤后成员数 < 卡片行数」，说明成员已经被截断吃掉——这时候**必须停止轮询**
      * 并标「状态为派发时快照」。继续拿截断后的全量快照当实时状态，会得到一种最糟的
      * 结果：卡里有几行永远停在 running（它们只是不在快照里），看起来像卡死。
      *
-     * 判据用「响应里出现了不属于本 group 的行」而不是「tasks 长度不等于行数」：
+     * 判据用「响应里出现了不属于本作用域的行」而不是「tasks 长度不等于行数」：
      * 新版宿主会服务端过滤，此时成员缺失只可能是任务已退休/归档，按计划 §10 该
      * 「保持最后一次已知状态」而不是判成旧宿主、停表。
      */
@@ -4773,9 +5195,9 @@ window.__ModuleLoader__.load({
       const mine = []
       for (const task of all) {
         if (!task || typeof task !== 'object') continue
-        if (task.group === entry.group) mine.push(task)
+        if (feedRowMatches(entry, task)) mine.push(task)
       }
-      // 宿主没按 group 过滤：响应里混进了别的批次。
+      // 宿主没按作用域过滤：响应里混进了别的批次/别的任务。
       const foreign = mine.length !== all.length
       entry.failures = 0
       entry.tasks = mine
@@ -4791,7 +5213,27 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 拉一次 `/board?group=`；失败保留上次数据，只累加失败数并退避。 */
+    /**
+     * 这一行看板数据是否属于本 entry 的作用域。
+     *
+     * 两种判据必须分开，不能只留 group：
+     * - `group`：看板行的 `group` 等于订阅的那个批次 id；
+     * - `task`：看板行的 `task_id`（宿主也用 `id`）等于订阅的那一条任务 id。
+     *   单条派发没有 group，只能按 id 认领——这条判据就是「单条卡也能拿到真实
+     *   状态」的全部依据，写错（比如拿 `group` 去比单条）会让它永远匹配不到，
+     *   卡片就又回到「永远运行中」。
+     */
+    function feedRowMatches(entry, task) {
+      if (entry.scope.kind === 'task') {
+        const id = typeof task.task_id === 'string' && task.task_id
+          ? task.task_id
+          : (typeof task.id === 'string' ? task.id : '')
+        return id === entry.scope.value
+      }
+      return task.group === entry.scope.value
+    }
+
+    /** 拉一次 `/board`（按 entry 的作用域）；失败保留上次数据，只累加失败数并退避。 */
     async function feedTick(entry) {
       if (entry.stopped) return
       if (!cardPageVisible()) return
@@ -4802,7 +5244,7 @@ window.__ModuleLoader__.load({
       const controller = new AbortController()
       entry.controller = controller
       try {
-        const response = await fetch(cardBoardUrl(entry.group), {
+        const response = await fetch(cardBoardUrl(entry.scope), {
           method: 'GET',
           headers: { accept: 'application/json', ...AUTH_HEADERS },
           cache: 'no-store',
@@ -4846,7 +5288,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 页面可见性：**一个监听器服务所有 feed**，而不是每个 group 挂一个。
+     * 页面可见性：**一个监听器服务所有 feed**，而不是每个作用域挂一个。
      *
      * 隐藏时停表 + 中止在途（看不见的数据不值得拉）；可见时**立即补一次**，
      * 不等下一个 tick——否则切回来要盯着旧状态再等 2–15 秒。
@@ -4855,7 +5297,7 @@ window.__ModuleLoader__.load({
 
     function onFeedVisibility() {
       const visible = cardPageVisible()
-      for (const entry of Array.from(groupFeeds.values())) {
+      for (const entry of Array.from(cardFeeds.values())) {
         if (!visible) {
           pauseFeed(entry)
           continue
@@ -4881,21 +5323,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 订阅一个 group 的实时状态。
+     * 订阅一个作用域的实时状态。
      *
-     * @param {string} group
-     * @param {{ expected?: number, onChange: (view: object) => void }} options
+     * @param {{kind: 'group'|'task', value: string}} scope 订阅作用域（见 `cardFeeds` 的注释）
+     * @param {{ expected?: number, expectedOf?: () => number, onChange: (view: object) => void }} options
      * @returns {() => void} 退订函数（refcount 归零时删条目、清定时器）
      */
-    function subscribeGroupFeed(group, options) {
-      const key = typeof group === 'string' ? group.trim() : ''
+    function subscribeCardFeed(scope, options) {
+      const key = feedKeyOf(scope)
       const sub = options && typeof options.onChange === 'function' ? options.onChange : null
       if (!key || !sub) return function () {}
       if (typeof fetch !== 'function' || typeof AbortController !== 'function') return function () {}
-      let entry = groupFeeds.get(key)
+      let entry = cardFeeds.get(key)
       if (!entry) {
         entry = {
-          group: key,
+          /*
+           * `scope` 必须**原样**存下来（不是只存 value）：轮询 URL 要据此决定
+           * 拼 `?group=` 还是 `?task=`，响应过滤也要用 kind 选判据。只存一个字符串
+           * 就得在每处重新猜「这是批次还是单条」，猜错的表现又是不报错的不刷新。
+           */
+          scope: { kind: scope.kind, value: scope.value },
           refs: 0,
           subs: new Set(),
           timer: null,
@@ -4905,19 +5352,19 @@ window.__ModuleLoader__.load({
           expected: 0,
           /*
            * 行数探针：每个订阅者一个（`() => rows.length`）。判「成员有没有被截断」
-           * 之前必须**现场问一遍**，不能用建条目那天的数字——同一 group 的第二张卡
+           * 之前必须**现场问一遍**，不能用建条目那天的数字——同一作用域的第二张卡
            * 可能晚挂载、行数也可能不同（重放脏数据）。
            */
           expectedProbes: [],
           frozen: false,
           stopped: false,
         }
-        groupFeeds.set(key, entry)
+        cardFeeds.set(key, entry)
       }
       entry.refs += 1
       // 行数是「成员是否被截断」的判据，取所有订阅者里最大的那个：
-      // 同 group 的两张卡行数正常相同，脏数据下取大的才不会误判成「成员不全」。
-      // `expectedOf` 是**每次取值时**调用的读函数（而不是一次性数字）：同一 group
+      // 同作用域的两张卡行数正常相同，脏数据下取大的才不会误判成「成员不全」。
+      // `expectedOf` 是**每次取值时**调用的读函数（而不是一次性数字）：同一作用域
       // 的第二张卡可能晚挂载或行数不同，一次性快照会把它的行数漏掉。
       const readExpected = function () {
         // 每个订阅者各报一次自己的行数，取最大值（见上面的注释）。
@@ -4952,8 +5399,8 @@ window.__ModuleLoader__.load({
         entry.refs = Math.max(0, entry.refs - 1)
         if (entry.refs > 0) return
         disarmFeed(entry)
-        groupFeeds.delete(key)
-        if (groupFeeds.size === 0) unbindFeedVisibility()
+        cardFeeds.delete(key)
+        if (cardFeeds.size === 0) unbindFeedVisibility()
       }
     }
 
@@ -5289,6 +5736,13 @@ window.__ModuleLoader__.load({
       if (phase === 'preparing') title = tr('card.preparing')
       else if (isBatch) title = fill(tr('card.headBatch'), { n: aggregate.total })
       else title = (rows[0] && rows[0].title) || cardTitleOf(args.title) || tr('noTitle')
+      /*
+       * 单条派发的订阅 id：**只在没有 group 时**给（批次有自己的 group 作用域，
+       * 按单条 id 再订阅一遍只会多发一份重复请求）。取第一行的 `id`——那是
+       * `dispatch_launch` 返回体里 `task.task_id` 投影出来的，正是 `/board?task=`
+       * 认的那个值。拿不到就留空，卡片退回「只有派发快照」的老行为（不编 id）。
+       */
+      const feedTaskId = !group && rows.length === 1 && rows[0].id ? rows[0].id : ''
       return {
         phase: phase,
         isBatch: isBatch,
@@ -5297,6 +5751,7 @@ window.__ModuleLoader__.load({
         done: aggregate.done,
         total: aggregate.total,
         group: group,
+        feedTaskId: feedTaskId,
         // result 阶段拿不到对象 = 内容不是 JSON（或没内容）：行标题照常，状态「未知」。
         unparsed: phase === 'result' && !data,
         /*
@@ -5421,7 +5876,7 @@ window.__ModuleLoader__.load({
        */
       const [feed, setFeed] = useState(null)
       /*
-       * feed 的 `expected`（行数）在订阅回调里要用**最新值**，但订阅只在 `[group]`
+       * 订阅时的 `expected`（行数）在回调里要用**最新值**，但订阅只在作用域键
        * 变化时重建（重建会打断正在跑的定时器）。用 ref 镜像它，回调读 ref 就既拿到
        * 最新值，又不用把 effect 的依赖写成一串会频繁变化的东西。
        */
@@ -5437,19 +5892,27 @@ window.__ModuleLoader__.load({
       const view = cardViewOf(props, feed)
       expectedRef.current = view.total
       /*
-       * 订阅一个 group 的实时状态。
+       * 订阅实时状态。
        *
-       * 依赖只有 `[group]`：行数变化（重放/脏数据）不该重建订阅——重建会删掉
-       * 正在跑的定时器再起一个新的，等于每次渲染都把轮询相位重置一次，
+       * 依赖只有那个**字符串作用域键**：行数变化（重放/脏数据）不该重建订阅——
+       * 重建会删掉正在跑的定时器再起一个新的，等于每次渲染都把轮询相位重置一次，
        * 极端情况下永远等不到那一次 tick。行数变化通过 ref 交给同一个订阅。
        *
-       * `phase !== 'result'` 或没有 group 时不订阅：`start` 阶段连任务 id 都还没有，
+       * `phase !== 'result'` 时不订阅：`start` 阶段连任务 id 都还没有，
        * `preparing` 更不该发请求（plans/12 §7.1）。
+       *
+       * ★ 作用域不再只看 `group`（这就是「派发卡永远显示运行中」的修复点）：
+       *   单条 `dispatch_launch` 的返回体没有 `group`（`src/tools.js` 的
+       *   `dispatch_launch` 返回 `{task: card(task)}`，而 `card()` 不投影 `group`），
+       *   旧实现 `if (!group) return` 于是**一个请求都不发**，卡片永远停在工具返回
+       *   那一瞬间的快照上。现在没有 group 但拿到了 task id 就按 task 订阅。
        */
-      const group = view.phase === 'result' ? view.group : ''
+      const scopeKey = view.phase === 'result' ? (view.group ? 'group:' + view.group : (view.feedTaskId ? 'task:' + view.feedTaskId : '')) : ''
       useEffect(function () {
-        if (!group) return undefined
-        const unsubscribe = subscribeGroupFeed(group, {
+        if (!scopeKey) return undefined
+        const at = scopeKey.indexOf(':')
+        const scope = { kind: scopeKey.slice(0, at), value: scopeKey.slice(at + 1) }
+        const unsubscribe = subscribeCardFeed(scope, {
           expected: expectedRef.current,
           /*
            * 每次渲染都把最新的行数交给 feed：`expected` 是「成员有没有被截断」的
@@ -5461,7 +5924,7 @@ window.__ModuleLoader__.load({
           onChange: function (next) { setFeed(next) },
         })
         return unsubscribe
-      }, [group])
+      }, [scopeKey])
       const settle = view.total > 0 && view.done === view.total
       /*
        * 头部圆点：`result` 后按聚合给颜色——全部结束用成功色，还有在跑的用业务色；
@@ -10785,6 +11248,1045 @@ window.__ModuleLoader__.load({
       return true
     }
 
+    /* ═════════════ 报告卡（plans/13 正式版：四段解析 + 结构化渲染） ═════════════ */
+
+    /*
+     * ── 这一块要守住的一件事（用户核心诉求，写在最前面）──
+     *
+     * 「做完必须比原来的灰色 context 行**信息更多、可读性更好**。如果只是位置变好
+     * 但内容变少，不值得。」
+     *
+     * 原来的 context 行会显示**完整四段正文**。所以这里的第一原则不是好看，是
+     * **不丢内容**，具体落在三条上（任何一条做不到都不许上线）：
+     *   ① 解析只做「分段」，不改写、不摘要、不重排句子；
+     *   ② 任何解析不出的形态（新形态、旧消息、脏数据、意外多出来的行）→ **原文卡**，
+     *      整段 `raw` 原样 `pre-wrap` 显示，一个字符都不少；
+     *   ③ 解析成功的卡里，【细节】折进去的那块**就是完整 `raw`**——也就是说
+     *      「结构更好看」是增量，原文永远还在一次点击之外。
+     *
+     * 第 ③ 条是这一版最关键的设计取舍：它让「解析器漏识别了一段」的后果从
+     * 「用户看不到那段内容」降到「用户要多点一下」。这就是「绝不允许卡片渲染成功
+     * 但内容丢了」（plans/13 §十一 信息保真）的工程实现。
+     */
+
+    /**
+     * 报告文本的**段名常量**（客户端侧副本）。
+     *
+     * 权威定义在 `src/constants.js` 的 `REPORT_SECTIONS`（`voice.js` 用它拼文本）。
+     * 客户端是零依赖 plain 模块、拿不到 src，只能各存一份——所以
+     * `test/voice-contract.test.js` 里有一条断言：读本文件，检查这六个段名**全部**
+     * 出现在这里。`voice.js` 一改段名，那条测试立刻红，不会出现「服务端换了段名、
+     * 客户端悄悄认不出来、报告全变原文卡」这种只有真机才发现的漂移。
+     *
+     * 六个值一个都不能少，包括 `【结果】`/`【批次】`：漏一个就等于那一段永远解析不出来。
+     */
+    const REPORT_TEXT_SECTIONS = {
+      TASK: '【任务】',
+      RESULT: '【结果】',
+      NOTE: '【说明】',
+      NEED: '【需要你】',
+      DETAIL: '【细节】',
+      BATCH: '【批次】',
+    }
+
+    /**
+     * 段名 → 字段的**顺序表**（不是 Map）。
+     *
+     * 用表而不是对象，是因为解析要「按行首精确匹配」并且**顺序稳定**；对象键序在
+     * 语义上不保证，而这里一旦顺序变了（比如 `【任务】` 排在 `【批次】` 后面），
+     * 首行判定就会先命中错的那个。
+     */
+    const REPORT_SECTION_FIELDS = [
+      { prefix: REPORT_TEXT_SECTIONS.TASK, field: 'task' },
+      { prefix: REPORT_TEXT_SECTIONS.RESULT, field: 'result' },
+      { prefix: REPORT_TEXT_SECTIONS.NOTE, field: 'note' },
+      { prefix: REPORT_TEXT_SECTIONS.NEED, field: 'need' },
+      { prefix: REPORT_TEXT_SECTIONS.DETAIL, field: 'detail' },
+      { prefix: REPORT_TEXT_SECTIONS.BATCH, field: 'batch' },
+    ]
+
+    /** 四种已识别形态 + 一种兜底（plans/13 §8.2 的 `shape`）。 */
+    const REPORT_SHAPE = {
+      REPORT: 'report',
+      BATCH: 'batch',
+      FAILURE: 'failure',
+      IDLE: 'idle',
+      UNKNOWN: 'unknown',
+    }
+
+    /**
+     * 批次分组行「· 成了：…」的组名映射（plans/13 §8.2 第 3 条）。
+     *
+     * 只认 `voice.js` 真的会产出的四个组名（`batchText()`）。**认不出的组名不猜**：
+     * 归 `other` 并把原标签原样留下——将来文案加了「· 部分完成：」，用户看到的是
+     * 一行原样的「部分完成：…」，而不是被塞进「没成」里的错误归类。
+     */
+    const REPORT_GROUP_KINDS = {
+      '成了': 'ok',
+      '没成': 'failed',
+      '未执行': 'notRun',
+      '已取消': 'cancelled',
+    }
+
+    /**
+     * `raw` 的解析上限（plans/14 §3.2：「`raw` 超长（>32KB）→ 截断 + 提示，
+     * **不许正则扫全文导致卡顿**」）。
+     *
+     * 为什么先 `slice` 再解析、而不是「先解析再判断长度」：报告是模型写的自由文本，
+     * 一份 5MB 的 `raw` 会让 `split('\n')` 产生几十万行、逐行前缀匹配变成一次长卡顿，
+     * 而 transcript 里一次卡顿就是整页滚动掉帧。截断到 32KB（正常报告 34–800 字，
+     * 已经是一百倍余量）之后，解析成本有硬上界。
+     *
+     * 截断只影响**解析与显示**：复制按钮永远复制完整原文（`rawFull`），
+     * 因为「太长所以只给你看前半段」和「太长所以连复制都只给前半段」是两件事。
+     */
+    const REPORT_RAW_MAX = 32 * 1024
+
+    /** 【说明】默认显示几行；超了给「展开」（plans/13 §7.5）。 */
+    const REPORT_NOTE_LINES = 3
+    /**
+     * 【说明】单行多长算「超过 3 行」。
+     *
+     * plans/13 §7.5 要求按**渲染高度**判定，但离线渲染树里没有高度，真机上也不能在
+     * 渲染期同步测量而触发额外 layout。所以用「行数 ≥ 4 **或** 字符数 > 160」两个
+     * 判据的并集：宁可早给一个「展开」，也不要让一段摘要把卡片撑成两屏——
+     * 后者会让「需要你」掉到看不见的位置，而那一段才是要人干活的地方。
+     */
+    const REPORT_NOTE_CHARS = 160
+
+    /** 复制按钮的三态文案键；`idle` 不显示额外文字。 */
+    const REPORT_COPY_IDLE = 'idle'
+
+    /** 状态回查（plans/13 §8.3）：缓存 10s、非终态 5s 重查、最多 3 次。 */
+    const REPORT_STATUS_TTL_MS = 10000
+    const REPORT_STATUS_RETRY_MS = 5000
+    const REPORT_STATUS_MAX_TRIES = 3
+    /**
+     * 缓存条目上限。
+     *
+     * 这张表是**模块级**的，跟会话一样长寿：一个长会话里报告过几百条任务，
+     * 表里就有几百个条目，而它们绝大多数早就过了 TTL、永远不会再被读到。
+     * 超上限时先清掉所有过期项；还有剩（说明上限设得太小或全都在 TTL 内）
+     * 就直接清空——**清空是可接受的**：最坏结果是多发一次 `?task=`，
+     * 而「无限长」的结果是内存随会话时长单调增长。
+     */
+    const REPORT_STATUS_CACHE_MAX = 200
+
+    /**
+     * 状态回查缓存：`Map<taskId, { at, status }>`。
+     *
+     * 为什么需要：transcript 是虚拟滚动的，同一张卡滚出视口会卸载、滚回来会重挂。
+     * 没有缓存的话，「往上翻一屏再翻回来」就是一次新的 `/board?task=`，而
+     * 那只是重复拿同一份数据。TTL 10s 让「刚结算」这类变化仍然看得见。
+     *
+     * **查不到（空串）不写缓存**：一个任务可能在报告投递的瞬间还没进账本，
+     * 把「没有」缓存 10 秒，等于让一次正常的时序竞争变成「这张卡一直没有状态」。
+     */
+    const reportStatusCache = new Map()
+
+    /**
+     * 从插件自投消息的 **message id** 里取 task id。
+     *
+     * 这是**唯一**能从 `user/message` 事件里拿到 task id 的地方——事件的 `source`
+     * 只有 `{ kind, form }`，不含 task（`src/sessions.js` 的 `userMessage()`）。
+     *
+     * ── 为什么不能「取第一段」（真机错的正是这里） ──
+     *
+     * 消息 id 是**两层拼起来的**，不是一层：
+     *
+     *   ① `dispatch.js`：`requestId = nextMessageId(task.id, 'relay')`
+     *      = `${taskId}:relay:${BOOT}:${seq}`（`constants.js`）；
+     *   ② `sessions.js`：`userMessage(`${SOURCE_KIND}:${requestId}`)`
+     *      —— 又在这个前面加了**包名**。
+     *
+     * 于是落到事件上的 `data.id` 是
+     *
+     *      `dsh-mini-superagent:t-mw7jj82i-f:relay:6yqj3q:22`
+     *       └── 包名（不是 task id）──┘└── 真正的 task id ──┘
+     *
+     * 真机上显示成 `dsh-mini-superagent` 就是「取了第一段」的结果：第一段是包名。
+     * 所以必须**先剥掉已知的包名前缀**，再取下一段。批次汇总的 task.id 形如
+     * `g-t-mwgp38pt-1`，同一套剥离规则照样成立。
+     *
+     * 前缀用 `RELAY_SOURCE_KIND` 而不是字面量：它就是写进 `source.kind` 的同一个
+     * 常量（`:70`），改名时两边一起动——写死字符串的话，改包名之后这里会静默退化成
+     * 「显示整条 id」。
+     *
+     * 为什么取不到冒号就原样返回：宁可渲染出一个完整 id，也不要渲染空字符串或
+     * `undefined`；猜错的表现是「多几个字符」，不是「卡片没了」。
+     *
+     * @param {unknown} messageId `event.data.id`
+     * @returns {string} task id（形如 `t-xxx` / `g-t-xxx`；取不到时是剥前缀后的原串）
+     */
+    function reportTaskIdOf(messageId) {
+      const text = String(messageId === undefined || messageId === null ? '' : messageId)
+      const prefix = RELAY_SOURCE_KIND + ':'
+      const body = text.startsWith(prefix) ? text.slice(prefix.length) : text
+      const cut = body.indexOf(':')
+      return cut > 0 ? body.slice(0, cut) : body
+    }
+
+    /**
+     * 取一条用户消息的**全部**文本块，按出现顺序拼成正文。
+     *
+     * 为什么是「全部」而不是「第一个」：`content` 是块数组，宿主或未来版本可能把一份
+     * 报告拆成多个 text 块（例如长报告分块投递）。只取第一块的表现是「卡片上只有
+     * 半份报告」，而且**看起来解析成功**——最难发现的那种内容丢失。
+     *
+     * @param {unknown} content `event.data.content`
+     * @returns {string}
+     */
+    function reportTextOf(content) {
+      if (!Array.isArray(content)) {
+        return typeof content === 'string' ? content : ''
+      }
+      const parts = []
+      for (const block of content) {
+        if (typeof block === 'string') { parts.push(block); continue }
+        if (block && block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+      }
+      return parts.join('\n')
+    }
+
+    /**
+     * 一行是不是某个已知段的开头；是则返回字段名与该段的值。
+     *
+     * **只认行首精确匹配**（plans/13 §8.2 第 1 条）：不做「包含【结果】」这种模糊匹配。
+     * 理由不是洁癖——摘要正文里完全可能出现「这次没写【结果】，因为……」这样的句子，
+     * 模糊匹配会把它当成段名切掉，于是**正文被当成结构**，内容直接少一句。
+     *
+     * @param {string} line
+     * @returns {{ field: string, value: string } | null}
+     */
+    function reportSectionOf(line) {
+      if (typeof line !== 'string' || !line) return null
+      for (const entry of REPORT_SECTION_FIELDS) {
+        if (line.startsWith(entry.prefix)) {
+          return { field: entry.field, value: line.slice(entry.prefix.length) }
+        }
+      }
+      return null
+    }
+
+    /**
+     * 从【细节】段里取 `dispatch_inspect` 的任务 id。
+     *
+     * 为什么还要校验形状（`t-…` / `g-…`）：批次汇总的细节行是一句人话
+     * ——`dispatch_inspect 按任务查（批次 g-xxx）`——正则照样能捕获到
+     * `按任务查（批次` 这种「不是 id 的东西」。不校验就会把它当 id 显示在卡头，
+     * 用户会以为那是个能查的编号。校验不过就**不显示**，而不是显示一个错的。
+     *
+     * @param {string} detailText
+     * @returns {string} 形如 `t-1a9f-1`；取不到返回空串
+     */
+    function reportInspectIdOf(detailText) {
+      const match = /dispatch_inspect\s+(\S+)/.exec(String(detailText || ''))
+      if (!match) return ''
+      const id = match[1].replace(/[，,。、；;）)]+$/, '')
+      return /^(?:t|g)-[\w-]+$/.test(id) ? id : ''
+    }
+
+    /**
+     * 把一条报告的正文解析成卡片模型（plans/13 §8.2 的 `ReportCardData`）。
+     *
+     * ── 为什么解析失败必须退回原文（这一段是本文件的「为什么」） ──
+     *
+     * 报告的文案契约是**模型输入**（plans/10 四段式），不是 UI 的内部格式：将来
+     * 加一段「【下一步】」、或者有人改了一句文案、或者一条升级前写入的老消息用的是
+     * 旧格式，都会让「按段名切行」这个纯文本假设失效。
+     *
+     * 这时有两条路：
+     *   A. 解析不出就少渲染几块 —— 卡片看起来很干净，但**用户看到的内容比原来的
+     *      灰色 context 行更少**。而上下文行是没人会去比对的，丢了也不会有人发现，
+     *      直到用户说「我记得它说过这句，怎么没了」。
+     *   B. 退回原文卡 —— 丑一点，但内容和 context 行**一模一样**。
+     *
+     * 本实现一律选 B，并且把判据做得**主动**：不只是「首行不认识」才退，
+     * 而是「任何一行没被某个段吃掉」也退。因为最危险的情形不是格式全变，而是
+     * 「四段之后多了一行」——那种报告仍然能被解析成四段，多出来的那行却会静默消失。
+     * 「有一行不知道往哪放」就是「这份文本不是我以为的格式」，那就整份按原文显示。
+     *
+     * 同样的理由让【细节】折叠块里放的是**完整 `raw`** 而不是只有细节行：
+     * 解析器漏识别一段时，损失从「内容没了」降级为「多点一下」。
+     *
+     * @param {unknown} rawText 正文（`event.data.content` 里的全部文本）
+     * @param {unknown} messageId `event.data.id`（用来取 task id）
+     * @returns {object} 卡片模型；**任何输入都不抛错**
+     */
+    function parseReportText(rawText, messageId) {
+      const full = typeof rawText === 'string' ? rawText : String(rawText === undefined || rawText === null ? '' : rawText)
+      const truncated = full.length > REPORT_RAW_MAX
+      /*
+       * 截断之后才解析：解析成本的上界由 `REPORT_RAW_MAX` 保证（见那个常量的注释）。
+       * `raw` 是**显示与解析用**的（可能被截断），`rawFull` 是**复制用**的完整原文。
+       */
+      const raw = truncated ? full.slice(0, REPORT_RAW_MAX) : full
+      const card = {
+        shape: REPORT_SHAPE.UNKNOWN,
+        taskId: reportTaskIdOf(messageId),
+        title: '',
+        raw,
+        rawFull: full,
+        truncated,
+        truncatedFrom: full.length,
+      }
+      const rows = raw.split('\n')
+      let first = -1
+      for (let i = 0; i < rows.length; i += 1) {
+        if (rows[i].trim()) { first = i; break }
+      }
+      // 整份是空白的：不抛错、不编标题，交给渲染层显示「没有正文」。
+      if (first < 0) return card
+      const head = rows[first]
+
+      /*
+       * 形态判定顺序**有讲究**：先认带段名的两种（首行是段名，最难误判），
+       * 再认两句人话形态（正则宽，放在后面）。反过来会让「【任务】…：没能开始——」
+       * 这种内容里恰好出现那几个字的报告被当成启动失败。
+       */
+      if (head.startsWith(REPORT_TEXT_SECTIONS.TASK)) {
+        return parseReportSingle(card, rows, first)
+      }
+      if (head.startsWith(REPORT_TEXT_SECTIONS.BATCH)) {
+        return parseReportBatch(card, rows, first)
+      }
+      /*
+       * 启动失败：`<标签>：没能开始——<原因>。要我重试吗？`（`voice.js` 的 `failureText`）。
+       * 用**非贪婪**的 `(.+?)` 取标签：报告里可能出现多个「：」，贪婪会把标签吃到
+       * 最后一个冒号，卡头就变成一整句话。
+       */
+      const failure = /^(.+?)：没能开始——([\s\S]*)$/.exec(head)
+      if (failure) return parseReportLabelled(card, rows, first, failure[1], '没能开始——' + failure[2], REPORT_SHAPE.FAILURE)
+      /*
+       * 跑完没结论：`<标签>：它跑完了，但没给结论——…`（`voice.js` 的 `idleText`）。
+       * 首行之后可能跟若干【说明】与一行【细节】，所以它和启动失败共用一个
+       * 「首行 + 可选段」的解析器。
+       */
+      const idle = /^(.+?)：它跑完了，但没给结论——([\s\S]*)$/.exec(head)
+      if (idle) return parseReportLabelled(card, rows, first, idle[1], '它跑完了，但没给结论——' + idle[2], REPORT_SHAPE.IDLE)
+      return card
+    }
+
+    /**
+     * 单任务报告：`【任务】/【结果】/【说明】?/【需要你】?/【细节】`。
+     *
+     * 逐行收集，遇到**认不出的行**或**不该出现在这里的段名**就整份退回原文
+     * （见 `parseReportText` 的函数头注释）。
+     */
+    function parseReportSingle(base, rows, first) {
+      const card = Object.assign({}, base, { shape: REPORT_SHAPE.REPORT })
+      card.title = rows[first].slice(REPORT_TEXT_SECTIONS.TASK.length).trim()
+      const result = []
+      const note = []
+      const need = []
+      const detail = []
+      for (let i = first + 1; i < rows.length; i += 1) {
+        const line = rows[i]
+        // 空行是排版，不是内容：跳过而不是判「意外行」。
+        if (!line.trim()) continue
+        const section = reportSectionOf(line)
+        if (!section) return base
+        if (section.field === 'result') result.push(section.value)
+        else if (section.field === 'note') note.push(section.value)
+        else if (section.field === 'need') need.push(section.value)
+        else if (section.field === 'detail') detail.push(section.value)
+        // `【任务】` / `【批次】` 出现在单任务报告的中段 = 这份文本不是我以为的形状。
+        else return base
+      }
+      return finishReportCard(card, { result, note, need, detail })
+    }
+
+    /**
+     * 批次汇总：`【批次】/ 比例行 / · 成了：… / · 没成：… / … /【需要你】?/【细节】?`
+     *
+     * 与单任务不同的是它有**一行没有段名**（比例行）。所以这里允许「恰好一行」
+     * 裸文本作为比例行，第二行裸文本仍然判「意外」——对格式的宽容必须有边界，
+     * 否则一份格式全变的文本会被半解析半丢弃。
+     */
+    function parseReportBatch(base, rows, first) {
+      const card = Object.assign({}, base, { shape: REPORT_SHAPE.BATCH, groups: [] })
+      card.title = rows[first].slice(REPORT_TEXT_SECTIONS.BATCH.length).trim()
+      const note = []
+      const need = []
+      const detail = []
+      let ratioDone = false
+      for (let i = first + 1; i < rows.length; i += 1) {
+        const line = rows[i]
+        if (!line.trim()) continue
+        const section = reportSectionOf(line)
+        if (section) {
+          if (section.field === 'note') note.push(section.value)
+          else if (section.field === 'need') need.push(section.value)
+          else if (section.field === 'detail') detail.push(section.value)
+          else return base
+          continue
+        }
+        // 分组行：`· 成了：登录超时、接口重试`（`batchText()` 的固定形状）。
+        if (line.startsWith('·')) {
+          const body = line.replace(/^·\s*/, '')
+          const cut = body.indexOf('：')
+          const label = (cut > 0 ? body.slice(0, cut) : body).trim()
+          const text = (cut > 0 ? body.slice(cut + 1) : '').trim()
+          card.groups.push({
+            kind: REPORT_GROUP_KINDS[label] || 'other',
+            // 认不出的组名原样保留（不猜语义、不合并进别的组）。
+            label,
+            text,
+          })
+          continue
+        }
+        if (!ratioDone) {
+          // 比例行：`4 条成了 3 条，1 条卡住。` 取前两个数；取不到就只显示原文。
+          const ratio = /^(\d+)\s*条成了\s*(\d+)\s*条/.exec(line.trim())
+          if (ratio) card.ratio = { total: Number(ratio[1]), ok: Number(ratio[2]) }
+          card.result = line.trim()
+          ratioDone = true
+          continue
+        }
+        return base
+      }
+      return finishReportCard(card, { result: [], note, need, detail })
+    }
+
+    /**
+     * 两句人话形态（启动失败 / 跑完没结论）：首行已经拆成「标签 + 正文」，
+     * 之后只允许出现【说明】与【细节】。
+     *
+     * 首行的正文**原样重建**（`没能开始——` + 原因），不裁剪、不摘要：那是用户唯一
+     * 需要读的一句，任何改写都是替模型做总结。
+     */
+    function parseReportLabelled(base, rows, first, label, resultText, shape) {
+      const card = Object.assign({}, base, { shape })
+      card.title = String(label || '').trim()
+      card.result = String(resultText || '').trim()
+      const note = []
+      const detail = []
+      for (let i = first + 1; i < rows.length; i += 1) {
+        const line = rows[i]
+        if (!line.trim()) continue
+        const section = reportSectionOf(line)
+        if (!section) return base
+        if (section.field === 'note') note.push(section.value)
+        else if (section.field === 'detail') detail.push(section.value)
+        else return base
+      }
+      return finishReportCard(card, { result: [], note, need: [], detail })
+    }
+
+    /**
+     * 把收集到的段值落到卡片模型上。
+     *
+     * 三重规则：
+     *   - 同一段出现多次（`idleText()` 最多推两行【说明】）→ 用 `\n` 接起来，
+     *     不是「后者覆盖前者」——覆盖会让第一行内容消失；
+     *   - 空值段**不落字段**（`undefined`），渲染层据此「缺段不占位」；
+     *   - `detail` 同时算 `inspectId`（失败就空，见 `reportInspectIdOf`）。
+     *
+     * @param {object} card
+     * @param {{ result: string[], note: string[], need: string[], detail: string[] }} collected
+     */
+    function finishReportCard(card, collected) {
+      const join = function (list) {
+        const parts = []
+        for (const item of list) {
+          const value = String(item === undefined || item === null ? '' : item).trim()
+          if (value) parts.push(value)
+        }
+        return parts.join('\n')
+      }
+      const result = join(collected.result)
+      const note = join(collected.note)
+      const need = join(collected.need)
+      const detail = join(collected.detail)
+      if (result) card.result = result
+      if (note) card.note = note
+      if (need) card.need = need
+      if (detail) {
+        card.detail = detail
+        const inspectId = reportInspectIdOf(detail)
+        if (inspectId) card.inspectId = inspectId
+      }
+      return card
+    }
+
+    /** `/board?task=` 的地址（与派发卡的 `?group=` 同一份契约、同一条路由）。 */
+    function reportBoardUrl(taskId) {
+      return API + '?task=' + encodeURIComponent(taskId)
+    }
+
+    /**
+     * 从 `/board?task=` 的响应里取这条任务的状态；取不到返回空串。
+     *
+     * 为什么还要按 id 再过滤一遍：宿主在老版本里会忽略 `?task=` 返回**全量**快照
+     * （与派发卡 `?group=` 的老宿主行为同源）。不过滤就会把「快照里第一行」的状态
+     * 当成这条任务的状态——那是**编造状态**，比不显示严重得多。
+     */
+    function reportStatusOf(data, taskId) {
+      const list = data && Array.isArray(data.tasks) ? data.tasks : []
+      for (const task of list) {
+        if (!task || typeof task !== 'object') continue
+        const id = typeof task.task_id === 'string' && task.task_id
+          ? task.task_id
+          : (typeof task.id === 'string' ? task.id : '')
+        if (id !== taskId) continue
+        return typeof task.status === 'string' ? task.status.trim() : ''
+      }
+      return ''
+    }
+
+    /**
+     * 查一次状态（带 10s 缓存）。**任何失败都静默返回空串**。
+     *
+     * 为什么静默：chip 是锦上添花（plans/13 §8.3「查不到就不显示 chip，不显示
+     * 未知」）。为它弹一个错误提示，等于让「状态查不到」这件事比「报告本身」更显眼。
+     */
+    async function loadReportStatus(taskId) {
+      const id = typeof taskId === 'string' ? taskId.trim() : ''
+      if (!id) return ''
+      const now = Date.now()
+      const cached = reportStatusCache.get(id)
+      if (cached && now - cached.at < REPORT_STATUS_TTL_MS) return cached.status
+      if (typeof fetch !== 'function') return ''
+      let status = ''
+      try {
+        const response = await fetch(reportBoardUrl(id), {
+          method: 'GET',
+          headers: { accept: 'application/json', ...AUTH_HEADERS },
+          cache: 'no-store',
+          credentials: 'same-origin',
+        })
+        if (response && response.ok && typeof response.json === 'function') {
+          let data = null
+          try { data = await response.json() } catch (error) { data = null }
+          status = reportStatusOf(data, id)
+        }
+      } catch (error) {
+        status = ''
+      }
+      if (status) {
+        reportStatusCache.set(id, { at: now, status })
+        // 超上限才清理（见 REPORT_STATUS_CACHE_MAX 的注释：这里最坏只是多发一次请求）。
+        if (reportStatusCache.size > REPORT_STATUS_CACHE_MAX) {
+          for (const [key, entry] of reportStatusCache) {
+            if (now - entry.at >= REPORT_STATUS_TTL_MS) reportStatusCache.delete(key)
+          }
+          if (reportStatusCache.size > REPORT_STATUS_CACHE_MAX) reportStatusCache.clear()
+        }
+      }
+      return status
+    }
+
+    /**
+     * 卡片挂载时查一次状态；**非终态**才 5s 后重查，最多 3 次（plans/13 §8.3）。
+     *
+     * 为什么查不到（空串）不重查：报告投递的瞬间任务可能还没进账本，这时重查是
+     * 敲一条不存在的任务；而「状态为空」在界面上就是「不显示 chip」，本来就是
+     * 允许的结果。只有**已知非终态**（running/queued）才值得再问。
+     *
+     * 卸载时清定时器：报告卡在虚拟滚动里会频繁挂/摘，漏一个定时器就是一张已卸载的
+     * 卡还在发请求。
+     */
+    function useReportStatus(taskId) {
+      const [status, setStatus] = useState('')
+      useEffect(function () {
+        const id = typeof taskId === 'string' ? taskId.trim() : ''
+        if (!id) return undefined
+        let cancelled = false
+        let tries = 0
+        let timer = null
+        function step() {
+          void loadReportStatus(id).then(function (next) {
+            if (cancelled) return
+            if (next) setStatus(next)
+            tries += 1
+            if (next && !SETTLED_STATUS.has(next) && tries < REPORT_STATUS_MAX_TRIES) {
+              timer = setTimeout(step, REPORT_STATUS_RETRY_MS)
+            }
+          }).catch(function () { /* 状态查询失败不影响卡片 */ })
+        }
+        step()
+        return function () {
+          cancelled = true
+          if (timer) clearTimeout(timer)
+          timer = null
+        }
+      }, [taskId])
+      return status
+    }
+
+    /**
+     * 卡头里显示的短 id。
+     *
+     * 截到 14 字符 + 省略号：`t-mwgp38pt-1` 这类 id 在窄屏上会把标题挤没。完整 id 仍
+     * 在 `title` 属性里（悬停可见），**不改变任何数据**，也不编一个不存在的短 id。
+     */
+    function shortReportId(id) {
+      const value = typeof id === 'string' ? id.trim() : ''
+      if (!value) return ''
+      return value.length > 14 ? value.slice(0, 14) + '…' : value
+    }
+
+    /**
+     * 状态 chip 的文字：**只走 `TEXT['status.*']`**，认不出的状态不显示（plans/13 §8.3）。
+     *
+     * 为什么不在 `TEXT` 里补一个「未知」兜底：那会让「查到了但我不认识」和
+     * 「查不到」看起来一样，而前者是代码该更新的信号（宿主加了新状态），
+     * 后者是数据本来就没有。两者混成一句「未知」，就再也分不开了。
+     */
+    function reportChipOf(status) {
+      if (!status) return ''
+      if (TEXT['status.' + status] === undefined) return ''
+      return tr('status.' + status)
+    }
+
+    /**
+     * 报告卡（plans/13 §七）。
+     *
+     * 段落顺序是**信息重要性顺序**，不是文本顺序：结果 → 批次分组 → 说明 →
+     * 需要你 → 细节。文本里的顺序（说明在需要你之前）在视觉上会让「需要你」沉到
+     * 中部；而这一段是唯一需要用户动手的，必须定在卡片下沿、紧贴折叠的细节之上。
+     *
+     * 所有文案走 `tr()`（`TEXT` / `TEXT_EN` 成对）；所有颜色走 `--dsw-alias-*`。
+     * 卡片正文是**真实文本节点**：可以选中复制，不用 canvas / 图片（§7.5）。
+     */
+    function ReportCard(props) {
+      const data = props && props.node && props.node.data ? props.node.data : {}
+      const card = data && typeof data === 'object' ? data : {}
+      const shape = typeof card.shape === 'string' ? card.shape : REPORT_SHAPE.UNKNOWN
+      const isBatch = shape === REPORT_SHAPE.BATCH
+      const isUnknown = shape === REPORT_SHAPE.UNKNOWN
+      const title = typeof card.title === 'string' && card.title.trim() ? card.title.trim() : tr('report.fallbackTitle')
+      /*
+       * 【细节】没有展开态 state。原 `detailOpen` / `setDetailOpen` / `onToggle`
+       * 已随折叠交互一起删掉（用户决定：把展开按钮删了）。
+       *
+       * 现在这一段**无条件直接渲染**，所以没有任何「展开/收起」的状态需要记：
+       * 不需要 state、不需要 effect、不需要事件处理。少一个状态就少一处
+       * 「浏览器改了、React 又写回去」的打架机会。
+       */
+      const [noteOpen, setNoteOpen] = useState(false)
+      const [copyState, setCopyState] = useState(REPORT_COPY_IDLE)
+      /*
+       * 状态回查只对**单任务**做：批次汇总的 id 是 `g-…`，它对应一组任务，
+       * 没有一个「批次状态」字段可查。给批次编一个聚合状态（全成=已完成？）就是
+       * plans/13 §8.3 明令禁止的「猜状态」；批次卡头显示的 `3/4` 来自**文本本身**，
+     * 那是报告自己写的比例，不是猜的。
+       */
+      const status = useReportStatus(isBatch ? '' : card.taskId)
+      useEffect(function () {
+        ensureCardStyles()
+        return function () { releaseCardStyles() }
+      }, [])
+      const chip = reportChipOf(status)
+      const dot = chip ? (STATUS_META[status] || STATUS_FALLBACK) : STATUS_FALLBACK
+      /*
+       * 复制按钮只在**真的有剪贴板**时渲染（plans/14 §6 第 7 条）。
+       *
+       * 为什么不是「渲染了再兜底」：上一版在无剪贴板的宿主上给了一个按钮，点下去
+       * 走 `document.execCommand` 兜底，失败后弹一句「复制失败」——用户看到的仍然是
+       * 「有个按钮，点了没用」。不渲染才是诚实的降级：没有能力就不给入口。
+       */
+      const canCopy = typeof navigator !== 'undefined' && Boolean(navigator)
+        && Boolean(navigator.clipboard) && typeof navigator.clipboard.writeText === 'function'
+      const copyLabel = copyState === 'ok'
+        ? tr('report.copied')
+        : (copyState === 'fail' ? tr('report.copyFailed') : tr('report.copy'))
+      /*
+       * 【说明】的折叠：行数 > 3 或 单行过长 才给「展开」（见 `REPORT_NOTE_CHARS`）。
+       * 折叠只影响**显示**，复制走 `rawFull`，所以折叠永远不会让内容真的拿不到。
+       */
+      const noteText = typeof card.note === 'string' ? card.note : ''
+      const noteLines = noteText ? noteText.split('\n') : []
+      const noteLong = noteLines.length > REPORT_NOTE_LINES || noteText.length > REPORT_NOTE_CHARS
+      const noteShown = noteLong && !noteOpen
+        ? noteLines.slice(0, REPORT_NOTE_LINES).join('\n')
+        : noteText
+      const groups = Array.isArray(card.groups) ? card.groups : []
+      const raw = typeof card.raw === 'string' ? card.raw : ''
+      const rawFull = typeof card.rawFull === 'string' ? card.rawFull : raw
+      const need = typeof card.need === 'string' ? card.need.trim() : ''
+
+      const children = []
+      children.push(h(
+        'div',
+        { key: 'head', className: 'dsh-sa-rc-head' },
+        h('span', {
+          key: 'dot',
+          className: 'dsh-sa-rc-dot',
+          style: { color: dot.color },
+          'aria-hidden': 'true',
+        }),
+        h('span', { key: 'title', className: 'dsh-sa-rc-title', title: title, 'data-report-title': 'true' }, title),
+        chip ? h('span', { key: 'chip', className: 'dsh-sa-rc-chip', style: { color: dot.color }, 'data-report-chip': status }, chip) : null,
+        isBatch && card.ratio
+          ? h('span', { key: 'ratio', className: 'dsh-sa-rc-ratio', 'data-report-ratio': 'true' }, card.ratio.ok + '/' + card.ratio.total)
+          : null,
+        card.taskId
+          ? h('span', { key: 'id', className: 'dsh-sa-rc-id', title: String(card.taskId), 'data-report-id': String(card.taskId) }, shortReportId(card.taskId))
+          : null,
+      ))
+
+      const body = []
+      /*
+       * 结果：正常字号、主色，`pre-wrap` 保留报告自己的换行。这是最重要的一段，
+       * 不给折叠、不给省略——它在最上面，多两行也不会把别的内容挤走。
+       */
+      if (typeof card.result === 'string' && card.result.trim()) {
+        body.push(h('p', { key: 'result', className: 'dsh-sa-rc-result', 'data-report-result': 'true' }, card.result.trim()))
+      }
+      /*
+       * 批次分组：每组一行「标签 + 名单」。组名走翻译、**认不出的组名原样显示**
+       * （见 `REPORT_GROUP_KINDS`），这样将来加组也不会把内容吞掉。
+       */
+      if (groups.length) {
+        body.push(h('div', { key: 'groups', className: 'dsh-sa-rc-groups', 'data-report-groups': String(groups.length) }, groups.map(function (group, index) {
+          const kind = group && typeof group.kind === 'string' ? group.kind : 'other'
+          const label = kind === 'ok'
+            ? tr('report.groupsOk')
+            : kind === 'failed'
+              ? tr('report.groupsFailed')
+              : kind === 'notRun'
+                ? tr('report.groupsNotRun')
+                : kind === 'cancelled'
+                  ? tr('report.groupsCancelled')
+                  : String((group && group.label) || '')
+          return h(
+            'div',
+            { key: 'group-' + index, className: 'dsh-sa-rc-group', 'data-report-group': kind, 'data-report-group-label': String((group && group.label) || '') },
+            h('span', { key: 'label', className: 'dsh-sa-rc-group-label', style: kind === 'ok' ? { color: STATUS_META.done.color } : (kind === 'failed' ? { color: STATUS_META.failed.color } : undefined) }, label),
+            h('span', { key: 'text', className: 'dsh-sa-rc-group-text' }, String((group && group.text) || '')),
+          )
+        })))
+      }
+      /*
+       * 说明：次级色、小一号。折叠只在「真的长」时出现，且展开后完整显示——
+       * 这一段里可能有 `dispatch.js` 生成的「摘要 + 指针」原句（另有 N 字在账本里），
+       * 解析器不改写它，渲染层也不改写它。
+       */
+      if (noteText) {
+        body.push(h(
+          'div',
+          { key: 'note', className: 'dsh-sa-rc-note-block' },
+          h('p', { key: 'text', className: 'dsh-sa-rc-note', title: noteLong ? noteText : undefined, 'data-report-note': 'true' }, noteShown),
+          noteLong
+            ? h('button', {
+              key: 'more',
+              type: 'button',
+              className: 'dsh-sa-rc-more',
+              'data-report-note-toggle': 'true',
+              'aria-expanded': noteOpen,
+              onClick: function () { setNoteOpen(function (value) { return !value }) },
+            }, noteOpen ? tr('showLess') : tr('report.expand'))
+            : null,
+        ))
+      }
+      /*
+       * 需要你：**左侧 2px 色条 + 加粗 + 浅底**。
+       *
+       * 为什么这一段必须有视觉权重：它是全卡唯一「不做点什么就不算完」的部分。
+       * 上一版它只是正文里的一行，用户跳读时会略过——而略过它的代价是一个任务
+       * 一直卡在那里没人管。`role="note"` 给读屏器一个「这是旁注」的语义，
+       * 但它**不自动聚焦、不 aria-live**：报告是静态内容，读屏器不该被它打断。
+       */
+      if (need) {
+        body.push(h(
+          'div',
+          { key: 'need', className: 'dsh-sa-rc-need', role: 'note', 'data-report-need': 'true' },
+          h('span', { key: 'label', className: 'dsh-sa-rc-need-label', 'aria-hidden': 'true' }, tr('report.needLabel')),
+          h('span', { key: 'text', className: 'dsh-sa-rc-need-text' }, need),
+        ))
+      }
+      /*
+       * 兜底（`unknown`）：整份 `raw` 原样显示。`pre-wrap` + 等宽保证换行与缩进
+       * 与原文一致——用户能看到的**和原来的 context 行一样多**，只是换成了一张卡。
+       */
+      if (isUnknown) {
+        body.push(raw
+          ? h('pre', { key: 'raw', className: 'dsh-sa-rc-raw dsh-sa-rc-raw-plain', 'data-report-raw': 'true' }, raw)
+          : h('p', { key: 'empty', className: 'dsh-sa-rc-note', 'data-report-empty': 'true' }, tr('report.empty')))
+      }
+      /*
+       * 细节：原生 `<details>` 折叠，`<summary>` 就是那条「▸ 细节」折叠条。
+       *
+       * 这段代码看着简单，但**每一处省略都是故意的**，改之前先读一遍上面
+       * `.dsh-sa-rc-detail` 那段注释里的事故记录：
+       *
+       *   · `open` 一个字节都不传 —— 传了就是受控，报告回流/滚动/重挂触发的
+       *     重渲染会把浏览器刚展开的状态写回去，用户看到「点开又自己收回」，
+       *     而且**全程不报错**。这是连挂 4 次的真因，不是玄学。
+       *   · 不挂 `onToggle`、不建 `detailOpen` state —— 展开态归浏览器管。
+       *   · 箭头字形在 CSS 里（`.dsh-sa-rc-caret::before` + `[open]` 后代选择器），
+       *     JS 里不写 `▸`/`▾`，否则箭头又得靠重渲染更新，等于把坑挖回来。
+       *
+       * 保命绳语义不变：原文**始终在 DOM 里**（`<details>` 收起时内容只是被浏览器
+       * 隐藏，不在文档流里但仍可被 `textContent` 取到、被「复制」按钮取到），
+       * 用户点一下就能看到全文。
+       */
+      if (!isUnknown && raw) {
+        body.push(h(
+          'details',
+          {
+            key: 'detail',
+            className: 'dsh-sa-rc-detail',
+            'data-report-detail': 'true',
+            /* ⚠️ 绝不在这里加 `open` —— 见本块顶部注释。 */
+          },
+          h(
+            'summary',
+            {
+              key: 'toggle',
+              className: 'dsh-sa-rc-detail-toggle',
+              'data-report-detail-toggle': 'true',
+            },
+            h('span', { key: 'caret', className: 'dsh-sa-rc-caret', 'aria-hidden': 'true' }),
+            tr('report.detail'),
+          ),
+          h('pre', { key: 'raw', className: 'dsh-sa-rc-raw', 'data-report-detail-raw': 'true' }, raw),
+        ))
+      }
+      children.push(h('div', { key: 'body', className: 'dsh-sa-rc-body' }, body))
+
+      const foot = []
+      if (canCopy) {
+        foot.push(h('button', {
+          key: 'copy',
+          type: 'button',
+          className: 'dsh-sa-rc-btn',
+          'data-report-copy': 'true',
+          onClick: function () {
+            void copyText(rawFull).then(function (ok) {
+              setCopyState(ok ? 'ok' : 'fail')
+            }).catch(function () { setCopyState('fail') })
+          },
+        }, copyLabel))
+      }
+      if (card.truncated) {
+        foot.push(h('span', {
+          key: 'truncated',
+          className: 'dsh-sa-rc-truncated',
+          'data-report-truncated': String(card.truncatedFrom || 0),
+        }, fill(tr('report.truncated'), { n: REPORT_RAW_MAX })))
+      }
+      if (foot.length) children.push(h('div', { key: 'foot', className: 'dsh-sa-rc-foot' }, foot))
+
+      return h(
+        'div',
+        {
+          className: 'dsh-sa-rc',
+          role: 'article',
+          'aria-label': fill(tr('report.aria'), { title: title }),
+          'data-report-card': 'true',
+          'data-report-shape': shape,
+        },
+        children,
+      )
+    }
+
+    /**
+     * 报告卡的 Conversation Definition（plans/13 §8.1 / §8.4）。
+     *
+     * 认领范围**必须窄到只有本插件自己投递的报告**（三个条件同时成立）：
+     * ① `user/message`；② `source.kind` = 本插件包名；③ `source.form === 'relay'`。
+     * 少一条的后果是**吞掉人类输入**——那是 plans/14 §3.2 点名的事故，不是降级。
+     *
+     * 与官方先例（`ui-user-questions` 的 `questionReplyDefinition`）的一处**故意不同**：
+     * 它还要求 `isAppendSurfaceEvent(event)`。本包是零依赖的 plain 模块，拿不到
+     * `@deepseek-ai/dsh-session/surface`；但 `surfaceOp` 是事件上的公开字段，所以这里
+     * 直接判：**显式的非 append（替换型 surface）一律不认领**。
+     *
+     * 为什么 `surfaceOp === undefined` 放行而不是拒绝：这个字段是宿主版本相关的，
+     * 老宿主和离线 fixture 都可能没有它。拒绝 undefined 的后果是「报告在旧宿主上
+     * 一张卡都不出」——一条也不认领，比「认领一个替换事件」更常见、也更难察觉。
+     * 认错的代价是重放一次旧报告（宿主自己按 key 去重），不认的代价是整块功能消失。
+     */
+    const reportDefinition = {
+      kind: REPORT_NODE_KIND,
+      target: 'chat',
+      match: function (event) {
+        if (!event || event.type !== 'user/message') return null
+        if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return null
+        const data = event.data
+        if (!data || !data.source) return null
+        const source = data.source
+        if (source.kind !== RELAY_SOURCE_KIND) return null
+        if (source.form !== 'relay') return null
+        // `exclusive: true` = 在 `chat` 这个 target 上独占：宿主的 `input-message`
+        // 不再收到它，于是它不会**同时**渲染成 context 行（plans/13 FR-3）。
+        return { id: String(data.id), role: 'start', exclusive: true }
+      },
+      start: function (context, match) {
+        const event = match.event
+        if (event.type !== 'user/message') throw new Error('dispatch-report start requires user/message')
+        /*
+         * 解析在 `start` 里做一次、结果放进 state：`update` / `buildViewNode` 会被宿主
+         * 反复调用（每次数据变化一次），在里面重新解析等于每帧扫一遍正文。
+         * 更关键的是——`start` 里抛错会被宿主当作「这个节点建不起来」，
+         * `parseReportText` 因此**对任何输入都不抛**（解析失败是自己的返回值，
+         * 不是异常）。
+         */
+        const card = parseReportText(reportTextOf(event.data.content), event.data.id)
+        return {
+          seq: event.seq,
+          // 顶层也留一份 taskId：`buildViewNode` 之外的调试/断言常直接读它。
+          taskId: card.taskId,
+          card: card,
+        }
+      },
+      update: function (context) { return context.state },
+      buildViewNode: function (context) {
+        if (context.state === undefined || context.state === null) return null
+        return {
+          key: context.key,
+          kind: REPORT_NODE_KIND,
+          id: context.id,
+          target: 'chat',
+          // `anchorSeq` 用**事件自己的 seq**，不是消息 id：轮次分隔线与轮次导航都按
+          // seq 定位（plans/14 §5 G2 第 2 条），给错的表现是「卡片跑到别的轮次下面」。
+          anchorSeq: context.state.seq,
+          location: context.start && context.start.location ? context.start.location : { kind: 'unresolved' },
+          /*
+           * ── `groupTree: 'turn'`：这一行是「不进过程区」的唯一开关（真机返工点） ──
+           *
+           * 原来的值这里是 `undefined`，理由是「照抄宿主 `input-message` 对非人类消息的
+           * 算法」——那个理由**错在前提**：`message.ts` 的 `human` 为 false 时给的
+           * 确实是 `undefined`，可 `undefined` 的语义不是「跟 context 行一样」，而是
+           * **「并入周围的 step run」**（`contract/group-tree.ts:13` 原文：
+           * 「absent: the Node joins the step run around it」）。
+           *
+           * 于是折叠链条是这样断的（全是 `ui-chat` 的现有逻辑，不是猜测）：
+           *   ① `group-tree-segments.ts` / `process-groups.ts` 的 `isAtOrOutside(node,'process')`
+           *      对 `undefined` 恒为 false（`group-tree.ts:36` 要求 `groupTree !== undefined`），
+           *      所以这条节点不会被当成「过程区外的独立行」，而是被塞进 step run；
+           *   ② `conversation-nodes/turn-process-presentation.ts:60`：
+           *      `if (isAtOrOutside(node,'turn') || node.anchorSeq < spec.processStartSeq ...) continue`
+           *      —— 只要不是 at-or-outside `'turn'`，它就被计入 `hasExternalProcess`，
+           *      也就是**被认定为「这一轮的过程内容」**；
+           *   ③ `chat/ChatNodeSeat.tsx:85-91` 的 `processMember` 判定同样用
+           *      `!isAtOrOutside(routedNode, 'turn')`，为真就随工作详情一起
+           *      `data-turn-process-hidden` 隐藏。这就是用户看到的「被折进过程区，
+           *      要展开才看得见」。
+           *
+           * 为什么改成 `'turn'` 是**修字段**而不是**改行为**：`'turn'` 的官方语义正是
+           * 「the Node stays in its Turn outside the Turn's process disclosure」
+           * （`group-tree.ts:11`）。报告本来就不属于「这一轮的工作过程」——它是**结论投递**，
+           * 和宿主自己的 `turn-tail`、`turn-error` 同一层，那些节点给的全是
+           * `groupTree: 'turn'`。也就是说我们不是在发明一种摆法，是在补上一个本来该给、
+           * 也确实有先例的值。
+           *
+           * 为什么不给 `'input'`：`'input'` 只有**深度 1**（`DEPTH`），比 `'turn'` 更靠外，
+           * 会额外触发 `turn-process-presentation.ts:56` 的 `hasInterleavedInput`
+           * ——那会把整轮的「工作详情」强制保持展开（`ChatGroupSeat` 的 `alwaysOpen`），
+           * 等于用报告去撑开别人的过程区。修折叠不该顺手改别人的展开状态。
+           *
+           * 为什么不给 `'exchange'`：它会让这条报告**开启一个新的 exchange**（深度 0），
+           * 也就是「轮次从此重新分段」。报告是追加消息，不该开新段。
+           *
+           * 一句话：`'turn'` = 留在本轮、但不属于本轮的过程。
+           */
+          groupTree: 'turn',
+          visibility: 'visible',
+          data: context.state.card,
+        }
+      },
+    }
+
+    /**
+     * 注册报告卡（plans/14 §3.2 的降级矩阵）。
+     *
+     * **注册顺序是本函数唯一不能写反的东西**，顺序是：
+     *   ① `slots.inject('conversation.chat.node', …)` 的回调被宿主触发 →
+     *   ② 在回调里 `slots.register` 出 keyed 渲染器 →
+     *   ③ 渲染器就位**之后**才 `uiConversation.events.register(definition)`。
+     *
+     * 为什么不能反：`exclusive` 一旦认领，宿主的 `input-message` 就**不再**收到这条
+     * 消息，那条默认的 context 行随之消失；此刻如果渲染器还没注册，这条报告既没有
+     * context 行、也没有卡——**它会直接从会话里消失**（plans/14 §3.2 的原话是
+     * 「反过来没有兜底可言」）。这不是「先丑一下再修」的顺序问题，是丢数据。
+     *
+     * 降级阶梯（各自独立，谁倒霉都不牵连别人）：
+     *   - 没有 `uiConversation` 服务 → 直接返回，**不写** `cards.report` 键
+     *     （plans/14 §4.1：键不存在 = 能力没出现，不是失败），`apply` 不抛错；
+     *   - 宿主没有 `conversation.chat.node` 槽 → `inject` 回调不执行，Definition
+     *     也就不会被注册（消息保持 context 行，正确）；
+     *   - `slots.register` 抛错 → `error:register`，不认领；
+     *   - `events.register` 抛错（重复 kind / 形态不符）→ warn 一次，**撤掉刚注册的
+     *     渲染器**，然后什么都不认领——消息回到 context 行（不黑屏）。
+     *
+     * @returns {boolean} 是否走完了注册流程（不保证宿主一定渲染）
+     */
+    function registerReportCard(ctx) {
+      if (!CARD_FEATURES.report) return false
+      if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function' || typeof ctx.slots.register !== 'function') {
+        return false
+      }
+      /*
+       * 探测 `uiConversation` **只能**用 `ctx.inject(['uiConversation'], cb)`，
+       * 不能写成「`ctx.get('uiConversation')` 有值才注册」，两个理由：
+       *
+       * ① **拿不到就是没有**：`ctx.get()` 是同步的属性读取，服务在 `apply` 之后才
+       *    装上的话，读出来就是 undefined。本插件以 `immediately: true` 进图，
+       *    和 `ui-conversation` 谁先落地是时序问题——用 `get` 探测，同一份代码在
+       *    快机器上出卡、慢机器上不出卡。
+       * ② **不能加死整个插件的 inject**：把 `uiConversation` 写进模块级 `inject`
+       *    数组，旧宿主（没有这个服务）上整个插件就**永远不会 apply**——看板、
+       *    输入框控件、派发卡全没了。那正是 plans/14 §3.2 第一条禁止的事：
+       *    降级只降自己。
+       */
+      if (typeof ctx.inject !== 'function') {
+        // 宿主连 `ctx.inject` 都没有：这是「能力没出现」，**不写** cards 键。
+        return false
+      }
+      let touched = false
+      try {
+        ctx.inject(['uiConversation'], function (scopeCtx) {
+          const uiConversation = scopeCtx.uiConversation
+          const events = uiConversation && uiConversation.events
+          if (!events || typeof events.register !== 'function') return
+          try {
+            scopeCtx.slots.inject('conversation.chat.node', function () {
+              touched = true
+              let disposeRenderer
+              try {
+                // ② 先渲染器：`key` 必须逐字等于 Definition 的 `kind`，否则卡无处可画。
+                disposeRenderer = scopeCtx.slots.register({
+                  name: 'conversation.chat.node',
+                  key: REPORT_NODE_KIND,
+                }, ReportCard)
+              } catch (error) {
+                markCard('report', 'error:register')
+                warnCardOnce(scopeCtx, 'report:register', '报告卡渲染器注册失败（消息保持 context 行）: ' + String(error))
+                return undefined
+              }
+              try {
+                // ③ 渲染器就位之后才认领（见函数头注释：顺序反了会丢消息）
+                events.register(reportDefinition)
+              } catch (error) {
+                markCard('report', 'error:register')
+                warnCardOnce(scopeCtx, 'report:events', '报告卡 Definition 注册失败（消息保持 context 行）: ' + String(error))
+                // 撤掉刚注册的渲染器：没有 Definition 的渲染器只是死代码。
+                try {
+                  if (typeof disposeRenderer === 'function') disposeRenderer()
+                } catch (disposeError) { /* 撤不掉也不该抛给宿主 */ }
+                return undefined
+              }
+              markCard('report', 'on')
+              return disposeRenderer
+            })
+          } catch (error) {
+            // `inject` 自己抛了：宿主有 slots 服务但没有这条槽/槽名不认，是真实失败。
+            markCard('report', 'error:slot')
+            warnCardOnce(scopeCtx, 'report:inject', '报告卡槽注册失败（消息保持 context 行）: ' + String(error))
+          }
+        })
+      } catch (error) {
+        // `ctx.inject` 自己抛（依赖名不认、插件系统内部报错）：只 warn 一次，
+        // 不写 cards 键也不抛——报告卡起不来不该影响 apply 的其余部分。
+        warnCardOnce(ctx, 'report:inject-service', '报告卡依赖 uiConversation 注入失败（消息保持 context 行）: ' + String(error))
+        return false
+      }
+      return touched
+    }
+
     function apply(ctx) {
       // 面板点行要打开子会话，这里留一份 Context 供渲染期读取。
       appContext = ctx
@@ -10909,16 +12411,24 @@ window.__ModuleLoader__.load({
       }
 
       /*
-       * ── 报告卡（plans/13）的接入点 ──
+       * ── 报告卡（plans/13 正式版；S3 的 spike 已通过认领链路验收）──
        *
-       * 报告卡还没实现（spike 未做），所以这里**什么都不注册**：不写 `cards.report`
-       * 键，也不注册占位组件。plans/14 §4.1 里「键不存在 = 能力没出现」正是这个状态，
-       * 自检页会显示「未提供」而不是报红。造一个假组件去点亮这个键，等于让排障的人
-       * 追一条根本不存在的卡片——比不做可观测更糟。
+       * 认领链路（`exclusive` + `groupTree: 'turn'` + 正确 taskId）已由 S3 在真机验过，
+       * 这里补的是**内容**：四段解析 + 结构化渲染 + 原文兜底 + 状态 chip。
+       * 用户对这一版的核心要求是「**必须比原来的灰色 context 行信息更多、可读性更好**」，
+       * 所以每一处取舍都偏向「宁可难看，不许少内容」（见 `parseReportText` 的头注释）。
        *
-       * 将来接入时只需要在**注册成功后**加一行 `markCard('report', 'on')`（失败按
-       * 阶段写 `error:slot` / `error:register` / `error:parse`），补报逻辑不用动。
+       * 三条降级各自独立，谁倒霉都不牵连别人（细节见 registerReportCard 头注释）：
+       *   - 宿主没有 `uiConversation` 服务 → 不注册，也不写 `cards.report`
+       *     （plans/14 §4.1：键不存在 = 能力没出现，不是失败）；
+       *   - 宿主没有 `conversation.chat.node` 槽 → `inject` 回调不执行，消息保持
+       *     context 行；
+       *   - 任何一步注册抛错 → `error:register` / `error:slot` + warn 一次，
+       *     `apply` 继续往下跑（绝不黑屏）。
+       *
+       * `CARD_FEATURES.report = false` 时这里整块不生效，回到 L2。
        */
+      registerReportCard(ctx)
 
       // 自报存活：客户端加载失败时页面上什么都看不到，这条记录是唯一能区分
       // 「模块没进图 / 进了图但 apply 抛错 / apply 跑完了」的证据。
@@ -10938,6 +12448,7 @@ window.__ModuleLoader__.load({
             '@workspace',
             ...(cardReady || cards.batch === 'on' ? ['tool.call.toolview'] : []),
             ...(tailReady || cards.tail === 'on' ? ['conversation.chat.turnTail'] : []),
+            ...(cards.report === 'on' ? ['conversation.chat.node'] : []),
           ],
           /*
            * `cards`（plans/14 §4.1）：键**不存在** = 宿主没提供这个能力（正常降级，

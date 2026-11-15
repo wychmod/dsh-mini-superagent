@@ -18,10 +18,11 @@
  * 全部离线：纯函数 + 假宿主（mkdtemp），不联网、不碰真实 `~/.dsh`。
  */
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { HEADLINE_MAX, LABEL, REPORT_SECTIONS } from '../src/constants.js'
 import { Dispatch } from '../src/dispatch.js'
@@ -555,4 +556,33 @@ test('文案契约 voiceViolations 自检：能抓到反例（防止判据退化
   // 首行里混进状态词 / id 都要被抓到。
   assert.ok(voiceViolations(`${REPORT_SECTIONS.TASK}重构 auth done`).length > 0)
   assert.ok(voiceViolations(`${REPORT_SECTIONS.TASK}t-abc-1 重构 auth`).length > 0)
+})
+
+// ---------------------------------------------------------------- 客户端段名漂移
+
+/**
+ * 段名漂移防护（plans/13 FR-13 / §12.2）。
+ *
+ * 报告卡的解析器在**客户端**（`client/index.js`），它拿不到 `src/constants.js`
+ * ——客户端是零依赖 plain 模块，只能各存一份段名常量。于是出现一个只有
+ * 「两边同时跑」才能发现的故障：服务端改了段名（`【任务】` → `【任务名】`），
+ * 拼出来的报告换了首行，而客户端仍按旧段名匹配。
+ *
+ * 后果不是报错，是**静默降级**：所有报告都变成「原文卡」。用户看到的是
+ * 「卡片变丑了」，而不是「有东西坏了」——这种问题会活很久。
+ *
+ * 所以这里反向钉住：读客户端源码，断言 `REPORT_SECTIONS` 的**每一个值**都出现在里面。
+ * 段名一改，这条测试立刻红，两边同时红。
+ */
+test('客户端报告卡识别 REPORT_SECTIONS 的全部段名（段名一改两边同时红）', async () => {
+  const clientPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'client', 'index.js')
+  const clientSource = await readFile(clientPath, 'utf8')
+  const missing = Object.entries(REPORT_SECTIONS)
+    .filter(([, value]) => !clientSource.includes(`'${value}'`))
+    .map(([key, value]) => `${key}=${value}`)
+  assert.deepEqual(missing, [],
+    `客户端 client/index.js 缺少这些段名（报告卡会把它们当成「解析不了」→ 全部退回原文卡）：${missing.join('、')}`)
+  // 「六个」这个数字也要钉住：新增段名时这里会红，逼着人回头看一眼解析器。
+  assert.equal(Object.keys(REPORT_SECTIONS).length, 6,
+    'REPORT_SECTIONS 的段数变了：新增段名后必须同步更新 client/index.js 的解析器与这条断言')
 })
