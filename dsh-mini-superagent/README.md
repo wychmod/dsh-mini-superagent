@@ -60,17 +60,26 @@ ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直�
 
 ## 安装
 
-插件是纯 ESM，不需要构建、不需要 `npm install`。
+插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.9.1` 已发布到 npm（`latest`），**按包名即可安装**。
 
-### 方式一：让 agent 安装（推荐）
+### 方式一：按包名安装（推荐）
 
-把这句话交给 DSH 里的任意会话：
-
-> 用 plugin_manager 的 install_bundle，把 `dsh-mini-superagent` 这个目录安装成 bundle，装完确认 10 个 `dispatch_*` 工具已注册。
-
-### 方式二：手动
+在 DSH 里调用：
 
 ```text
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.9.1")
+```
+
+也可以把这句话交给 DSH 里的任意会话：
+
+> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.9.1`，装完确认 10 个 `dispatch_*` 工具已注册。
+
+### 方式二：从源码 / 本地目录安装
+
+开发插件或需要用本地目录时，先克隆仓库，再把 `target` 换成本地路径：
+
+```text
+git clone https://github.com/wychmod/dsh-mini-superagent.git
 plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent")
 ```
 
