@@ -69,6 +69,67 @@ window.__ModuleLoader__.load({
      */
     const RELAY_SOURCE_KIND = 'dsh-mini-superagent'
 
+    /*
+     * ── 派发卡（plans/12 P0） ──
+     *
+     * `CARD_FEATURES` 是**常量级**的 kill switch（plans/14 §5 G3）：把 batch 改 false
+     * 就不再注册视图，宿主回退到内置通用工具行，看板/输入框/@ 源一点不受影响。
+     * 为什么不读宿主配置：客户端拿不到 `cordis.patch.yml`，要做运行时开关就得先加
+     * 一条 host→client 的配置通道，那会让「卡片出不出现」多一个网络依赖（plans/14 §5 G3）。
+     */
+    const CARD_FEATURES = { batch: true }
+    /** 卡片默认可见行数；超过就折叠（plans/12 §7.3，与设计稿一致）。 */
+    const CARD_VISIBLE_ROWS = 4
+    /**
+     * 轮次尾部「本轮派发摘要」默认列几行任务标题。
+     *
+     * 2 而不是 4（与卡片一致）：这张摘要存在的理由只有一个——**工作详情折叠之后
+     * 仍然看得见派了什么**。它一旦默认就和卡片一样长，就变成「同一批任务画两遍」，
+     * 用户还得判断哪一份是新的。所以默认只给头（标题 + 已完成/总数 + 前 2 条），
+     * 剩下的收在「还有 N 条」后面——**点了能展开**（用户报过「还有 N 条」是死文本）。
+     * 完整列表仍然以卡片为主操作面，摘要只是「回顾不展开」也能看到前两条。
+     */
+    const CARD_TAIL_ROWS = 2
+    /**
+     * 摘要展开后允许的高度上限（约 12 行 × 22px）。
+     *
+     * 摘要挂在轮次尾部，撑到两三屏会把下面的复制/重新生成推得很远；超过这个高度
+     * 就改用纵向滚动，而不是让页面无限长。数值是「12 行」这个语义常量除以行高，
+     * 所以改行高要一起看。
+     */
+    const CARD_TAIL_MAX_VISIBLE = 12
+    /**
+     * 共用同一个视图组件的两个 wire 工具名。
+     * 顺序即注册顺序：`dispatch_launch` 在前，单条派发的卡也走这个组件（row 数 1）。
+     */
+    const CARD_TOOLS = ['dispatch_launch', 'dispatch_launch_many']
+    /**
+     * 派发卡的轮询节奏（plans/12 §8.4）。
+     *
+     * 卡片必须自己拉 `/board?group=`：工具返回只是**派发瞬间**的快照，2 秒之后的状态
+     * 变化不在那次调用里。三个数字各管一件事，不要合成一个：
+     * - `CARD_POLL_MS`：还有成员没结算时的节奏。与面板的 `POLL_MS` 取同一个值——
+     *   同一份数据，两处给人看的延迟不该不同；
+     * - `CARD_SETTLED_POLL_MS`：全部结算后降频。**不降到 0（不停表）**：任务被追问/
+     *   续派之后会重新跑起来，停表就再也看不到；15s 是「便宜」与「不装死」的折中；
+     * - `CARD_BACKOFF_MS`：失败退避阶梯。没有它，一个持续 500 的宿主会被每 2 秒敲
+     *   一次——日志、网络、宿主都被刷，而问题一点没变；
+     * - `CARD_STALE_FAILURES`：连续失败到几次才在卡里认「状态可能已过期」。
+     */
+    const CARD_POLL_MS = 2000
+    const CARD_SETTLED_POLL_MS = 15000
+    const CARD_BACKOFF_MS = [2000, 4000, 8000, 30000]
+    const CARD_STALE_FAILURES = 3
+
+    /**
+     * 卡片能力状态的上报路径（plans/14 §4.1）。
+     *
+     * 抽成常量是因为它会被 **POST 两次**：`apply` 末尾报同步槽，两张卡各自就绪后
+     * 再补报一次覆盖同一个 `client.ready`。两次必须是同一条路径，写字面量迟早会写歪，
+     * 而写歪的表现是「卡片明明起来了、selfcheck 里却永远是空对象」——最难查的那种。
+     */
+    const CLIENT_READY_PATH = '/dsh-mini-superagent/board/client-ready'
+
     /* ───────────────────────── 文案 ───────────────────────── */
 
     /** 内置中文文案（locale 不可用时的兜底，也是默认界面语言）。 */
@@ -649,6 +710,56 @@ window.__ModuleLoader__.load({
       'an.deltaRate': '完成率 {value}',
       'an.trendTableHint': '表格是图表的等价物，可整块复制核对',
       'an.day': '日期',
+      /*
+       * 派发卡（plans/12 §7）。状态词**不在这里**：一律复用上面的 `status.*`，
+       * 只有两个「不是宿主状态」的占位值有自己的词条。
+       *
+       * - `card.pending`：`start` 阶段（结果未回）每一行都是它；
+       * - `card.failedToStart`：这一项**没能开始**（`{title,error,code}`，连任务都没建），
+       *   不能借 `status.failed`——那说的是「跑过但失败了」，两种事的下一步完全不同；
+       * - `card.unknown`：`result.content` 解析不出 JSON 时的状态列；
+       * - `card.headBatch` / `card.aria`：标题与 `aria-label` 里的「N 个任务」；
+       * - `card.expandAll` / `card.more`：折叠按钮上的两个数。
+       */
+      'card.preparing': '正在准备派发…',
+      'card.headBatch': '派发 {n} 个任务',
+      'card.pending': '待定',
+      'card.failedToStart': '没能开始',
+      'card.unknown': '未知',
+      'card.aria': '派发 {n} 个任务，{done} 条已完成',
+      'card.expandAll': '展开全部 {n} 条',
+      'card.more': '还有 {n} 条',
+      'card.unparsed': '结果正文解析不出来，状态未知；任务本身已经派发出去了',
+      /*
+       * P1 新增（plans/12 §7.2 / §8.4 / §10）。**没有一条是新的状态词**：
+       * `card.waitFor` 与 `card.blockWhy` 只是把 `blocked_by` / `blocked_reason`
+       * 这两个已有字段翻译成人话，圆点与状态 chip 仍然是 `TEXT['status.*']`。
+       */
+      'card.waitFor': '等 {id}',
+      'card.blockWhy': '前置{why}',
+      'card.cancelByDependency': '前置没成，未执行',
+      'card.cancelByHuman': '人取消',
+      'card.stale': '状态可能已过期',
+      'card.snapshot': '状态为派发时快照',
+      'card.openRow': '打开子会话',
+      /*
+       * 本轮派发摘要（`conversation.chat.turnTail`）的 `aria-label`。
+       * **不是新状态词**：里面只有「几个任务 / 几条已完成」两个数，状态词仍然只走
+       * `TEXT['status.*']`。为什么需要它：摘要是「一行文字 + 若干标题」，读屏器不会
+       * 把视觉上的分隔念出来，得有一句话说明这堆字是什么。
+       */
+      'card.tailAria': '本轮派发 {n} 个任务，{done} 条已完成',
+      /*
+       * 尾部摘要的展开/收起。**不是新状态词**：状态列仍然只走
+       * `TEXT['status.*']`，这三条只描述「还有几条没画出来」这一个动作。
+       *
+       * 为什么收起态也要带数字（`收起 · 共 N 条`）：展开之后用户会忘了总数是几，
+       * 而摘要的位置很短，没有别的地方能再看一眼。
+       */
+      'card.tailMore': '还有 {n} 条',
+      'card.tailLess': '收起 · 共 {n} 条',
+      'card.tailExpandAria': '展开全部 {n} 条任务',
+      'card.tailCollapseAria': '收起，回到前 {n} 条',
     }
 
     /** 英文文案，仅用于 locale 服务接入；缺 key 时由 tr() 退回中文。 */
@@ -1157,6 +1268,28 @@ window.__ModuleLoader__.load({
       'an.deltaRate': 'completion {value}',
       'an.trendTableHint': 'The table is an exact copyable equivalent of the chart',
       'an.day': 'Day',
+      /* 与 TEXT 的 card.* 一一对应；缺一条英文界面就会静默退回中文。 */
+      'card.preparing': 'Preparing dispatch…',
+      'card.headBatch': 'Dispatching {n} tasks',
+      'card.pending': 'Pending',
+      'card.failedToStart': 'Never started',
+      'card.unknown': 'Unknown',
+      'card.aria': 'Dispatching {n} tasks, {done} finished',
+      'card.expandAll': 'Show all {n}',
+      'card.more': '{n} more',
+      'card.unparsed': 'The result body could not be parsed, so statuses are unknown; the tasks were still dispatched',
+      'card.waitFor': 'waiting for {id}',
+      'card.blockWhy': 'blocked: {why}',
+      'card.cancelByDependency': 'Dependency failed, never ran',
+      'card.cancelByHuman': 'Cancelled by a person',
+      'card.stale': 'Status may be out of date',
+      'card.snapshot': 'Status is the dispatch-time snapshot',
+      'card.openRow': 'Open worker session',
+      'card.tailAria': 'This turn dispatched {n} tasks, {done} finished',
+      'card.tailMore': '{n} more',
+      'card.tailLess': 'Show less · {n} total',
+      'card.tailExpandAria': 'Show all {n} tasks',
+      'card.tailCollapseAria': 'Collapse to the first {n} rows',
     }
 
     /** 当前翻译函数；attachLocale 成功后会替换成 locale 绑定的 t()。 */
@@ -4089,6 +4222,1694 @@ window.__ModuleLoader__.load({
           ? h('span', { key: 'tag', className: 'dsh-sa-divide-tag' }, tr('divider.relay'))
           : h('span', { key: 'mark', className: 'dsh-sa-divide-mark' }),
         h('span', { key: 'trail', className: 'dsh-sa-divide-line dsh-sa-divide-line-trail' }),
+      )
+    }
+
+    /* ═════════════════════ 派发卡（plans/12 P0：三阶段静态视图） ═════════════════════ */
+
+    /**
+     * 行模型里两个**不属于宿主状态词**的占位值。
+     *
+     * `CARD_PENDING` 只出现在 `start` 阶段（结果还没回，谁也不知道状态）；
+     * `CARD_FAILED_START` 是「这一项根本没启动成功」——它没有 task_id，宿主账本里
+     * 压根没有这一行，所以不能借用 `status.failed`（那是「跑过但失败了」）。
+     * 两者都不是第二套状态词：它们只对应下面两行独立文案，其余状态一律走 `TEXT['status.*']`。
+     */
+    const CARD_PENDING = 'pending'
+    const CARD_FAILED_START = 'failed-to-start'
+
+    /** 卡片样式节点上的标记属性；plans/13 的报告卡复用同一个节点。 */
+    const CARD_STYLE_ATTR = 'dsh-mini-superagent/cards'
+
+    /**
+     * 卡片样式。类名统一 `dsh-sa-dc-` 前缀（dc = dispatch card），与面板的 `dsh-sa-` 同族
+     * 但不重叠；颜色**只**用 `var(--dsw-alias-*)` 主题令牌，明暗自动跟随，不写死主色。
+     * 圆角/字号跟随宿主的 `--dsw-radius-*` 与 `--dsw-font-*`；令牌缺失时退化成浏览器默认，
+     * 不会因为缺一个变量就变成黑底黑字。
+     */
+    const CARD_STYLE = `
+.dsh-sa-dc {
+  margin: 8px 0;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.22));
+  border-radius: var(--dsw-radius-md, 10px);
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: var(--dsw-font-s-13, 13px);
+  overflow: hidden;
+}
+.dsh-sa-dc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+}
+.dsh-sa-dc-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.dsh-sa-dc-dot-pulse { animation: dsh-sa-dc-pulse 1.6s ease-in-out infinite; }
+.dsh-sa-dc-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-sa-dc-ratio {
+  flex: none;
+  color: var(--dsw-alias-label-secondary, rgba(127,127,127,.9));
+  font-size: var(--dsw-font-xxs-12, 12px);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-dc-group {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.22));
+  border-radius: 999px;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-sa-dc-list { display: flex; flex-direction: column; }
+.dsh-sa-dc-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 12px;
+}
+.dsh-sa-dc-item + .dsh-sa-dc-item {
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.10));
+}
+/*
+ * 可点的行（plans/12 §7.2 / Q3）。只有**真的能点开**的行才有这组样式：
+ * 不可点的行连 cursor 都不给，免得「看起来能点、点了没反应」。
+ * 焦点环用 outline 而不是 box-shadow：卡片在 transcript 里可能被裁切，
+ * outline 画在盒子外侧更容易被看见（且不参与布局）。
+ */
+.dsh-sa-dc-item-open { cursor: pointer; }
+.dsh-sa-dc-item-open:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.07));
+}
+.dsh-sa-dc-item-open:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+.dsh-sa-dc-id {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: var(--dsw-font-xxxs-11, 11px);
+}
+.dsh-sa-dc-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-sa-dc-state {
+  flex: none;
+  font-size: var(--dsw-font-xxxs-11, 11px);
+}
+.dsh-sa-dc-note {
+  flex: 1 1 100%;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-sa-dc-more {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: 0;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+  background: transparent;
+  color: var(--dsw-alias-brand-primary);
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12, 12px);
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-sa-dc-more:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.07)); }
+.dsh-sa-dc-more:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+.dsh-sa-dc-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+}
+.dsh-sa-dc-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.16));
+  animation: dsh-sa-dc-shimmer 1.6s ease-in-out infinite;
+}
+.dsh-sa-dc-bar-short { width: 55%; }
+.dsh-sa-dc-foot {
+  padding: 6px 12px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14));
+  color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));
+  font-size: var(--dsw-font-xxxs-11, 11px);
+}
+/*
+ * 本轮派发摘要（conversation.chat.turnTail 槽）。
+ *
+ * 为什么它和 .dsh-sa-dc 不是同一套盒子：这张摘要**不在**工作详情折叠区里，
+ * 它挂在轮次尾部、与「复制/重新生成」同一层。所以它不能长得像一张卡（那是把
+ * 同一批任务画两遍），只能是一条**薄薄的回顾条**：头一行、任务一行一条。
+ *
+ * ── 为什么全部横向排布（这是用户报「像调试输出」的正面修复） ──
+ *
+ * 上一版每个字段各占一行（标题 / 数字 / 任务名 / 状态四行垂直堆叠），信息之间
+ * 没有横向关系，读起来像一段 print 出来的调试日志。改成 flex 横排之后：
+ * 头一行是「圆点 · 标题 ······ 2/4 · g-xxx」，任务行是「圆点 · 标题 ······ 状态」，
+ * 左对齐的文字锚定在同一列、右侧的数字/标签贴在右边，眼睛只需要横向扫一次。
+ * 这也是宿主自己的行式组件（工具行、contextRow）的一贯形状，摘要贴着它才不突兀。
+ *
+ * 圆角与字号跟随主题令牌，左边一道竖线说明「这一条属于派发」。
+ *
+ * **为什么不用底色**：--dsw-alias-bg-layer-1 正是卡片自己用的表面色，铺在这里
+ * 会让摘要和卡片长得一模一样——而这张摘要存在的全部理由就是「别像第二张卡」。
+ * 竖线 + 内边距已经足够把它从上下文里分出来，不需要再叠一层背景。
+ * 同理：没有粗边框、没有投影、没有大圆角。
+ */
+.dsh-sa-dr {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--dsw-alias-border-l2, currentColor);
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-size: var(--dsh-content-font-size, 14px);
+  line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
+}
+/* 头部：一行。标题 flex:1 撑开，数字与 group 因此被推到右边。 */
+.dsh-sa-dr-head {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.dsh-sa-dr-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.dsh-sa-dr-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary, inherit);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 已完成/总数：等宽数字，全部结算时转成功色（与卡片头部同一口径）。 */
+.dsh-sa-dr-ratio {
+  flex: none;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-sa-dr-ratio-done { color: var(--dsw-alias-state-success-primary, inherit); }
+.dsh-sa-dr-group {
+  flex: none;
+  max-width: 32%;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-sa-dr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+/* 展开后超过一屏才滚动：摘要不该把整页顶开，也不该让用户滚不到复制按钮。 */
+.dsh-sa-dr-list-scroll {
+  max-height: 264px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 任务行：一行一条，行高 20px、行间 2px —— 紧凑但不是挤成一团。 */
+.dsh-sa-dr-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 20px;
+}
+.dsh-sa-dr-row .dsh-sa-dr-dot {
+  width: 6px;
+  height: 6px;
+}
+.dsh-sa-dr-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 状态文字只做旁注：tertiary 且不换行，绝不与标题抢视线。 */
+.dsh-sa-dr-state {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font-size: var(--dsw-font-xxxs-11, 11px);
+  white-space: nowrap;
+}
+/*
+ * 展开/收起：真 button（键盘 Enter/Space 原生可用）。样式刻意做成「一行小字
+ * + 箭头」而不是一个方块按钮——它是摘要的延伸，不是主操作。
+ */
+.dsh-sa-dr-more {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 1px 4px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 4px);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: inherit;
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(18px + var(--dsh-content-font-delta-secondary, 0px));
+  cursor: pointer;
+}
+.dsh-sa-dr-more:hover {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+  color: var(--dsw-alias-label-secondary, inherit);
+}
+.dsh-sa-dr-more:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
+  outline-offset: 1px;
+}
+/* 箭头是纯装饰：读屏器的语义由 aria-expanded + aria-label 给出。 */
+.dsh-sa-dr-caret {
+  font-size: 9px;
+  line-height: 1;
+}
+@keyframes dsh-sa-dc-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .4; transform: scale(.78); }
+}
+@keyframes dsh-sa-dc-shimmer {
+  0%, 100% { opacity: .45; }
+  50% { opacity: .85; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dsh-sa-dc-dot-pulse, .dsh-sa-dc-bar { animation: none; }
+}
+@media (max-width: 480px) {
+  .dsh-sa-dc-group { max-width: 30%; }
+}
+`
+
+    /**
+     * 卡片样式的单例节点与引用计数。
+     *
+     * 为什么不能像面板那样把 `<style>` 挂在组件里：聊天卡片**不在面板子树里**，
+     * 一次派发 16 条就是 16 份同样的样式表（虚拟滚动还会反复挂/摘）。所以放宽
+     * 「CSS 随面板卸载」这条约定，改为**全插件唯一一个** `<style data-plugin-css=…>`：
+     *   1. 只有 `ensureCardStyles()` 能创建它，第二次调用直接复用；
+     *   2. 用引用计数，最后一张卡卸载时才真的摘掉；
+     *   3. 有固定的 `data-plugin-css`，排障时一眼能看出是谁插的；
+     *   4. 插件卸载时 `disposeCardStyles()` 兜底强制移除（HMR 换包不会留下孤儿节点）。
+     * plans/13 的报告卡要复用的正是这个函数，而不是自己再插一份。
+     */
+    let cardStyleNode = null
+    let cardStyleRefs = 0
+
+    /** 取（必要时创建）共享样式节点；宿主没有 document.head 时安静返回 null。 */
+    function ensureCardStyles() {
+      cardStyleRefs += 1
+      if (cardStyleNode) return cardStyleNode
+      if (typeof document === 'undefined' || !document.head || typeof document.createElement !== 'function') return null
+      if (typeof document.head.appendChild !== 'function') return null
+      try {
+        const node = document.createElement('style')
+        node.setAttribute('data-plugin-css', CARD_STYLE_ATTR)
+        node.textContent = CARD_STYLE
+        document.head.appendChild(node)
+        cardStyleNode = node
+      } catch (error) {
+        // 样式插不进去不该让卡片白屏：没有样式也就是「丑一点」，内容仍然是可读的。
+        cardStyleNode = null
+      }
+      return cardStyleNode
+    }
+
+    /** 释放一次引用；归零时摘掉节点。 */
+    function releaseCardStyles() {
+      cardStyleRefs = cardStyleRefs > 0 ? cardStyleRefs - 1 : 0
+      if (cardStyleRefs > 0) return
+      disposeCardStyles()
+    }
+
+    /** 无条件摘掉共享样式节点（插件卸载兜底）。 */
+    function disposeCardStyles() {
+      cardStyleRefs = 0
+      const node = cardStyleNode
+      cardStyleNode = null
+      if (!node) return
+      try {
+        const parent = node.parentNode
+        if (parent && typeof parent.removeChild === 'function') parent.removeChild(node)
+      } catch (error) { /* 节点已被别人摘掉：忽略 */ }
+    }
+
+    /**
+     * 降级原因只 warn 一次（plans/14 §4.3）。
+     * 卡片会随 transcript 反复挂载，每个实例都 warn 一遍等于把日志刷成噪声，
+     * 而真正需要这条信息的人是排障的人——看见一次就够了。
+     */
+    const cardWarned = new Set()
+
+    function warnCardOnce(ctx, key, message) {
+      if (cardWarned.has(key)) return
+      cardWarned.add(key)
+      try {
+        if (ctx && ctx.logger && typeof ctx.logger.warn === 'function') {
+          ctx.logger.warn('%s %s', 'dsh-mini-superagent:', message)
+        }
+      } catch (error) { /* 日志失败不影响功能 */ }
+    }
+
+    /* ─────────────────── 派发卡的实时状态（plans/12 P1 §8.4） ─────────────────── */
+
+    /**
+     * 一个 group 一个 feed：`Map<group, entry>`。
+     *
+     * **为什么按 group 聚合而不是每张卡各自轮询**：同一批任务可能在 transcript 里
+     * 出现两张卡（分页重复、重放、宿主重挂），它们要的是**同一份**数据。各拉一份的
+     * 后果不是「多一次请求」这么轻：两张卡会在不同时刻落状态，用户看到同一批任务
+     * 在两条消息里处于不同状态，会以为账本出了问题。共享之后，一次响应同时喂给所有
+     * 订阅者，两张卡永远一致，请求数也不随卡片数量增长。
+     *
+     * 每个 entry 的生命周期由 refcount 决定：最后一个订阅者卸载时删条目、清定时器、
+     * 中止在途请求。**不做「超时自动回收」**——卡片滚出视口不等于卸载（虚拟滚动
+     * 才会卸载），凭猜测停表会让滚回来时看到一段空窗。
+     */
+    const groupFeeds = new Map()
+
+    /** `/board?group=` 的 URL。`group` 里理论上可能有需要转义的字符，统一 encode。 */
+    function cardBoardUrl(group) {
+      return API + '?group=' + encodeURIComponent(group)
+    }
+
+    /** 把当前 entry 归一成订阅者能安全持有的快照（不让外面拿到可变数组）。 */
+    function feedViewOf(entry) {
+      return {
+        tasks: entry.tasks,
+        failures: entry.failures,
+        stale: entry.failures >= CARD_STALE_FAILURES,
+        frozen: entry.frozen,
+        stopped: entry.stopped,
+      }
+    }
+
+    /** 通知所有订阅者。任何一个订阅者抛错都不许影响其余订阅者（降级只降自己）。 */
+    function notifyFeed(entry) {
+      const view = feedViewOf(entry)
+      for (const sub of Array.from(entry.subs)) {
+        try {
+          sub(view)
+        } catch (error) { /* 单个订阅者的渲染错误不拖累同一 group 的其它卡 */ }
+      }
+    }
+
+    /**
+     * 现场刷新 `expected`（行数）。
+     *
+     * 「成员全不全」是**判定用的数字**，必须在对账那一刻现问订阅者；缓存的旧值会让
+     * 晚挂载的那张卡被误判成「成员被截断」，从而把整个 feed 停表（假降级）。
+     */
+    function refreshFeedExpected(entry) {
+      for (const probe of entry.expectedProbes) {
+        let live = 0
+        try { live = Number(probe()) } catch (error) { live = 0 }
+        if (Number.isFinite(live) && live > entry.expected) entry.expected = live
+      }
+      return entry.expected
+    }
+
+    /** 是否全部结算：只有**拿到全体成员**（数量够）才敢说「都结束了」。 */
+    function feedSettledOf(entry) {
+      refreshFeedExpected(entry)
+      if (entry.expected <= 0) return false
+      if (entry.tasks.length < entry.expected) return false
+      for (const task of entry.tasks) {
+        if (!task || !SETTLED_STATUS.has(task.status)) return false
+      }
+      return true
+    }
+
+    /**
+     * 下一次请求等多长时间。
+     *
+     * 失败时**必须退避**：一个持续 500/403 的宿主如果被每 2 秒敲一次，日志、网络、
+     * 宿主都被刷，而问题一点没变。阶梯到 30s 封顶（`CARD_BACKOFF_MS` 的最后一项），
+     * 不做指数到无穷——「可能已经恢复」这件事值得每半分钟试一次。
+     */
+    function feedDelayOf(entry) {
+      if (entry.failures > 0) {
+        const index = Math.min(entry.failures, CARD_BACKOFF_MS.length) - 1
+        return CARD_BACKOFF_MS[index]
+      }
+      return feedSettledOf(entry) ? CARD_SETTLED_POLL_MS : CARD_POLL_MS
+    }
+
+    /** 页面是否可见。没有 document（headless / 单测）时当成可见。 */
+    function cardPageVisible() {
+      if (typeof document === 'undefined') return true
+      return document.visibilityState !== 'hidden'
+    }
+
+    /**
+     * 暂停：停表 + 中止在途，但**条目还活着**。
+     *
+     * 与 `disarmFeed` 分开是必须的：页面隐藏要的是「先别拉」，恢复可见时同一个条目
+     * 还得继续跑。把两者合成一个函数，隐藏一次就永久停表了——那正是「用户切回来
+     * 看到的是一张死卡」的根因。
+     */
+    function pauseFeed(entry) {
+      if (entry.timer) {
+        clearTimeout(entry.timer)
+        entry.timer = null
+      }
+      if (entry.controller) {
+        const controller = entry.controller
+        entry.controller = null
+        try { controller.abort() } catch (error) { /* 已经 abort 过 */ }
+      }
+    }
+
+    /** 摘表（终态）：停表、中止在途，并禁止迟到的 `finally` 再排下一轮。 */
+    function disarmFeed(entry) {
+      entry.disposed = true
+      pauseFeed(entry)
+    }
+
+    /**
+     * 安排下一次请求。
+     *
+     * 页面隐藏时**只停表不删条目**：数据还在，恢复可见时立刻补一次（见
+     * `onFeedVisibility`），用户切回来看到的不是一张空卡。
+     */
+    function armFeed(entry, delay) {
+      if (entry.timer) {
+        clearTimeout(entry.timer)
+        entry.timer = null
+      }
+      if (entry.stopped) return
+      if (!cardPageVisible()) return
+      entry.timer = setTimeout(function () {
+        entry.timer = null
+        void feedTick(entry)
+      }, Math.max(0, delay))
+    }
+
+    /**
+     * 把一次 `/board` 响应合并进 entry。
+     *
+     * **旧宿主兜底（plans/12 §10 第 4 行）**：旧版 `/board` 忽略 `?group=`，返回的是
+     * 全量快照（且被 200 条上限截断）。前端必须自己按 group 过滤；一旦发现「过滤后
+     * 成员数 < 卡片行数」，说明这一批的成员已经被截断吃掉——这时候**必须停止轮询**
+     * 并标「状态为派发时快照」。继续拿截断后的全量快照当实时状态，会得到一种最糟的
+     * 结果：卡里有几行永远停在 running（它们只是不在快照里），看起来像卡死。
+     *
+     * 判据用「响应里出现了不属于本 group 的行」而不是「tasks 长度不等于行数」：
+     * 新版宿主会服务端过滤，此时成员缺失只可能是任务已退休/归档，按计划 §10 该
+     * 「保持最后一次已知状态」而不是判成旧宿主、停表。
+     */
+    function applyFeedData(entry, data) {
+      const all = Array.isArray(data && data.tasks) ? data.tasks : []
+      const mine = []
+      for (const task of all) {
+        if (!task || typeof task !== 'object') continue
+        if (task.group === entry.group) mine.push(task)
+      }
+      // 宿主没按 group 过滤：响应里混进了别的批次。
+      const foreign = mine.length !== all.length
+      entry.failures = 0
+      entry.tasks = mine
+      if (!foreign) {
+        entry.frozen = false
+        return
+      }
+      refreshFeedExpected(entry)
+      if (entry.expected > 0 && mine.length < entry.expected) {
+        entry.frozen = true
+        entry.stopped = true
+        disarmFeed(entry)
+      }
+    }
+
+    /** 拉一次 `/board?group=`；失败保留上次数据，只累加失败数并退避。 */
+    async function feedTick(entry) {
+      if (entry.stopped) return
+      if (!cardPageVisible()) return
+      // 同一 entry 同时只允许一个在途请求：慢响应叠加快请求会让旧数据覆盖新数据。
+      if (entry.controller) {
+        try { entry.controller.abort() } catch (error) { /* 忽略 */ }
+      }
+      const controller = new AbortController()
+      entry.controller = controller
+      try {
+        const response = await fetch(cardBoardUrl(entry.group), {
+          method: 'GET',
+          headers: { accept: 'application/json', ...AUTH_HEADERS },
+          cache: 'no-store',
+          credentials: 'same-origin',
+          signal: controller.signal,
+        })
+        if (controller.signal.aborted) return
+        if (!response.ok) throw new Error(tr('httpError') + ' HTTP ' + response.status)
+        let data
+        try {
+          data = await response.json()
+        } catch (error) {
+          throw new Error(tr('badResponse'))
+        }
+        if (controller.signal.aborted) return
+        if (!data || !Array.isArray(data.tasks)) throw new Error(tr('badResponse'))
+        applyFeedData(entry, data)
+      } catch (error) {
+        if (controller.signal.aborted) return
+        // 保留 `entry.tasks`：宁可显示「可能已过期」的旧状态，也不把行删掉。
+        entry.failures += 1
+      } finally {
+        if (entry.controller === controller) entry.controller = null
+        /*
+         * **先通知，再决定要不要排下一轮**：`applyFeedData` 里判出「旧宿主截断、
+         * 成员不全」时会当场 `disarmFeed`（它必须立刻停表，不能等到这一轮结束——
+         * 中间那一点点延迟就够发下一次请求了）。如果通知也跟在 `disposed` 后面，
+         * 订阅者永远收不到「已冻结」这一版，卡里就只剩派发快照 + 一个没人知道的
+         * 停表状态：用户看到的是「一直在排队」，而真相是「不会再更新了」。
+         */
+        notifyFeed(entry)
+        /*
+         * 退订之后**不许**再排下一次：`disarmFeed` 会 abort 在途请求，而 abort 的
+         * 拒绝也会走到这个 finally。少了这个判断，卡片卸载后仍会重新挂上一个定时器
+         * ——一个已经没人持有的定时器会继续发请求，而且要等到下一次 refcount 归零
+         * 才有机会被清掉（那时候它已经不在 Map 里了，永远清不到）。
+         */
+        if (entry.disposed) return
+        armFeed(entry, feedDelayOf(entry))
+      }
+    }
+
+    /**
+     * 页面可见性：**一个监听器服务所有 feed**，而不是每个 group 挂一个。
+     *
+     * 隐藏时停表 + 中止在途（看不见的数据不值得拉）；可见时**立即补一次**，
+     * 不等下一个 tick——否则切回来要盯着旧状态再等 2–15 秒。
+     */
+    let feedVisibilityHandler = null
+
+    function onFeedVisibility() {
+      const visible = cardPageVisible()
+      for (const entry of Array.from(groupFeeds.values())) {
+        if (!visible) {
+          pauseFeed(entry)
+          continue
+        }
+        if (entry.stopped) continue
+        void feedTick(entry)
+      }
+    }
+
+    function bindFeedVisibility() {
+      if (feedVisibilityHandler) return
+      if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
+      feedVisibilityHandler = onFeedVisibility
+      document.addEventListener('visibilitychange', feedVisibilityHandler)
+    }
+
+    function unbindFeedVisibility() {
+      if (!feedVisibilityHandler) return
+      if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+        document.removeEventListener('visibilitychange', feedVisibilityHandler)
+      }
+      feedVisibilityHandler = null
+    }
+
+    /**
+     * 订阅一个 group 的实时状态。
+     *
+     * @param {string} group
+     * @param {{ expected?: number, onChange: (view: object) => void }} options
+     * @returns {() => void} 退订函数（refcount 归零时删条目、清定时器）
+     */
+    function subscribeGroupFeed(group, options) {
+      const key = typeof group === 'string' ? group.trim() : ''
+      const sub = options && typeof options.onChange === 'function' ? options.onChange : null
+      if (!key || !sub) return function () {}
+      if (typeof fetch !== 'function' || typeof AbortController !== 'function') return function () {}
+      let entry = groupFeeds.get(key)
+      if (!entry) {
+        entry = {
+          group: key,
+          refs: 0,
+          subs: new Set(),
+          timer: null,
+          controller: null,
+          tasks: [],
+          failures: 0,
+          expected: 0,
+          /*
+           * 行数探针：每个订阅者一个（`() => rows.length`）。判「成员有没有被截断」
+           * 之前必须**现场问一遍**，不能用建条目那天的数字——同一 group 的第二张卡
+           * 可能晚挂载、行数也可能不同（重放脏数据）。
+           */
+          expectedProbes: [],
+          frozen: false,
+          stopped: false,
+        }
+        groupFeeds.set(key, entry)
+      }
+      entry.refs += 1
+      // 行数是「成员是否被截断」的判据，取所有订阅者里最大的那个：
+      // 同 group 的两张卡行数正常相同，脏数据下取大的才不会误判成「成员不全」。
+      // `expectedOf` 是**每次取值时**调用的读函数（而不是一次性数字）：同一 group
+      // 的第二张卡可能晚挂载或行数不同，一次性快照会把它的行数漏掉。
+      const readExpected = function () {
+        // 每个订阅者各报一次自己的行数，取最大值（见上面的注释）。
+        for (const probe of entry.expectedProbes) {
+          let live = 0
+          try { live = Number(probe()) } catch (error) { live = 0 }
+          if (Number.isFinite(live) && live > entry.expected) entry.expected = live
+        }
+        return entry.expected
+      }
+      const initialExpected = options && Number.isFinite(options.expected) ? options.expected : 0
+      if (initialExpected > entry.expected) entry.expected = initialExpected
+      if (typeof options.expectedOf === 'function') entry.expectedProbes.push(options.expectedOf)
+      readExpected()
+      entry.subs.add(sub)
+      bindFeedVisibility()
+      if (entry.refs === 1) {
+        // 第一个订阅者：立刻拉一次（结果阶段就该看到比派发瞬间更新的状态），
+        // 之后的节奏由 armFeed 接管。
+        void feedTick(entry)
+      } else {
+        // 后来的订阅者直接用已有数据，别让第二张卡再发一次同样的请求。
+        sub(feedViewOf(entry))
+      }
+      let released = false
+      return function () {
+        if (released) return
+        released = true
+        entry.subs.delete(sub)
+        const at = entry.expectedProbes.indexOf(options.expectedOf)
+        if (at >= 0) entry.expectedProbes.splice(at, 1)
+        entry.refs = Math.max(0, entry.refs - 1)
+        if (entry.refs > 0) return
+        disarmFeed(entry)
+        groupFeeds.delete(key)
+        if (groupFeeds.size === 0) unbindFeedVisibility()
+      }
+    }
+
+    /**
+     * 点一行 → 打开它的子会话。
+     *
+     * **刻意不新开通道**（plans/12 §十三 Q3）：走的是看板 `BoardPanel.openWorker`
+     * 用的同一个服务 `uiWorkspace.openSession(id)`。理由不是省事，而是「打开子会话」
+     * 这件事的语义完全由宿主决定（换主视图、处理归档、补建空白会话），客户端多开
+     * 一条路就等于多一份会漂移的导航语义。
+     *
+     * 失败**静默**：卡片没有 notice 区域，也不该为了一个跳转失败去占一行位置。
+     * `openSession` 抛的 `not-listed` 说明子会话已不在会话目录里，而这个信息在
+     * 卡上无处安放——刷新之后行自然就没了。
+     *
+     * @param {string} sessionId `worker_session_id`
+     */
+    async function openCardSession(sessionId) {
+      const target = typeof sessionId === 'string' ? sessionId.trim() : ''
+      if (!target) return false
+      let ui = null
+      try {
+        ui = appContext && typeof appContext.get === 'function'
+          ? appContext.get('uiWorkspace')
+          : appContext && appContext.uiWorkspace
+      } catch (error) {
+        ui = null
+      }
+      if (!ui || typeof ui.openSession !== 'function') return false
+      try {
+        await ui.openSession(target)
+        return true
+      } catch (error) {
+        return false
+      }
+    }
+
+    /**
+     * 卡片交给每一行的打开函数。
+     *
+     * 准入判断在 `cardRowClickable`（纯函数，可离线断言）；这里只做「把 sessionId
+     * 转成一次 openSession」。两者分开是因为准入条件将来会变（P2 可能放宽到
+     * 已结算行也能看历史），而打开动作不会变。
+     */
+    function openCardRow(row) {
+      if (!cardRowClickable(row)) return
+      void openCardSession(row.sessionId)
+    }
+
+    /** 标题归一：宿主给的可能带首尾空白，也可能是 undefined。 */
+    function cardTitleOf(value) {
+      return typeof value === 'string' ? value.trim() : ''
+    }
+
+    /**
+     * 从 `result.content` 里取出第一个文本块并解析成对象。
+     *
+     * 契约（plans/12 §8.1）：本插件的工具返回对象会被序列化成 JSON 文本放进内容块。
+     * 解析不出来**不许抛错、更不许吞掉整卡**——那是「派发过了但会话里什么都看不见」，
+     * 比显示一个「未知」糟得多。所以失败一律返回 null，由调用方降级成
+     * 「标题来自入参、状态未知」。
+     */
+    function cardJsonOf(content) {
+      let raw = ''
+      if (typeof content === 'string') {
+        raw = content
+      } else if (Array.isArray(content)) {
+        for (let i = 0; i < content.length; i += 1) {
+          const block = content[i]
+          if (!block) continue
+          if (typeof block === 'string') { raw = block; break }
+          if (block.type === 'text' && typeof block.text === 'string') { raw = block.text; break }
+        }
+      }
+      if (!raw) return null
+      try {
+        const parsed = JSON.parse(raw)
+        return parsed && typeof parsed === 'object' ? parsed : null
+      } catch (error) {
+        return null
+      }
+    }
+
+    /**
+     * 三阶段统一取 `args`。
+     * `args` 是宿主的**懒读器**（plans/12 §8.1 约束）：只在这里读、不缓存成模块级状态，
+     * 否则 `start → result` 之间参数补齐时卡片会停在旧值上。
+     */
+    function cardArgsOf(props) {
+      const block = props && props.block && typeof props.block === 'object' ? props.block : null
+      const fromBlock = block && block.args && typeof block.args === 'object' ? block.args : null
+      if (fromBlock) return fromBlock
+      const fromProps = props && props.args && typeof props.args === 'object' ? props.args : null
+      return fromProps || {}
+    }
+
+    /**
+     * 派发结果里的「逐项」数组。
+     *
+     * 两个工具形状不同：批量是 `launched[]`，单条是 `task`（`card()` 的投影）。
+     * 所以单条也归一成「长度 1 的数组」，上面的行模型与折叠就只需要一套逻辑。
+     */
+    function cardLaunchedOf(data) {
+      if (!data || typeof data !== 'object') return null
+      if (Array.isArray(data.launched)) return data.launched
+      if (data.task && typeof data.task === 'object') return [data.task]
+      return null
+    }
+
+    /**
+     * 行模型（plans/12 §8.3 的合并顺序第 1–3 步）。
+     *
+     * 顺序**严格等于 `launched[]` 的下标**——包括启动失败项：它没有 `task_id`，
+     * 一旦「跳过失败项」把行数组压短，后面所有行都会整体前移一格，用户看到的
+     * 「第 3 条是跑测试」其实是「第 4 条」。所以失败项必须占位（`key` 用下标）。
+     *
+     * `live`（可选）是 `/board?group=` 的最新行，按 `task_id` 覆盖状态与派生字段
+     * （第 3 步）。**合并是逐字段的覆盖，不是整行替换**：看板行可能因为宿主版本或
+     * 退休而缺字段，整行替换会把入参里本来就有的标题/依赖一起抹掉。
+     */
+    function mergeBatchRows(args, data, phase, live) {
+      const tasks = args && Array.isArray(args.tasks) ? args.tasks : []
+      const launched = cardLaunchedOf(data)
+      const liveById = live instanceof Map ? live : null
+      const rows = []
+      /*
+       * 结果到了但解析不出来（`result.content` 不是 JSON）：行标题照常从入参取，
+       * 状态留空 —— 空状态在 `cardStatusLabel` 里显示「未知」。这里**不能**沿用
+       * `CARD_PENDING`（「待定」）：那是「还没回」，而这里是「回了但读不懂」，
+       * 两种情况下用户该做的事完全不同（等 vs 去 dispatch_inspect 看）。
+       */
+      const pendingStatus = phase === 'result' ? '' : CARD_PENDING
+      if (!launched) {
+        // start / 解析失败：只知道入参里的标题与顺序。单条派发没有 tasks 数组，
+        // 用它自己的 args.title 造一行，让头部标题与行对得上。
+        if (tasks.length) {
+          for (let i = 0; i < tasks.length; i += 1) {
+            const item = tasks[i] && typeof tasks[i] === 'object' ? tasks[i] : {}
+            rows.push({
+              key: 'row-' + i,
+              id: '',
+              title: cardTitleOf(item.title),
+              status: pendingStatus,
+              dependsOn: [],
+            })
+          }
+        } else {
+          const single = cardTitleOf(args && args.title)
+          if (single) rows.push({ key: 'row-0', id: '', title: single, status: pendingStatus, dependsOn: [] })
+        }
+        return rows
+      }
+      for (let i = 0; i < launched.length; i += 1) {
+        const item = launched[i] && typeof launched[i] === 'object' ? launched[i] : {}
+        const source = tasks[i] && typeof tasks[i] === 'object' ? tasks[i] : {}
+        /*
+         * 启动失败：`{title, error, code}`，**没有 id**。
+         * 判据用 `error`（而不是 `!task_id`）：一个正常的 launched 项也可能因为
+         * 宿主版本差异缺 id，那种情况仍应按「状态未知」渲染，不该谎报成启动失败。
+         */
+        if (item.error) {
+          rows.push({
+            key: 'failed-' + i,
+            id: '',
+            title: cardTitleOf(item.title) || cardTitleOf(source.title),
+            status: CARD_FAILED_START,
+            dependsOn: [],
+            errorCode: typeof item.code === 'string' ? item.code : '',
+            errorText: typeof item.error === 'string' ? item.error : String(item.error),
+            live: false,
+          })
+          continue
+        }
+        const id = typeof item.task_id === 'string' ? item.task_id : ''
+        const row = {
+          key: id || 'row-' + i,
+          id: id,
+          title: cardTitleOf(item.title) || cardTitleOf(source.title),
+          status: typeof item.status === 'string' && item.status ? item.status : '',
+          dependsOn: Array.isArray(item.depends_on) ? item.depends_on : [],
+          live: false,
+        }
+        const board = liveById && id ? liveById.get(id) : null
+        if (board) {
+          row.live = true
+          if (typeof board.status === 'string' && board.status) row.status = board.status
+          if (typeof board.blocked_by === 'string' && board.blocked_by) row.blockedBy = board.blocked_by
+          if (typeof board.blocked_reason === 'string' && board.blocked_reason) row.blockedReason = board.blocked_reason
+          if (typeof board.cancel_reason === 'string' && board.cancel_reason) row.cancelReason = board.cancel_reason
+          if (typeof board.error_code === 'string' && board.error_code) row.errorCode = board.error_code
+          if (typeof board.elapsed_ms === 'number' && Number.isFinite(board.elapsed_ms)) row.elapsedMs = board.elapsed_ms
+          if (typeof board.worker_session_id === 'string' && board.worker_session_id) row.sessionId = board.worker_session_id
+          if (board.archived_at) row.archivedAt = board.archived_at
+          const report = board.last_report && typeof board.last_report === 'object' ? board.last_report : null
+          if (report && typeof report.summary === 'string' && report.summary.trim()) {
+            row.summary = report.summary.trim()
+          }
+        }
+        rows.push(row)
+      }
+      return rows
+    }
+
+    /** 看板行的索引：`Map<task_id, boardTask>`；没有数据时返回 null（不分配无意义的 Map）。 */
+    function liveIndex(rows) {
+      if (!Array.isArray(rows) || !rows.length) return null
+      const map = new Map()
+      for (const task of rows) {
+        if (task && typeof task.task_id === 'string' && task.task_id) map.set(task.task_id, task)
+      }
+      return map.size ? map : null
+    }
+
+    /**
+     * 头部聚合：`已完成/总数`。
+     *
+     * `已完成` 与看板批次头（`BatchHead`）同一口径——**已结算**（`SETTLED_STATUS`），
+     * 外加「没能开始」也算结束（它不会再变了）。不要用 `status === 'done'`：
+     * 一个 4 条批次里 3 条失败、1 条完成时，`1/4` 会让人以为还有 3 条在跑。
+     * 这里不给百分比、不给配色，只给两个数——用户要的是「还剩几条」。
+     */
+    function aggregateBatch(rows) {
+      let done = 0
+      const list = Array.isArray(rows) ? rows : []
+      for (const row of list) {
+        if (!row) continue
+        if (row.status === CARD_FAILED_START || SETTLED_STATUS.has(row.status)) done += 1
+      }
+      return { done: done, total: list.length }
+    }
+
+    /**
+     * 状态词：**只有一套**。宿主状态走 `TEXT['status.*']`，两个占位值各有自己的文案。
+     *
+     * `queued` + `blocked_by` 是唯一一个「状态词要看上下文」的地方（plans/12 §7.2）：
+     * 一条在等前置的任务仍然是 `queued`，但「排队中」会让人以为它马上要跑起来——
+     * 而它其实在等另一条任务。所以这里换词而不是换状态：圆点、状态集合、
+     * 结算判定全部不变，只是把「等谁」说出来。
+     */
+    function cardStatusLabel(status, row) {
+      if (status === CARD_PENDING) return tr('card.pending')
+      if (status === CARD_FAILED_START) return tr('card.failedToStart')
+      if (status === 'queued' && row && row.blockedBy) return fill(tr('card.waitFor'), { id: row.blockedBy })
+      if (status && TEXT['status.' + status] !== undefined) return tr('status.' + status)
+      return tr('card.unknown')
+    }
+
+    /**
+     * 行尾那一行补充说明（plans/12 §7.2 的「行尾附加」列）。
+     *
+     * 只放**看板真的给了**的东西：`blocked_reason` / `error_code` /
+     * `last_report.summary` / `cancel_reason`。看板行没有自由文本的 `error`，
+     * 所以这里不假装能拿到完整错误——编一句「详情见日志」比什么都不写更糟。
+     */
+    function cardRowNoteOf(row) {
+      if (!row) return ''
+      // 启动失败：`code · 原因`（原因来自入参，不是看板）。
+      if (row.status === CARD_FAILED_START) {
+        return [row.errorCode, row.errorText].filter(Boolean).join(' · ')
+      }
+      const parts = []
+      if (row.status === 'blocked' && row.blockedReason) {
+        // 100 字上限：`blocked_reason` 是闭集短串，但宿主版本差异可能给长文本，
+        // 行内不做滚动区，截断是唯一诚实的处理（全文走 `title`）。
+        parts.push(row.blockedReason.length > 100 ? row.blockedReason.slice(0, 100) + '…' : row.blockedReason)
+      }
+      if (row.status === 'failed') {
+        if (row.errorCode) parts.push(row.errorCode)
+      }
+      /*
+       * 已取消：**必须区分「人取消」与「前置没执行」**（plans/12 §7.2 / PRD-02 §4.5）。
+       * 两者都是 cancelled，但「我没做」与「它没得做」是两件事——前者要人回来看，
+       * 后者只要看前置就够了。判据是 `cancel_reason` 的两个依赖值，与看板批次头
+       * 同一口径（不新增第三个值）。
+       */
+      if (row.status === 'cancelled') {
+        const byDependency = row.cancelReason === 'dependency_failed' || row.cancelReason === 'dependency_missing'
+        parts.push(byDependency ? tr('card.cancelByDependency') : tr('card.cancelByHuman'))
+      }
+      // 失败摘要只在失败时补：其它状态下的 `last_report.summary` 是进度，不是原因。
+      if (row.status === 'failed' && row.summary) {
+        const first = String(row.summary).split('\n')[0].trim()
+        if (first) parts.push(first.length > 100 ? first.slice(0, 100) + '…' : first)
+      }
+      return parts.join(' · ')
+    }
+
+    /** 圆点颜色：失败项用错误色，其余复用 `STATUS_META`（未识别的状态用中性色）。 */
+    function cardDotOf(status) {
+      if (status === CARD_FAILED_START) return STATUS_META.failed
+      if (status === CARD_PENDING) return STATUS_META.queued
+      return STATUS_META[status] || STATUS_FALLBACK
+    }
+
+    /**
+     * `group` 的短标签。
+     *
+     * 完整 id 走 `title` 属性（鼠标悬停/读屏都能拿到），视觉上截到 12 个字符：
+     * 一个 `g-` 后面跟时间戳的 id 在窄侧栏里会把标题挤没。截断只在**显示层**做，
+     * 不改变任何数据，也不「编造」一个不存在的短 id。
+     */
+    function shortGroupOf(group) {
+      const id = typeof group === 'string' ? group.trim() : ''
+      if (!id) return ''
+      return id.length > 12 ? id.slice(0, 12) + '…' : id
+    }
+
+    /**
+     * 三阶段的视图模型：标题、行、聚合、group。纯函数，方便离线断言。
+     *
+     * @param {object} props 宿主给的 `ToolCallOwnerProps`
+     * @param {object} [feed] 实时状态（`/board?group=` 的最新一版）；缺省 = 只有派发快照
+     */
+    function cardViewOf(props, feed) {
+      const phase = props && (props.phase === 'start' || props.phase === 'result') ? props.phase : 'preparing'
+      const toolName = props && typeof props.toolName === 'string' ? props.toolName : ''
+      const args = cardArgsOf(props)
+      const block = props && props.block && typeof props.block === 'object' ? props.block : null
+      const isBatch = toolName === 'dispatch_launch_many'
+      const data = phase === 'result' ? cardJsonOf(block && block.content) : null
+      const live = liveIndex(feed && feed.tasks)
+      const rows = phase === 'preparing' ? [] : mergeBatchRows(args, data, phase, live)
+      const aggregate = aggregateBatch(rows)
+      const group = data && typeof data.group === 'string' ? data.group.trim() : ''
+      /*
+       * 标题：
+       * - `preparing` 只有骨架，标题就是「正在准备派发…」；
+       * - 批量用「派发 N 个任务」，N **以行数为准**（= launched 的长度），不是
+       *   `args.tasks.length`：脏数据里两者可能不等，而用户看到的是行；
+       * - 单条用任务标题（`task.title` 优先，其次 `args.title`）。
+       */
+      let title = ''
+      if (phase === 'preparing') title = tr('card.preparing')
+      else if (isBatch) title = fill(tr('card.headBatch'), { n: aggregate.total })
+      else title = (rows[0] && rows[0].title) || cardTitleOf(args.title) || tr('noTitle')
+      return {
+        phase: phase,
+        isBatch: isBatch,
+        title: title,
+        rows: rows,
+        done: aggregate.done,
+        total: aggregate.total,
+        group: group,
+        // result 阶段拿不到对象 = 内容不是 JSON（或没内容）：行标题照常，状态「未知」。
+        unparsed: phase === 'result' && !data,
+        /*
+         * 实时状态的两个降级标记（plans/12 §10）：都在 footer 说，不在行里刷。
+         * `stale` = 连续失败够了，数据可能已经不准；`frozen` = 旧宿主返回的是
+         * 被截断的全量快照，已经停表，这份状态就是**派发时**的样子。
+         */
+        stale: Boolean(feed && feed.stale),
+        frozen: Boolean(feed && feed.frozen),
+      }
+    }
+
+    /**
+     * 一行是否可以被点开。
+     *
+     * 三道闸，缺一不可（plans/12 §十三 Q3 / plans/14 §3.1）：
+     * 1. **必须已拿到 `worker_session_id`**——那个 id 只从 `/board` 行里来，`launched[]`
+     *    不投影它。所以「点得开」本身就意味着「实时状态到了」，卡在派发快照上的行
+     *    没有可开的目标；
+     * 2. **必须未结算**：已结算/已退休的子会话打开之后是只读历史，而
+     *    `uiWorkspace.openSession()` 只换主视图——用户点一下等于把当前工作现场
+     *    换成一个已经结束的会话，还得自己换回来。看板对归档行也是同一口径
+     *    （`client/index.js` 的 `openWorker` 与 `TaskCard` 各一道闸）；
+     * 3. **必须没有启动失败 / 没有归档**：前者根本没有会话，后者打开会被宿主
+     *    的 `clearArchivedCurrent()` 清成空白会话。
+     *
+     * 三道闸都是**纯函数判断**，不依赖 DOM、不依赖事件源，方便离线断言。
+     */
+    function cardRowClickable(row) {
+      if (!row || typeof row !== 'object') return false
+      if (row.status === CARD_FAILED_START) return false
+      if (!row.sessionId) return false
+      if (row.archivedAt) return false
+      if (SETTLED_STATUS.has(row.status)) return false
+      return true
+    }
+
+    /**
+     * 一行任务。
+     *
+     * 状态文字**必须在 DOM 里**（不能只靠圆点颜色），否则读屏器只会念出标题。
+     * 可点性由 `cardRowClickable` 决定：不可点的行**不挂 onClick、不给 tabIndex、
+     * 不写 cursor: pointer**——给一个点了没反应的指针态比不给更糟。
+     * 点击只做一件事：把 `task_id` 交给卡片的 `onOpen`，由卡片统一走面板那条
+     * `uiWorkspace.openSession` 通道（不新开第二条打开子会话的路）。
+     */
+    function BatchRowItem(props) {
+      const row = props && props.row ? props.row : {}
+      const meta = cardDotOf(row.status)
+      const note = cardRowNoteOf(row)
+      const clickable = cardRowClickable(row)
+      const open = clickable && typeof props.onOpen === 'function' ? props.onOpen : null
+      return h(
+        'div',
+        {
+          className: clickable ? 'dsh-sa-dc-item dsh-sa-dc-item-open' : 'dsh-sa-dc-item',
+          role: 'listitem',
+          'data-card-row': row.key || '',
+          'data-card-row-index': String(props.index),
+          'data-card-row-status': row.status || 'unknown',
+          ...(row.status === CARD_FAILED_START ? { 'data-card-failed': 'true' } : {}),
+          ...(clickable
+            ? {
+                'data-card-open': 'true',
+                title: tr('card.openRow'),
+                tabIndex: 0,
+                onClick: function () { if (open) open(row) },
+                onKeyDown: function (event) {
+                  if (!event || (event.key !== 'Enter' && event.key !== ' ')) return
+                  if (event.preventDefault) event.preventDefault()
+                  if (open) open(row)
+                },
+              }
+            : {}),
+        },
+        h('span', {
+          key: 'dot',
+          className: meta.pulse ? 'dsh-sa-dc-dot dsh-sa-dc-dot-pulse' : 'dsh-sa-dc-dot',
+          style: { color: meta.color },
+          'aria-hidden': 'true',
+        }),
+        row.id ? h('span', { key: 'id', className: 'dsh-sa-dc-id' }, row.id) : null,
+        h('span', { key: 'name', className: 'dsh-sa-dc-name', title: row.title || undefined }, row.title || tr('noTitle')),
+        h('span', { key: 'state', className: 'dsh-sa-dc-state', style: { color: meta.color } }, cardStatusLabel(row.status, row)),
+        note ? h('span', { key: 'note', className: 'dsh-sa-dc-note', title: note }, note) : null,
+      )
+    }
+
+    /** `preparing` 阶段的骨架：两条淡淡的条，**不发任何请求**（P0 无轮询）。 */
+    function BatchSkeleton() {
+      return h(
+        'div',
+        { className: 'dsh-sa-dc-skeleton', 'data-card-skeleton': 'true', 'aria-hidden': 'true' },
+        h('div', { key: 'a', className: 'dsh-sa-dc-bar' }),
+        h('div', { key: 'b', className: 'dsh-sa-dc-bar dsh-sa-dc-bar-short' }),
+      )
+    }
+
+    /**
+     * 派发卡：`dispatch_launch` 与 `dispatch_launch_many` **共用**这一个组件。
+     *
+     * 三阶段为什么这样降级（plans/12 §7.1 / §8.1）：
+     * - `preparing`：宿主只给了工具名，参数还在路上。此时**绝不能**发请求、也不能
+     *   假装知道有几条——画骨架，标题写「正在准备派发…」。
+     * - `start`：参数到齐、结果未回。行数与标题可以确定，状态只能是「待定」；
+     *   `group` 还没有，显式画 `—`（留个位置，别让它随结果出现时跳动）。
+     * - `result`：结果到齐，才有 `group`、才有 `已完成/总数`、才有真正的状态词。
+     *
+     * 折叠状态放在组件实例里（`useState`），不写 store、不跨轮次记忆：宿主收起
+     * 轮次时组件卸载，展开状态自然回到默认。**不调用宿主的 `useDisclosure`**——
+     * 那是个 hook，只在部分阶段可选地调用会破坏 hook 顺序（React 会直接抛错，
+     * 整棵 transcript 一起白屏），代价远大于收益。
+     */
+    function DispatchBatchRow(props) {
+      const [expanded, setExpanded] = useState(false)
+      /*
+       * 实时状态（plans/12 §8.4）。`null` = 还没拿到过任何一版，此时卡片用派发快照渲染。
+       *
+       * 为什么是**一个对象 state** 而不是把行写进 props 派生：`/board` 是外部数据源，
+       * 它到达的时刻与宿主重渲染完全无关。React 的 state 是唯一能让「数据到了」
+       * 触发重渲染的地方——不用 state 就得逼宿主重放工具调用，那是死路。
+       */
+      const [feed, setFeed] = useState(null)
+      /*
+       * feed 的 `expected`（行数）在订阅回调里要用**最新值**，但订阅只在 `[group]`
+       * 变化时重建（重建会打断正在跑的定时器）。用 ref 镜像它，回调读 ref 就既拿到
+       * 最新值，又不用把 effect 的依赖写成一串会频繁变化的东西。
+       */
+      const expectedRef = useRef(0)
+      /*
+       * 样式只在挂载时确保存在，卸载时释放一次引用（refcount 归零才真的摘节点）。
+       * 这里先算 view 是为了知道 expected；view 依赖 feed，所以放在 effect 之前。
+       */
+      useEffect(function () {
+        ensureCardStyles()
+        return function () { releaseCardStyles() }
+      }, [])
+      const view = cardViewOf(props, feed)
+      expectedRef.current = view.total
+      /*
+       * 订阅一个 group 的实时状态。
+       *
+       * 依赖只有 `[group]`：行数变化（重放/脏数据）不该重建订阅——重建会删掉
+       * 正在跑的定时器再起一个新的，等于每次渲染都把轮询相位重置一次，
+       * 极端情况下永远等不到那一次 tick。行数变化通过 ref 交给同一个订阅。
+       *
+       * `phase !== 'result'` 或没有 group 时不订阅：`start` 阶段连任务 id 都还没有，
+       * `preparing` 更不该发请求（plans/12 §7.1）。
+       */
+      const group = view.phase === 'result' ? view.group : ''
+      useEffect(function () {
+        if (!group) return undefined
+        const unsubscribe = subscribeGroupFeed(group, {
+          expected: expectedRef.current,
+          /*
+           * 每次渲染都把最新的行数交给 feed：`expected` 是「成员有没有被截断」的
+           * 判据，而第二张卡可能比第一张晚挂载（此时 feed 已经建好、expected 还是
+           * 第一张给的值）。只在建条目那天写一次，晚到的那张卡行数一变就会被误判成
+           * 「成员不全」，卡直接停表——那是**假降级**，比不降级更糟。
+           */
+          expectedOf: function () { return expectedRef.current },
+          onChange: function (next) { setFeed(next) },
+        })
+        return unsubscribe
+      }, [group])
+      const settle = view.total > 0 && view.done === view.total
+      /*
+       * 头部圆点：`result` 后按聚合给颜色——全部结束用成功色，还有在跑的用业务色；
+       * `start`/`preparing` 没有可信状态，用中性色，不猜。
+       */
+      const headMeta = view.phase !== 'result'
+        ? STATUS_META.queued
+        : settle
+          ? STATUS_META.done
+          : STATUS_META.running
+      const hidden = view.total - CARD_VISIBLE_ROWS
+      const collapsed = !expanded && hidden > 0
+      const shown = collapsed ? view.rows.slice(0, CARD_VISIBLE_ROWS) : view.rows
+      const moreLabel = collapsed
+        // 两个数都写出来：既说「展开后有多少条」，也说「现在还藏着几条」。
+        ? fill(tr('card.expandAll'), { n: view.total }) + ' · ' + fill(tr('card.more'), { n: hidden })
+        : tr('showLess')
+      const ariaLabel = view.phase === 'result'
+        ? fill(tr('card.aria'), { n: view.total, done: view.done })
+        : view.title
+      const staleFooter = view.stale ? tr('card.stale') : ''
+      return h(
+        'div',
+        {
+          className: 'dsh-sa-dc',
+          role: 'group',
+          'aria-label': ariaLabel,
+          'data-card-root': 'true',
+          'data-card-phase': view.phase,
+          'data-card-tool': props && typeof props.toolName === 'string' ? props.toolName : '',
+          ...(view.stale ? { 'data-card-stale': 'true' } : {}),
+          ...(view.frozen ? { 'data-card-frozen': 'true' } : {}),
+        },
+        h(
+          'div',
+          { className: 'dsh-sa-dc-head' },
+          h('span', {
+            key: 'dot',
+            className: headMeta.pulse ? 'dsh-sa-dc-dot dsh-sa-dc-dot-pulse' : 'dsh-sa-dc-dot',
+            style: { color: headMeta.color },
+            'aria-hidden': 'true',
+          }),
+          h('span', { key: 'title', className: 'dsh-sa-dc-title', title: view.title }, view.title),
+          // `已完成/总数` 只在 `result` 后出现（§7.4）：`start` 阶段的 0/N 是假聚合。
+          view.phase === 'result'
+            ? h('span', { key: 'ratio', className: 'dsh-sa-dc-ratio', 'data-card-ratio': 'true' }, view.done + '/' + view.total)
+            : null,
+          /*
+           * group：`start` 阶段显式画 `—`（占位，避免结果回来时头部抖动）；
+           * `result` 阶段有 group 才画——**缺失时一个字符都不编**（plans/14 §3.1）。
+           */
+          view.phase === 'start'
+            ? h('span', { key: 'group', className: 'dsh-sa-dc-group', 'data-card-group': 'true', 'aria-hidden': 'true' }, '—')
+            : view.group
+              ? h(
+                  'span',
+                  {
+                    key: 'group',
+                    className: 'dsh-sa-dc-group',
+                    'data-card-group': view.group,
+                    title: view.group,
+                    'aria-label': view.group,
+                  },
+                  shortGroupOf(view.group),
+                )
+              : null,
+        ),
+        view.phase === 'preparing'
+          ? h(BatchSkeleton)
+          : h(
+              'div',
+              { className: 'dsh-sa-dc-list', role: 'list', 'aria-label': view.title },
+              shown.map(function (row, index) {
+                return h(BatchRowItem, { key: row.key, row: row, index: index, onOpen: openCardRow })
+              }),
+              hidden > 0
+                ? h(
+                    'button',
+                    {
+                      key: 'more',
+                      type: 'button',
+                      className: 'dsh-sa-dc-more',
+                      'data-card-more': 'true',
+                      'aria-expanded': expanded,
+                      onClick: function () { setExpanded(function (value) { return !value }) },
+                    },
+                    moreLabel,
+                  )
+                : null,
+            ),
+        /*
+         * 页脚（plans/12 §10）：
+         * - 解析失败：说清「为什么状态是未知」；
+         * - 连续失败到 3 次：说「状态可能已过期」——数据还在，但可能不准了；
+         * - 旧宿主返回被截断的全量快照：说「状态为派发时快照」——**这比「已过期」
+         *   更严重**，因为它不只是旧，而是永远追不上；两者同时出现时后者优先。
+         */
+        view.frozen
+          ? h('div', { className: 'dsh-sa-dc-foot', 'data-card-snapshot': 'true' }, tr('card.snapshot'))
+          : view.unparsed
+            ? h('div', { className: 'dsh-sa-dc-foot', 'data-card-unparsed': 'true' }, tr('card.unparsed'))
+            : staleFooter
+              ? h('div', { className: 'dsh-sa-dc-foot', 'data-card-stale': 'true' }, staleFooter)
+              : null,
+      )
+    }
+
+    /* ═════════════ 轮次尾部：本轮派发摘要（常驻可见，不被工作详情折叠） ═════════════ */
+
+    /*
+     * ── 为什么需要这一块（而卡片本身不够） ──
+     *
+     * 卡片挂在 `tool.call.toolview`，那是**工具调用树**里的原子视图。宿主把一轮里
+     * 的工具调用投影进 `turn-process` 这个「工作详情」折叠器（`ui-chat` 的
+     * `ChatNodeSeat`：`groupTree` 不在 `turn`/`exchange` 位置的节点一律 `processMember`，
+     * 折叠时 `data-turn-process-hidden`）。于是卡片**必然**在折叠区里：一轮结束后
+     * 它随工作详情一起收起，用户得先点「工作详情」才看得见派了什么——
+     * 那正是「一眼知道派了什么」失效的根因。
+     *
+     * 宿主没有给 `tool.call.toolview` 留任何「常驻/默认展开」的开关：owner 就是
+     * `ToolCallOwnerProps`（callId / toolName / phase+block / cwd / home / openFile /
+     * loadImage / useDisclosure / inspect），`useDisclosure` 只管**卡片内部**那层
+     * 「展开全部 N 条」，管不到外层 Turn-process。所以方案 A（让卡片默认展开）在
+     * 这个宿主版本上不存在。
+     *
+     * 能「绕过折叠」的接缝只有一条：`conversation.chat.turnTail`。它是 Turn 尾部
+     * 的动作条槽（list、session 作用域），宿主在 `TurnTailNodeView` 里渲染它，
+     * 语义上属于**已结束轮次的页脚**，与 `assistant-actions` 同一层——不在
+     * process 分组里（`ui-chat` 的 turn-tail 节点 `groupTree: 'turn'`）。官方
+     * `ui-deliverables` / `ui-plan` / `ui-action-cards` 都往这里注册内容。
+     *
+     * ── 为什么不选另外两条路 ──
+     *
+     * - **B：再注册一个 `conversation.chat.node` 节点（自造 kind）**。`ChatNodeKind`
+     *   是 `ChatNodeDataMap` 的 key，必须由**投影 Definition** 产出，而 Definition
+     *   只能 `match` 已有 Session 事件。要「凭空插一条只读节点」就得新造会话事件
+     *   或改账本——两者都在任务硬约束里明令禁止。而且它还会和卡片重复成两张卡。
+     * - **C：把关键信息压进折叠头部**。卡片在 `tool.call.toolview` 里，它上面没有
+     *   我们能控制的「头部」——`ToolRow` 的折叠头是宿主自己的通用行（工具标题 +
+     *   参数摘要），我们的组件整体都在展开体里。要影响那一行只能替换通用行，
+     *   那就等于放弃按工具名分发的卡片。所以 C 在这个宿主上同样落空。
+     *
+     * ── 为什么这一块不会变成「第二张卡」 ──
+     *
+     * 它默认只列 `CARD_TAIL_ROWS`（2）行，但**给一个真的能点的「还有 N 条」**：
+     * 用户反馈过死文本点不开、看不到剩下几条是什么。展开只是「把同一份 rows
+     * 多画几行」，不重新取数、不改变聚合，也不制造第二份可操作的列表——点开子会话、
+     * 取消、重试这些动作仍然只在卡片里。摘要的职责是「轮次结束时告诉你这一轮派了
+     * 什么、走到了几步」，卡片才是操作面。
+     */
+
+    /**
+     * 「这一轮没有派发」的稳定空值。
+     *
+     * 必须是**同一个**数组引用：`useChat` 的选择器每次返回新数组会让 React 的
+     * 快照比较永远认为「变了」，于是每次 Chat 发布都重渲染一次页脚。空轮次是最常见
+     * 的情况（绝大多数轮次不派发），这条路径不能有噪音。
+     */
+    const TAIL_NO_CALLS = Object.freeze([])
+
+    /**
+     * 一轮里所有派发工具调用折叠成一行摘要。
+     *
+     * 数据来源与卡片**完全相同**（`cardViewOf`）：同一次工具调用、同一套行模型、
+     * 同一套状态词。这样「摘要说 2/4」与「卡片说 2/4」永远不可能不一致——两边
+     * 分头算一套聚合，就是给自己埋一个只在脏数据下才出现的矛盾。
+     *
+     * @param {Array} calls 从本轮 `tool-call` 节点投影出来的 owner 形状只读对象
+     * @returns {object|null} 没有任何派发调用时返回 null（不占位、不画空条）
+     */
+    function cardTailViewOf(calls) {
+      const list = Array.isArray(calls) ? calls : []
+      const rows = []
+      const groups = new Set()
+      for (const props of list) {
+        if (!props || CARD_TOOLS.indexOf(props.toolName) < 0) continue
+        const view = cardViewOf(props, null)
+        /*
+         * `preparing` 连参数都还没到齐：卡片此刻只画骨架、不画行。摘要照同一口径
+         * **不编造任务数**，只留一条「正在准备派发…」的待定行——真实条数未知时
+         * 写出一个数字，等于在两处显示互相矛盾的进度。
+         */
+        if (view.phase === 'preparing') {
+          rows.push({ key: 'prep-' + String(props.callId || rows.length), id: '', title: view.title, status: CARD_PENDING, dependsOn: [] })
+          continue
+        }
+        for (const row of view.rows) rows.push(row)
+        if (view.group) groups.add(view.group)
+      }
+      if (!rows.length) return null
+      const aggregate = aggregateBatch(rows)
+      /*
+       * 标题与卡片同源：批量用「派发 N 个任务」（N 以行数为准），单条用任务标题。
+       * 摘要**不另起一套标题**——同一批任务在两处叫两个名字，用户会怀疑是不是两件事。
+       */
+      let title = ''
+      if (list.length > 1 || (list[0] && list[0].toolName === 'dispatch_launch_many')) {
+        title = fill(tr('card.headBatch'), { n: aggregate.total })
+      } else {
+        title = (rows[0] && rows[0].title) || tr('noTitle')
+      }
+      return {
+        rows: rows,
+        done: aggregate.done,
+        total: aggregate.total,
+        group: groups.size === 1 ? Array.from(groups)[0] : '',
+        title: title,
+      }
+    }
+
+    /**
+     * 轮次尾部的派发摘要。
+     *
+     * 宿主在 `TurnTailNodeView` 里以 `renderSlot('conversation.chat.turnTail', owner)`
+     * 渲染（owner 是 `{ turn, seq, openFile }`）。**必须自己拿 `useChat` 去找本轮的
+     * 派发调用**：那个 owner 里没有工具调用，turnTail 槽也没有 `tool-calls` 之类的
+     * 转发能力。`useChat` 是 session 作用域的标准 hook，`turn-tail` 自己的
+     * `TurnTailNodeView` 就是这么读 `snapshot.locations` 的。
+     *
+     * 为什么按 `locations.getTurn(turn)` 顺序扫而不是读 `legacy.nodes`：前者是 Turn
+     * 内的稳定插入顺序（与 transcript 一致），后者是全局扁平列表，跨轮次扫描会把
+     * 别的轮的派发也算进来。
+     *
+     * 读不到 `useChat`（旧宿主没有这个标准 hook）时**返回 null 且不抛错**：
+     * 摘要缺席只是少看一眼回顾，卡片与看板一切照旧。
+     */
+    function DispatchTail(props) {
+      /*
+       * **外层不调用任何 hook**：`useChat` 是宿主通过 standard props 给的 hook，
+       * 旧宿主可能根本没有它。写成 `typeof useChat === 'function' ? useChat(...) : …`
+       * 就是**有条件地调用 hook**——一旦宿主在某次渲染里给了、另一次没给，
+       * React 会直接抛「Rendered fewer hooks than expected」，把整条轮次页脚
+       * （含复制/重新生成）一起废掉。所以这里只做存在性判断，真正的读取放进
+       * 有 hook 的子组件：子组件的挂载/卸载本来就是 hook 数量变化的安全边界。
+       */
+      const useChat = props && props.useChat
+      if (typeof useChat !== 'function') return null
+      return h(DispatchTailBody, props)
+    }
+
+    /**
+     * 从 owner 里取出「轮次序号」（一个数字）。
+     *
+     * **为什么需要这一步 / 为什么以前会话里看不到摘要**
+     * 宿主的 `conversation.chat.turnTail` 是 **Turn 尾部扩展链**，owner 的权威类型是
+     * （`ui-chat` 的 `contract/slots.ts`，见 `TurnTailOwnerProps`）：
+     *
+     *     export interface TurnTailOwnerProps {
+     *       turn: TurnLocation   // ← 对象，不是 number
+     *       seq: number
+     *       openFile: (path: string) => void
+     *     }
+     *
+     * 而 `TurnLocation`（`ui-conversation` 的 `contract/conversation.ts`）是：
+     *
+     *     export interface TurnLocation {
+     *       readonly turn: number
+     *       readonly start: SessionEvent<'turn/start'> | undefined
+     *       readonly end: SessionEvent<'turn/end'> | undefined
+     *       readonly status: 'open' | 'closed' | 'unknown'
+     *       readonly steps: readonly StepLocation[]
+     *       readonly data: ConversationLocationDataStore<ConversationTurnDataMap>
+     *     }
+     *
+     * 所以 `props.turn` 是**对象**。旧实现写的是 `typeof props.turn === 'number'`，
+     * 判据永远为假 → 序号拿到 -1 → 选择器第一行就返回空值 → 组件每次渲染都返回
+     * `null`。注册是成功的（所以 `cards.tail = on`），但会话里**永远看不见**。
+     * 离线断言没抓到，是因为它自己造了一个 `turn: 3` 的数字 mock，与宿主真实形状不符。
+     *
+     * **为什么两种形状都兼容**：宿主 rc 版本之间这个字段变过（也见过直接把序号当
+     * owner 传的写法），而兼容成本只是一次 `typeof` 判断。取不到时返回 -1，
+     * 由调用方安静地不渲染——**不抛错**：页脚还挂着复制/重新生成，为一个只读摘要
+     * 把整条页脚炸掉是不划算的。
+     *
+     * @param {object|number} ownerTurn `TurnTailOwnerProps.turn`（`TurnLocation` 或数字）
+     * @returns {number} 轮次序号；无法识别时 -1
+     */
+    function turnNumberOf(ownerTurn) {
+      if (typeof ownerTurn === 'number') return Number.isFinite(ownerTurn) ? ownerTurn : -1
+      if (!ownerTurn || typeof ownerTurn !== 'object') return -1
+      /*
+       * `TurnLocation.turn` 是权威字段；`index` 只是防御性兜底（别的宿主版本见过）。
+       * 用 `??` 而不是 `||`：`turn: 0` 是合法序号，不能被当成「没给」。
+       */
+      const value = ownerTurn.turn ?? ownerTurn.index
+      return typeof value === 'number' && Number.isFinite(value) ? value : -1
+    }
+
+    /**
+     * 轮次切换时把展开态收回默认。
+     *
+     * 为什么需要这一步：摘要挂在 `conversation.chat.turnTail` 槽里，宿主按轮次
+     * 渲染同一个组件位置。React 可能**复用同一个实例**（同类型、同位置），于是
+     * 上一轮点开的「展开」会带进下一轮——用户看到一条新摘要莫名是全展开的。
+     * 用 `turn` 作依赖：序号一变就 `setExpanded(false)`，回到「前 2 条 + 还有 N 条」。
+     *
+     * 为什么不顺手在渲染里判断「行数变少就收起」：`open = collapsible && expanded`
+     * 已经保证了「没有藏起来的行时不会展开」，状态留着也没有任何可见影响；
+     * 多一个依赖 `[expanded, total]` 的 effect 只会在每次展开时白跑一遍。
+     */
+    function useTailExpandReset(turn, setExpanded) {
+      useEffect(function () {
+        setExpanded(false)
+      }, [turn])
+    }
+
+    /** 摘要的实际渲染：只在 `useChat` 存在时挂载，因此这里的 hook 顺序永远稳定。 */
+    function DispatchTailBody(props) {
+      /*
+       * 用 `turnNumberOf` 而不是 `typeof props.turn === 'number'`：后者对宿主真实的
+       * `TurnLocation` 对象恒为假，正是「注册成功但永远看不见」的根因（见上）。
+       * 拿到的一定是**数字**，下面 `locations.getTurn(turn)` 要的就是数字序号
+       * （`ChatLocationNodeIndex.getTurn(turn: number): readonly string[]`）；
+       * 直接把对象传进去会静默拿到空数组，同样是一条不报错的死路。
+       */
+      const turn = turnNumberOf(props && props.turn)
+      /*
+       * 展开态**放在这里而不是 `DispatchTail` 外层**（硬约束）：外层要先判
+       * `typeof useChat === 'function'` 才能决定渲染，那里加 `useState` 就是
+       * 有条件地调用 hook，宿主一旦某次不给 `useChat` 就会抛
+       * 「Rendered fewer hooks than expected」，把整条页脚（含复制/重新生成）炸掉。
+       * `DispatchTailBody` 本身只在有 `useChat` 时挂载，hook 数量与顺序天然稳定。
+       */
+      const [expanded, setExpanded] = useState(false)
+      const calls = props.useChat(function (snapshot) {
+        if (!snapshot || !snapshot.locations || turn < 0) return TAIL_NO_CALLS
+        const keys = snapshot.locations.getTurn(turn)
+        if (!Array.isArray(keys) || !keys.length) return TAIL_NO_CALLS
+        const out = []
+        for (const key of keys) {
+          const node = snapshot.nodes.get(key)
+          if (!node || node.kind !== 'tool-call' || !node.data || !node.data.root) continue
+          const root = node.data.root
+          const name = root.name || (root.call && root.call.name) || ''
+          if (CARD_TOOLS.indexOf(name) < 0) continue
+          // 卡片与摘要吃的是同一个 owner 形状：这里造一个**只读**的等价物。
+          out.push({
+            phase: 'kind' in root ? 'result' : (root.phase === 'preparing' ? 'preparing' : 'start'),
+            block: root,
+            toolName: name,
+            callId: root.callId,
+          })
+        }
+        return out.length ? out : TAIL_NO_CALLS
+      })
+      const view = cardTailViewOf(calls)
+      const total = view ? view.total : 0
+      useTailExpandReset(turn, setExpanded)
+      // 展开态只在「真的有藏起来的行」时才有意义；空摘要/少量行时它是死状态。
+      if (!view) return null
+      const hidden = total - CARD_TAIL_ROWS
+      const collapsible = hidden > 0
+      const open = collapsible && expanded
+      const shown = open ? view.rows : (collapsible ? view.rows.slice(0, CARD_TAIL_ROWS) : view.rows)
+      const settled = view.done === view.total && view.total > 0
+      // 头部圆点与卡片同一口径：全部结束用成功色，还有没跑的用业务色。
+      const headMeta = settled ? STATUS_META.done : STATUS_META.running
+      const moreLabel = open
+        ? fill(tr('card.tailLess'), { n: view.total })
+        : fill(tr('card.tailMore'), { n: hidden })
+      const moreAria = open
+        ? fill(tr('card.tailCollapseAria'), { n: CARD_TAIL_ROWS })
+        : fill(tr('card.tailExpandAria'), { n: view.total })
+      /*
+       * 一行一条任务：圆点 / 标题（单行省略，全文走 title）/ 状态文字。
+       * **横向排布**：状态贴在行尾、标题吃掉剩余宽度，用户竖着能数条数、
+       * 横着能配对状态，不需要像旧版那样四行垂直堆叠去拼一条信息。
+       */
+      const rowNodes = shown.map(function (row, index) {
+        const meta = cardDotOf(row.status)
+        const label = cardStatusLabel(row.status, row)
+        const full = row.title || tr('noTitle')
+        return h(
+          'div',
+          {
+            key: 'r' + index,
+            className: 'dsh-sa-dr-row',
+            'data-dispatch-tail-row': row.key || '',
+            'data-dispatch-tail-status': row.status || 'unknown',
+            // 单行省略的代价是标题会被截断：全文必须留在 title 属性里。
+            title: full,
+          },
+          h('span', { key: 'dot', className: 'dsh-sa-dr-dot', style: { color: meta.color }, 'aria-hidden': 'true' }),
+          h('span', { key: 'name', className: 'dsh-sa-dr-name', title: full }, full),
+          h('span', { key: 'state', className: 'dsh-sa-dr-state' }, label),
+        )
+      })
+      /*
+       * 展开后超过 12 条给滚动容器：摘要挂在轮次尾部，撑成两屏会把下面的
+       * 复制/重新生成推得很远，用户要滚很久才回到正常阅读位置。
+       */
+      const listClass = open && view.total > CARD_TAIL_MAX_VISIBLE
+        ? 'dsh-sa-dr-list dsh-sa-dr-list-scroll'
+        : 'dsh-sa-dr-list'
+      return h(
+        'div',
+        {
+          className: 'dsh-sa-dr',
+          role: 'group',
+          'data-dispatch-tail': 'true',
+          'data-dispatch-tail-turn': String(turn),
+          'data-dispatch-tail-expanded': open ? 'true' : 'false',
+          'aria-label': fill(tr('card.tailAria'), { n: view.total, done: view.done }),
+        },
+        h(
+          'div',
+          { className: 'dsh-sa-dr-head', 'data-dispatch-tail-head': 'true' },
+          h('span', {
+            key: 'dot',
+            className: 'dsh-sa-dr-dot',
+            style: { color: headMeta.color },
+            'aria-hidden': 'true',
+          }),
+          h('span', { key: 'title', className: 'dsh-sa-dr-title', title: view.title }, view.title),
+          h('span', {
+            key: 'ratio',
+            className: settled ? 'dsh-sa-dr-ratio dsh-sa-dr-ratio-done' : 'dsh-sa-dr-ratio',
+            'data-dispatch-tail-ratio': 'true',
+          }, view.done + '/' + view.total),
+          view.group
+            ? h('span', {
+              key: 'group',
+              className: 'dsh-sa-dr-group',
+              'data-dispatch-tail-group': view.group,
+              title: view.group,
+              'aria-label': view.group,
+            }, shortGroupOf(view.group))
+            : null,
+        ),
+        rowNodes.length
+          ? h('div', { className: listClass, role: 'list', 'data-dispatch-tail-list': 'true' }, rowNodes)
+          : null,
+        collapsible
+          ? h(
+              'button',
+              {
+                key: 'more',
+                type: 'button',
+                className: 'dsh-sa-dr-more',
+                'data-dispatch-tail-more': 'true',
+                'aria-expanded': open,
+                'aria-label': moreAria,
+                onClick: function () { setExpanded(function (value) { return !value }) },
+              },
+              moreLabel,
+              h('span', { key: 'caret', className: 'dsh-sa-dr-caret', 'aria-hidden': 'true' }, open ? '⌃' : '⌄'),
+            )
+          : null,
       )
     }
 
@@ -8782,9 +10603,194 @@ window.__ModuleLoader__.load({
     const name = 'dsh-mini-superagent'
     const inject = ['slots']
 
+    /**
+     * 卡片能力状态表（plans/14 §4.1 的 `cards` 字段）。
+     *
+     * 取值约定只有三种，**不要自行扩展**：
+     *   - `on`：注册成功；
+     *   - `error:<stage>`：`slot`（`inject` 抛）/ `register`（`slots.register` 抛）/ `parse`；
+     *   - **键不存在**：能力没出现（宿主没这条槽/服务，或还在加载）。这一条是重点，
+     *     它和「失败」是两件事：旧宿主不提供槽是正常降级，不该在自检页报红。
+     *     所以这里只做「有结论才落键」，绝不预填 `undefined` 之类的占位。
+     */
+    let cardStates = {}
+
+    /**
+     * 每个卡名**最后一次已上报**的状态串；用来判断「这次要不要再发一个 POST」。
+     *
+     * 为什么要签名而不是一个 `Set<卡名>`：HMR 或宿主重放时同一张卡可能再来一次回调，
+     * 卡名集合去重后「重放成失败」这种变化就永远报不出去；只按签名去重则
+     * 「状态没变 → 不报、状态变了 → 报一次」，两种噪声都挡住。
+     */
+    let cardSignatures = new Map()
+
+    /**
+     * 记录一张卡的注册结论，并在**结论变了**时补报一次 `client-ready`。
+     *
+     * 为什么必须补报：`slots.inject` 的回调是宿主导播的，可能晚于 `apply` 返回；
+     * `apply` 末尾那次 POST 只能报同步就绪的槽，此刻 `cards` 还是空对象。
+     * 少了这一下，`selfcheck` 里永远是 `{}`——等于没做可观测。
+     *
+     * 为什么同步注册不会多发一个 POST：`markCard` 在 `apply` 里被调用时，
+     * `readyPayload` 还没赋值（`postClientReady` 会直接返回 false），状态只是先记进
+     * `cardStates`，等末尾那次 POST 一并带出。异步回调才走真正的补报。
+     *
+     * @param {string} cardName `batch` / `report`
+     * @param {string} state `on` 或 `error:<stage>`
+     */
+    function markCard(cardName, state) {
+      cardStates[cardName] = state
+      if (cardSignatures.get(cardName) === state) return
+      cardSignatures.set(cardName, state)
+      postClientReady()
+    }
+
+    /**
+     * POST 一次自报体；失败不抛（宿主不在线、页面正在关，都不该影响卡片功能）。
+     * @returns {boolean} 是否真的发出去了
+     */
+    function postClientReady() {
+      try {
+        if (typeof fetch !== 'function' || typeof readyPayload !== 'function') return false
+        void fetch(CLIENT_READY_PATH, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...AUTH_HEADERS },
+          body: JSON.stringify(readyPayload()),
+        }).catch(function () { /* 宿主不在线时忽略 */ })
+        return true
+      } catch (error) {
+        return false
+      }
+    }
+
+    /** 自报体的拼装函数；`apply` 里赋值，补报时复用它重新拼 body（含最新 cards）。 */
+    let readyPayload = null
+
+    /**
+     * 每次 `apply` 清空一次上报状态。
+     *
+     * 为什么不能跨 `apply` 保留：HMR 换包后是**新的一次生命周期**，宿主手里的
+     * `client.ready` 会被这次的首次 POST 整体覆盖；若沿用上一轮的签名表，
+     * 「新实例里卡注册成功」会因为签名没变而被吞掉，自检页就停在上一轮的值上。
+     */
+    function resetClientReady() {
+      cardStates = {}
+      cardSignatures = new Map()
+      readyPayload = null
+    }
+
+    /**
+     * 注册派发卡视图（plans/12 §9.3）。
+     *
+     * 两个 wire 工具名**各注册一次**、指向**同一个组件**：`dispatch_launch` 与
+     * `dispatch_launch_many` 的返回形状不同（`task` vs `launched[]`），但归一化在
+     * `mergeBatchRows` 里做完了，分成两个组件只会变成两份要同步维护的渲染逻辑。
+     *
+     * 返回值只表示「这次调用有没有走完注册流程」，不表示宿主一定会渲染——
+     * 槽不存在时 `inject` 的回调不执行，此时我们**安静地什么都不做**（不 warn、
+     * 不重试、不兜底轮询）：旧宿主本来就没有这个能力，那是正常降级不是故障。
+     *
+     * @returns {boolean} 是否尝试过把视图注册进槽
+     */
+    function registerDispatchCard(ctx) {
+      if (!CARD_FEATURES.batch) return false
+      if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function' || typeof ctx.slots.register !== 'function') {
+        // 宿主连 `slots` 服务都没有：这是「能力没出现」，**不写** cards 键（plans/14 §4.1：
+        // 键不存在 ≠ 失败），否则自检页会把一次正常的旧宿主降级报成故障。
+        return false
+      }
+      let touched = false
+      for (const key of CARD_TOOLS) {
+        try {
+          ctx.slots.inject('tool.call.toolview', function () {
+            touched = true
+            // `key` 必须逐字等于 wire 工具名：keyed 槽按工具名分发，写成 camelCase
+            // 或带前缀都会静默失效（宿主找不到就回退通用行，没有任何报错）。
+            try {
+              ctx.slots.register({ name: 'tool.call.toolview', key: key }, DispatchBatchRow)
+            } catch (error) {
+              // `error:register`：槽提供了、我们也动手了，但宿主拒收。这是**失败**，
+              // 必须与「槽不存在」区分开——前者要修参数，后者什么都不用做。
+              markCard('batch', 'error:register')
+              // 只在真出错时 warn 一次：每张卡/每次重放都 warn 会把日志刷成噪声。
+              warnCardOnce(ctx, 'register:' + key, '派发卡视图注册失败（保持内置通用工具行）: ' + String(error))
+              return undefined
+            }
+            markCard('batch', 'on')
+            return undefined
+          })
+        } catch (error) {
+          // `error:slot`：`inject` 自己抛了（槽名不认、注册器内部报错），说明宿主提供了
+          // slots 服务但没有这条槽——同样是一次真实失败，不是「未提供」。
+          markCard('batch', 'error:slot')
+          warnCardOnce(ctx, 'inject:' + key, '派发卡视图注册失败（保持内置通用工具行）: ' + String(error))
+        }
+      }
+      if (touched) {
+        // 卡片已进图：样式节点由组件自己 ensureCardStyles()，这里不提前插——
+        // 一张卡都没渲染过就插一个空样式节点只是垃圾。
+        // 成功路径只记 info：正常情况不该在 warn 里留下「注册成功」这种噪音。
+        try {
+          if (ctx.logger && typeof ctx.logger.info === 'function') {
+            ctx.logger.info('%s 派发卡已注册到 tool.call.toolview', 'dsh-mini-superagent:')
+          }
+        } catch (error) { /* 日志失败不影响功能 */ }
+      }
+      return touched
+    }
+
+    /**
+     * 注册「本轮派发摘要」到 `conversation.chat.turnTail`。
+     *
+     * 为什么是 list 槽且要带 `id`：这条槽是 `kind: 'list'`（`ui-chat` 的
+     * `turn-tail` 注册把它声明成 `children: { 'conversation.chat.turnTail': { kind: 'list' } }`），
+     * 官方 `ui-deliverables` / `ui-plan` / `ui-action-cards` 都往同一个列表里塞自己的
+     * 一条。`id` 必须是我们自己的、稳定且唯一：重名会顶掉别家的条目（或是被顶掉），
+     * 而那种故障的表现是「另一个插件的卡片忽然没了」，极难归因。
+     *
+     * 和卡片一样：槽不存在是**正常降级**，不写 `cards` 键、不 warn。
+     *
+     * @returns {boolean} 是否尝试过注册（只表示走完了流程，不保证宿主一定渲染）
+     */
+    function registerDispatchTail(ctx) {
+      if (!CARD_FEATURES.batch) return false
+      if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function' || typeof ctx.slots.register !== 'function') {
+        return false
+      }
+      try {
+        ctx.slots.inject('conversation.chat.turnTail', function () {
+          try {
+            ctx.slots.register({
+              name: 'conversation.chat.turnTail',
+              id: 'dsh-mini-superagent/dispatch-tail',
+            }, DispatchTail)
+          } catch (error) {
+            /*
+             * 摘要注册失败**不碰** `cards.batch`：那个键说的是「派发卡」这件事，
+             * 把它的结论改写成失败，会让排障的人去查一张其实好端端的卡。
+             * 这里只 warn 一次，结论单独记在 `cards.tail` 上。
+             */
+            markCard('tail', 'error:register')
+            warnCardOnce(ctx, 'tail:register', '本轮派发摘要注册失败（不影响派发卡）: ' + String(error))
+            return undefined
+          }
+          markCard('tail', 'on')
+          return undefined
+        })
+      } catch (error) {
+        markCard('tail', 'error:slot')
+        warnCardOnce(ctx, 'tail:inject', '本轮派发摘要注册失败（不影响派发卡）: ' + String(error))
+        return false
+      }
+      return true
+    }
+
     function apply(ctx) {
       // 面板点行要打开子会话，这里留一份 Context 供渲染期读取。
       appContext = ctx
+
+      // 新一次生命周期：上一轮的 cards 结论与签名表都要作废（见 resetClientReady）。
+      resetClientReady()
 
       // 可选：接上 Client locale。失败只是保持内置中文。
       attachLocale(ctx)
@@ -8859,27 +10865,93 @@ window.__ModuleLoader__.load({
         }
       }, 'dsh-mini-superagent: target picker cleanup')
 
+      /*
+       * ── 派发卡（plans/12 P0）──
+       *
+       * 这一整块是**可选的投影**：宿主没提供 `tool.call.toolview`（旧版本）时，
+       * `ctx.slots.inject` 的回调永远不会执行，我们也就什么都不注册，会话里保持
+       * 内置的通用工具行。这正是 plans/14 §3.1 要求的 L3 降级，且**不许**用轮询
+       * 或自绘 DOM 兜底。
+       *
+       * 为什么外面还要包一层 try/catch：`inject` 在槽不存在时的行为由宿主决定
+       * （可能返回空，也可能抛）。卡片起不来必须只降自己——看板、输入框控件、
+       * @ 工作区源都在它之前注册完了，这里再抛出去就等于「多一张卡把整个 client
+       * 拖下水」，那是 plans/14 第一条原则明确禁止的。
+       */
+      const cardReady = registerDispatchCard(ctx)
+      if (cardReady) {
+        ctx.effect(function () {
+          return function () { disposeCardStyles() }
+        }, 'dsh-mini-superagent: dispatch card cleanup')
+      }
+
+      /*
+       * ── 轮次尾部派发摘要 ──
+       *
+       * 卡片挂在工具调用树里，必然随「工作详情」一起折叠；要让「这一轮派了什么」
+       * 在**不点任何东西**的情况下可见，只能走 `conversation.chat.turnTail`
+       * （Turn 尾部的动作条槽，不在 process 分组里）。详细理由见 DispatchTail 上方那段。
+       *
+       * 三种降级各自独立，谁倒霉都不牵连别人：
+       *   - 宿主没有这条槽 → `inject` 回调不执行，摘要不存在，卡片与看板照旧；
+       *   - 槽在但 `register` 抛 → 记 `error:register`、warn 一次，**不影响卡片**；
+       *   - 槽在、注册成功但渲染期拿不到 `useChat` → `DispatchTail` 返回 null，
+       *     宿主页脚只少一条回顾，绝不抛错（页脚抛错会把「复制/重新生成」一起弄没）。
+       *
+       * 与卡片一样，整块外面再包一层 try/catch：`inject` 在槽不存在时的行为由宿主
+       * 决定（可能安静返回，也可能抛）。多一条摘要不该把已注册的槽拖下水。
+       */
+      const tailReady = registerDispatchTail(ctx)
+      if (tailReady) {
+        ctx.effect(function () {
+          return function () { disposeCardStyles() }
+        }, 'dsh-mini-superagent: dispatch tail cleanup')
+      }
+
+      /*
+       * ── 报告卡（plans/13）的接入点 ──
+       *
+       * 报告卡还没实现（spike 未做），所以这里**什么都不注册**：不写 `cards.report`
+       * 键，也不注册占位组件。plans/14 §4.1 里「键不存在 = 能力没出现」正是这个状态，
+       * 自检页会显示「未提供」而不是报红。造一个假组件去点亮这个键，等于让排障的人
+       * 追一条根本不存在的卡片——比不做可观测更糟。
+       *
+       * 将来接入时只需要在**注册成功后**加一行 `markCard('report', 'on')`（失败按
+       * 阶段写 `error:slot` / `error:register` / `error:parse`），补报逻辑不用动。
+       */
+
       // 自报存活：客户端加载失败时页面上什么都看不到，这条记录是唯一能区分
       // 「模块没进图 / 进了图但 apply 抛错 / apply 跑完了」的证据。
       // 它只证明 apply 跑到了这里，不证明槽一定渲染成功——渲染要看面板本身。
-      try {
-        if (typeof fetch === 'function') {
-          void fetch('/dsh-mini-superagent/board/client-ready', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', ...AUTH_HEADERS },
-            body: JSON.stringify({
-              ok: true,
-              registered: [
-                'sidebar.panellist',
-                'main',
-                'conversation.input.left',
-                'conversation.chat.user.before',
-                '@workspace',
-              ],
-            }),
-          }).catch(function () { /* 宿主不在线时忽略 */ })
+      //
+      // `cards` 到这里**只可能**有同步出来的结论（例如这个宿主连 slots 都不给）。
+      // 异步就绪的那几张卡由 markCard() 在注册回调里补报，见 §4.1 的说明。
+      readyPayload = function () {
+        const cards = { ...cardStates }
+        return {
+          ok: true,
+          registered: [
+            'sidebar.panellist',
+            'main',
+            'conversation.input.left',
+            'conversation.chat.user.before',
+            '@workspace',
+            ...(cardReady || cards.batch === 'on' ? ['tool.call.toolview'] : []),
+            ...(tailReady || cards.tail === 'on' ? ['conversation.chat.turnTail'] : []),
+          ],
+          /*
+           * `cards`（plans/14 §4.1）：键**不存在** = 宿主没提供这个能力（正常降级，
+           * 旧宿主本来就没有 `tool.call.toolview`），不要当成失败。自检页按
+           * 「未提供」展示，排障时先看这两行再看 `registered`。
+           *
+           * 用扩展运算符而不是直接给 `cardStates`：上报是异步序列化的，
+           * 直接给引用会让 body 在补报前后指向同一个可变对象（调试时看着像「上一次
+           * 的包被改过」）。快照一份，代价是一个空对象的拷贝。
+           */
+          cards,
         }
-      } catch (error) { /* 自报失败不影响功能 */ }
+      }
+      postClientReady()
     }
 
     exports.name = name

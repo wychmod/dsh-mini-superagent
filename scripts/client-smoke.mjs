@@ -101,14 +101,44 @@ function depsEqual(a, b) {
   return true
 }
 
-/** 把元素树里的函数组件就地展开；嵌套组件都是无 hook 的展示组件。 */
+/**
+ * 把元素树里的函数组件就地展开。
+ *
+ * 嵌套组件**也需要自己的 hook store**：`DispatchTailBody` 就是一个带
+ * `useState` 的嵌套组件，如果每次渲染都给它一份全新的 `store`，展开态会在
+ * 每次 `update()` 时被重置成初值——断言就会永远看到「没展开」。
+ *
+ * 所以按「组件类型 + 在父组件里第几次出现」给一个稳定的 key，把 store 存在
+ * `paint` 上下文的 `nested` 表里（同一组件类型出现多次时下标区分，
+ * 顺序稳定的场景下等价于 React 的按位置复用）。`pending`/effect 由外层
+ * `paint` 统一提交——嵌套组件的 effect 也走同一张 effects 表。
+ */
+let childSeq = 0
 function resolveNode(node) {
   if (!node || typeof node !== 'object') return node
   if (Array.isArray(node)) return node.map(resolveNode)
   if (typeof node.type === 'function') {
     const saved = active
-    active = { cursor: 0, store: [], pending: [] }
+    const parent = saved
+    const key = String(node.type.name || 'anon') + '#' + (childSeq++)
+    let store = parent && parent.nested ? parent.nested.get(key) : undefined
+    if (!store) {
+      store = []
+      if (parent && parent.nested) parent.nested.set(key, store)
+    }
+    active = {
+      cursor: 0,
+      store,
+      pending: [],
+      nested: parent ? parent.nested : null,
+      effectsSink: parent ? parent.effectsSink : null,
+    }
     const out = resolveNode(node.type(node.props))
+    // 嵌套组件的 effect 交给外层 paint 一起提交（slot 按组件 key 前缀区分，
+    // 否则两个组件第 0 个 effect 会互相覆盖）。
+    if (parent && Array.isArray(active.pending)) {
+      for (const item of active.pending) parent.pending.push(Object.assign({}, item, { slot: key + ':' + item.slot }))
+    }
     active = saved
     return out
   }
@@ -117,14 +147,15 @@ function resolveNode(node) {
 }
 
 function mount(component, props) {
-  const root = { component, props: props || {}, store: [], effects: new Map(), tree: null }
+  const root = { component, props: props || {}, store: [], effects: new Map(), nested: new Map(), tree: null }
   root.tree = paint(root)
   return root
 }
 
 /** 渲染一次并提交 deps 变化的 effect（旧 effect 的清理先跑）。 */
 function paint(root) {
-  active = { cursor: 0, store: root.store, pending: [] }
+  childSeq = 0
+  active = { cursor: 0, store: root.store, pending: [], nested: root.nested, effectsSink: root.effects }
   const tree = resolveNode(root.component(root.props))
   const pending = active.pending
   active = null
@@ -155,14 +186,71 @@ function unmount(root) {
 const documentListeners = new Set()
 const windowListeners = new Set()
 
+/**
+ * 事件桩：既有原来那个「按名字记账」的 `Set`（几十条断言靠它数监听器），
+ * 又能真的把事件发给监听器。
+ *
+ * 为什么两套记账并存：现有断言用的是 `<type>:<函数名>` 字符串集合（例如
+ * 「下拉卸载后 document 监听归零」），改它的结构会让那些断言的前提变掉。
+ * 新增的 Map 只服务 `emit()`——派发卡要验「页面隐藏 → 恢复可见」，
+ * 没有真正的监听器调用就只能去读源码字符串，那不是运行时断言。
+ */
 function makeEventTarget(bucket) {
+  const handlers = new Map()
   return {
-    addEventListener(type, fn) { bucket.add(`${type}:${String(fn && fn.name)}`) },
-    removeEventListener(type, fn) { bucket.delete(`${type}:${String(fn && fn.name)}`) },
+    addEventListener(type, fn) {
+      bucket.add(`${type}:${String(fn && fn.name)}`)
+      if (!handlers.has(type)) handlers.set(type, new Set())
+      handlers.get(type).add(fn)
+    },
+    removeEventListener(type, fn) {
+      bucket.delete(`${type}:${String(fn && fn.name)}`)
+      const set = handlers.get(type)
+      if (set) set.delete(fn)
+    },
+    /** 同步调用某个类型的全部监听器（`visibilitychange` 等不需要事件对象）。 */
+    emit(type) {
+      const set = handlers.get(type)
+      if (!set) return 0
+      let called = 0
+      for (const fn of Array.from(set)) { fn({ type }); called += 1 }
+      return called
+    },
   }
 }
 
-const documentStub = Object.assign(makeEventTarget(documentListeners), { body: {}, visibilityState: 'visible' })
+/**
+ * 派发卡的共享样式节点（plans/12 §9.4）。
+ *
+ * 卡片把 `<style>` 插到 `document.head` 而不是自己的子树里，所以这里必须有一个能
+ * 记账的 head：断言「只插一次」「卸载后摘掉」都得看得见 appendChild/removeChild。
+ * `body` 仍然是个空对象：`copyText()` 的老式兜底会因此走不下去并返回 false，
+ * 现有「复制失败」的断言依赖这一点，不要给它补 appendChild。
+ */
+const styleNodes = []
+
+const documentStub = Object.assign(makeEventTarget(documentListeners), {
+  body: {},
+  visibilityState: 'visible',
+  head: {
+    appendChild(node) { styleNodes.push(node); node.parentNode = this },
+    removeChild(node) {
+      const at = styleNodes.indexOf(node)
+      if (at >= 0) styleNodes.splice(at, 1)
+      node.parentNode = null
+    },
+  },
+  createElement(tag) {
+    return {
+      tagName: String(tag).toUpperCase(),
+      attributes: {},
+      textContent: '',
+      style: {},
+      setAttribute(name, value) { this.attributes[name] = String(value) },
+      getAttribute(name) { return name in this.attributes ? this.attributes[name] : null },
+    }
+  },
+})
 globalThis.document = documentStub
 
 let mod = null
@@ -185,6 +273,10 @@ globalThis.window = Object.assign(makeEventTarget(windowListeners), {
 
 let boardResponse = null
 let getMode = 'ok'
+/* `GET /board?group=`（派发卡的窄口）专用的响应与三档模式：ok | fail | bad。 */
+let cardBoardResponse = { tasks: [] }
+let cardBoardMode = 'ok'
+const cardBoardRequests = () => requests.filter((item) => String(item.url).includes('?group='))
 let postReply = { ok: true, target: null }
 /** GET /board/retired 的响应；默认「宿主不提供」，需要时由各段自己覆盖。 */
 let retiredResponse = { ok: true, count: 0, dropped: 0, entries: [] }
@@ -222,6 +314,20 @@ globalThis.fetch = async (url, options) => {
   const body = options && options.body
   requests.push({ url, method, body })
   if (method === 'GET') {
+    /*
+     * 派发卡的窄口 `GET /board?group=`。**必须排在面板快照之前**判：
+     * 它们走同一个路径，靠查询串区分；判错会让卡片的请求落到面板那份 fixture 上，
+     * 于是「卡片只拉自己那一组」这条断言永远在拿全量数据自证。
+     */
+    if (String(url).includes('?group=')) {
+      if (cardBoardMode === 'fail') return { ok: false, status: 500, async json() { return { ok: false, error: 'boom' } } }
+      if (cardBoardMode === 'bad') return { ok: true, status: 200, async json() { return {} } }
+      return {
+        ok: true,
+        status: 200,
+        async json() { return JSON.parse(JSON.stringify(cardBoardResponse)) },
+      }
+    }
     if (getMode === 'fail') return { ok: false, status: 500, async json() { return { ok: false, error: 'boom' } } }
     // 统计路由先于快照判断：它和 /board 是两个路由，判错会把 stats 当成一次普通快照。
     if (String(url).includes('/board/stats')) {
@@ -338,6 +444,77 @@ const hasClass = (item, prefix) => Boolean(item) && Boolean(item.props)
 const buttonsOf = (tree) => findAll(tree, (item) => item && item.type === 'button')
 const buttonOf = (tree, label) => buttonsOf(tree).find((item) => text(item).includes(label))
 const tick = () => new Promise((r) => setTimeout(r, 0))
+
+/* ───────────────────────── 可控时钟（派发卡轮询专用） ───────────────────────── */
+
+/**
+ * 派发卡的轮询断言**必须**跑在可控时钟上。
+ *
+ * 这个仓库已经因为真实定时器出过三次随机红：2s/15s 的节奏用 `sleep` 去等，
+ * 要么等不够（CI 慢机器上偶发），要么等太久（每次跑测试多十几秒）。更糟的是
+ * 「退避阶梯」这类断言——真实时间下你没法证明「现在这次是 8s 那次而不是 4s 那次」，
+ * 只能证明「大约差不多」，那不是断言。
+ *
+ * 这里只接管 `setTimeout`/`clearTimeout`：**不接管 `Promise`**，所以 `await`
+ * 仍然正常工作（客户端里 `fetch` 是 async、`json()` 也是 async，都需要 microtask）。
+ * `advance(ms)` 只把到期的回调执行一次，并让 `await` 有机会跑完（`await tick()`）。
+ *
+ * 用法：
+ *   const clock = installClock()
+ *   try { ...const card = mount(...); await clock.flush(); clock.advance(2000)... }
+ *   finally { clock.uninstall() }
+ */
+function installClock() {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  let now = 0
+  let nextId = 1
+  const timers = new Map()
+  globalThis.setTimeout = function (fn, delay) {
+    const id = nextId++
+    timers.set(id, { fn, at: now + Math.max(0, Number(delay) || 0) })
+    return id
+  }
+  globalThis.clearTimeout = function (id) {
+    timers.delete(id)
+  }
+  return {
+    /** 当前虚拟时刻（毫秒）。 */
+    now: () => now,
+    /** 已排期的定时器数量——「卸载后不许再有定时器」用它断言。 */
+    size: () => timers.size,
+    /** 让所有已排期的微任务跑完（真实 macrotask，不受虚拟时钟影响）。 */
+    flush: async function () {
+      for (let i = 0; i < 8; i += 1) await new Promise((resolve) => realSetTimeout(resolve, 0))
+    },
+    /** 把时钟往前拨 `ms`，按到期顺序执行期间到期的定时器。 */
+    advance: function (ms) {
+      const target = now + Math.max(0, Number(ms) || 0)
+      // 上限保护：一个「回调里又立刻排一个 0ms 定时器」的 bug 会让这里死循环。
+      let guard = 0
+      while (guard < 1000) {
+        guard += 1
+        let dueId = null
+        let dueAt = Infinity
+        for (const [id, timer] of timers) {
+          if (timer.at <= target && timer.at < dueAt) { dueId = id; dueAt = timer.at }
+        }
+        if (dueId === null) break
+        const timer = timers.get(dueId)
+        timers.delete(dueId)
+        now = Math.max(now, timer.at)
+        timer.fn()
+      }
+      now = target
+      return guard
+    },
+    uninstall: function () {
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
+      timers.clear()
+    },
+  }
+}
 
 /* ───────────────────────── fixture（内联，单文件可跑） ───────────────────────── */
 
@@ -965,6 +1142,26 @@ check('自报的 registered 含三个槽与 @workspace',
     && ['sidebar.panellist', 'main', 'conversation.input.left', '@workspace']
       .every((name) => readyBody.registered.includes(name)),
   readyBody ? JSON.stringify(readyBody.registered) : 'null')
+check('自报的 registered 含 tool.call.toolview（宿主提供了这条槽）',
+  Boolean(readyBody) && Array.isArray(readyBody.registered)
+    && readyBody.registered.includes('tool.call.toolview'),
+  readyBody ? JSON.stringify(readyBody.registered) : 'null')
+check('自报的 cards.batch = on（plans/14 §4.1 的可观测字段）',
+  Boolean(readyBody) && readyBody.cards && readyBody.cards.batch === 'on',
+  readyBody ? JSON.stringify(readyBody.cards) : 'null')
+/*
+ * `cards` 是**必带字段**，哪怕一个结论都没有也是个空对象。
+ * 为什么单独守这条：`cards` 缺失与 `cards: {}` 在自检页上长得一样（都读不出键），
+ * 但前者说明「客户端还是旧版本、根本没这段代码」，后者说明「新代码跑了但卡没起来」——
+ * 排障时这两种情况要走的下一步完全不同。
+ */
+check('自报体必带 cards 字段（无结论时是空对象，不是缺字段）',
+  Boolean(readyBody) && readyBody.cards !== null && typeof readyBody.cards === 'object'
+    && !Array.isArray(readyBody.cards),
+  readyBody ? JSON.stringify(readyBody.cards) : 'null')
+check('当前基线里 report 卡还不存在，cards.report 键必须缺席（不是 error:slot）',
+  Boolean(readyBody) && readyBody.cards && !('report' in readyBody.cards),
+  readyBody ? JSON.stringify(readyBody.cards) : 'null')
 
 /* ═════════════════════ 看板面板 ═════════════════════ */
 
@@ -3505,6 +3702,1553 @@ check('抽屉给出「当前等待：接口改造（运行中）」',
   depDrawerText().includes('当前等待') && depDrawerText().includes('接口改造（运行中）'),
   depDrawerText().slice(0, 300))
 unmount(depHist)
+
+/* ═════════════════════ 派发卡（plans/12 P0） ═════════════════════ */
+
+/**
+ * 派发卡的离线证据（plans/12 §12.1 前 8 条 + plans/14 §5 G0 的降级一条）。
+ *
+ * 卡片是 `tool.call.toolview` 的 keyed 视图：宿主要先提供这个槽，`slots.inject`
+ * 的回调才会跑。所以这里**不改**共用的 `fakeCtx`（它的 `inject` 无条件回调，
+ * 已经用于断言其余四个槽），而是另起一个只给 `main` 的假 ctx 来验降级：
+ * 「宿主没有这条槽时，apply 不抛错、其余槽照常注册」。
+ */
+console.log('\n派发卡：三阶段 / 行模型 / 折叠 / 降级（plans/12 P0）')
+
+const cardRegs = () => registrations.filter((item) => item.options && item.options.name === 'tool.call.toolview')
+const cardReg = (key) => cardRegs().find((item) => item.options.key === key)
+
+check('tool.call.toolview 注册两次', cardRegs().length === 2, `实际 ${cardRegs().length}`)
+check('两个 key 分别是 dispatch_launch / dispatch_launch_many',
+  Boolean(cardReg('dispatch_launch')) && Boolean(cardReg('dispatch_launch_many')),
+  JSON.stringify(cardRegs().map((item) => item.options.key)))
+check('两个 key 指向同一个组件',
+  Boolean(cardReg('dispatch_launch')) && Boolean(cardReg('dispatch_launch_many'))
+    && cardReg('dispatch_launch').component === cardReg('dispatch_launch_many').component)
+check('视图组件是函数（可作为 keyed view 渲染）',
+  Boolean(cardReg('dispatch_launch')) && typeof cardReg('dispatch_launch').component === 'function')
+
+/** 造一条批量派发的 result content（宿主把工具返回对象序列化成 JSON 文本）。 */
+const cardContent = (payload) => [{ type: 'text', text: JSON.stringify(payload) }]
+
+function batchResultFixture() {
+  return {
+    group: 'g-m0abc',
+    launched: [
+      { task_id: 't-m0abc-1', title: '拆分 auth/types.js', status: 'running', depends_on: [] },
+      { task_id: 't-m0abc-2', title: '拆分 auth/index.js', status: 'done', depends_on: [] },
+      { task_id: 't-m0abc-3', title: '补 auth 回归测试', status: 'done', depends_on: ['t-m0abc-2'] },
+      { task_id: 't-m0abc-4', title: '更新调用点', status: 'queued', depends_on: [] },
+    ],
+    note: '全部结算后会收到一条批次汇总。',
+  }
+}
+
+function manyArgs(count) {
+  const tasks = []
+  for (let i = 0; i < count; i += 1) tasks.push({ title: '任务 ' + (i + 1), brief: 'b' + i })
+  return { tasks }
+}
+
+function manyPayload(count) {
+  const launched = []
+  for (let i = 0; i < count; i += 1) {
+    launched.push({ task_id: 't-many-' + (i + 1), title: '任务 ' + (i + 1), status: 'queued', depends_on: [] })
+  }
+  return { group: 'g-many', launched, note: '' }
+}
+
+const cardOf = (root) => findAll(root.tree, (item) => item && item.props && item.props['data-card-root'] === 'true')[0]
+const cardRowsOf = (root) => findAll(root.tree, (item) => item && item.props && typeof item.props['data-card-row'] === 'string')
+const cardButton = (root) => findAll(root.tree, (item) => item && item.props && item.props['data-card-more'] === 'true')[0]
+const reqCount = () => requests.length
+
+/* ── 阶段 1：preparing ── */
+
+let cardReqBefore = reqCount()
+const prepTree = mount(cardReg('dispatch_launch_many').component, {
+  phase: 'preparing',
+  callId: 'c-1',
+  toolName: 'dispatch_launch_many',
+  block: { name: 'dispatch_launch_many', args: {} },
+})
+// mount 只渲染一次；effect 已经跑过，这里再 update 一次确认重复渲染也不发请求。
+update(prepTree)
+const prepCard = cardOf(prepTree)
+check('preparing 渲染骨架', Boolean(prepCard)
+  && Boolean(findAll(prepTree.tree, (item) => item.props && item.props['data-card-skeleton'] === 'true')[0]),
+  prepCard ? 'missing skeleton' : 'missing card root')
+check('preparing 不发任何请求', reqCount() === cardReqBefore, `新增 ${reqCount() - cardReqBefore} 次`)
+check('preparing 标题是「正在准备派发…」', Boolean(prepCard) && text(prepCard).includes('正在准备派发'))
+check('preparing 不渲染行（参数还没到，不许假装知道几条）', cardRowsOf(prepTree).length === 0,
+  JSON.stringify(cardRowsOf(prepTree).map((item) => item.props['data-card-row'])))
+unmount(prepTree)
+
+/* ── 阶段 2：start ── */
+
+cardReqBefore = reqCount()
+const startTree = mount(cardReg('dispatch_launch_many').component, {
+  phase: 'start',
+  callId: 'c-2',
+  toolName: 'dispatch_launch_many',
+  block: { argsRaw: '{"tasks":[…]}', args: manyArgs(4) },
+})
+update(startTree)
+const startCard = cardOf(startTree)
+const startRows = cardRowsOf(startTree)
+check('start 用 args.tasks 出行（4 条）', startRows.length === 4, `实际 ${startRows.length}`)
+check('start 每行状态是「待定」', startRows.length === 4
+  && startRows.every((row) => text(row).includes('待定')),
+  JSON.stringify(startRows.map((row) => text(row).replace(/\s+/g, ' ').trim())))
+check('start 行顺序等于 args.tasks 顺序',
+  startRows.length === 4 && startRows.every((row, index) => text(row).includes('任务 ' + (index + 1))),
+  JSON.stringify(startRows.map((row) => row.props['data-card-row'])))
+check('start 不发请求', reqCount() === cardReqBefore, `新增 ${reqCount() - cardReqBefore} 次`)
+check('start 阶段 group 显示占位 —（不凭空编造）',
+  Boolean(startCard) && findAll(startCard, (item) => item.props && item.props['data-card-group'] === 'true').length === 1)
+check('start 阶段不显示「已完成/总数」（那个数字此刻是假的）',
+  !findAll(startTree.tree, (item) => item.props && item.props['data-card-ratio'] === 'true')[0])
+check('start 阶段头部标题写「派发 4 个任务」', Boolean(startCard) && text(startCard).includes('派发 4 个任务'))
+unmount(startTree)
+
+/* ── 阶段 3：result ── */
+
+const resultTree = mount(cardReg('dispatch_launch_many').component, {
+  phase: 'result',
+  callId: 'c-3',
+  toolName: 'dispatch_launch_many',
+  block: {
+    argsRaw: '{"tasks":[…]}',
+    args: manyArgs(4),
+    content: cardContent(batchResultFixture()),
+    isError: false,
+  },
+})
+update(resultTree)
+const resultCard = cardOf(resultTree)
+const resultRows = cardRowsOf(resultTree)
+const ratioNode = findAll(resultTree.tree, (item) => item.props && item.props['data-card-ratio'] === 'true')[0]
+check('result 渲染 group', Boolean(resultCard)
+  && Boolean(findAll(resultTree.tree, (item) => item.props && item.props['data-card-group'] === 'g-m0abc')[0]))
+check('result 渲染 2/4 聚合', Boolean(ratioNode) && text(ratioNode).trim() === '2/4',
+  ratioNode ? text(ratioNode) : 'missing')
+check('result 的状态词复用 TEXT[status.*]（运行中 / 已完成 / 排队中）',
+  resultRows.length === 4
+    && resultRows[0].props.children.some((item) => item && text(item) === '运行中')
+    && resultRows[1].props.children.some((item) => item && text(item) === '已完成')
+    && resultRows[3].props.children.some((item) => item && text(item) === '排队中'),
+  JSON.stringify(resultRows.map((row) => text(row).replace(/\s+/g, ' ').trim())))
+check('result 行带 task_id（便于对 dispatch_inspect）',
+  resultRows.length === 4 && resultRows[0].props['data-card-row'] === 't-m0abc-1')
+check('卡片根有 role=group 与 aria-label 聚合',
+  Boolean(resultCard) && resultCard.props.role === 'group'
+    && String(resultCard.props['aria-label']).includes('4') && String(resultCard.props['aria-label']).includes('2'),
+  resultCard ? String(resultCard.props['aria-label']) : 'missing')
+check('行容器 role=list、每行 role=listitem',
+  Boolean(findAll(resultTree.tree, (item) => item.props && item.props.role === 'list')[0])
+    && resultRows.length > 0 && resultRows.every((row) => row.props.role === 'listitem'))
+unmount(resultTree)
+
+/* ── 折叠：16 条 → 4 行 + 「还有 12 条」 ── */
+
+const foldTree = mount(cardReg('dispatch_launch_many').component, {
+  phase: 'result',
+  callId: 'c-4',
+  toolName: 'dispatch_launch_many',
+  block: { argsRaw: '', args: manyArgs(16), content: cardContent(manyPayload(16)), isError: false },
+})
+update(foldTree)
+check('16 条默认只渲染 4 行', cardRowsOf(foldTree).length === 4, `实际 ${cardRowsOf(foldTree).length}`)
+const moreBtn = cardButton(foldTree)
+check('折叠时给「展开全部 16 条」且带「还有 12 条」',
+  Boolean(moreBtn) && text(moreBtn).includes('展开全部 16 条') && text(moreBtn).includes('还有 12 条'),
+  moreBtn ? text(moreBtn) : 'missing')
+check('展开按钮是真 <button> 且 aria-expanded=false',
+  Boolean(moreBtn) && moreBtn.type === 'button' && moreBtn.props['aria-expanded'] === false)
+moreBtn.props.onClick()
+update(foldTree)
+check('点开后 16 行全在', cardRowsOf(foldTree).length === 16, `实际 ${cardRowsOf(foldTree).length}`)
+const collapseBtn = cardButton(foldTree)
+check('展开后 aria-expanded=true 且文案变「收起」',
+  Boolean(collapseBtn) && collapseBtn.props['aria-expanded'] === true && text(collapseBtn).trim() === '收起',
+  collapseBtn ? `${text(collapseBtn)} / aria=${collapseBtn.props['aria-expanded']}` : 'missing')
+collapseBtn.props.onClick()
+update(foldTree)
+check('再点一下收起回 4 行', cardRowsOf(foldTree).length === 4, `实际 ${cardRowsOf(foldTree).length}`)
+unmount(foldTree)
+
+/* ── 启动失败项占位 ── */
+
+const failFixture = {
+  group: 'g-part',
+  launched: [
+    { task_id: 't-part-1', title: '能跑的那条', status: 'running', depends_on: [] },
+    { title: '没成的那条', error: '第 2 项的 depends_on 必须是任务 id 数组', code: 'BAD_ARGS' },
+    { task_id: 't-part-3', title: '后面的那条', status: 'queued', depends_on: [] },
+  ],
+  note: '',
+}
+const failTree = mount(cardReg('dispatch_launch_many').component, {
+  phase: 'result',
+  callId: 'c-5',
+  toolName: 'dispatch_launch_many',
+  block: { argsRaw: '', args: manyArgs(3), content: cardContent(failFixture), isError: false },
+})
+update(failTree)
+const failRows = cardRowsOf(failTree)
+const failedRow = failRows[1]
+check('启动失败项占位不塌陷（仍是第 2 行）',
+  failRows.length === 3 && failedRow.props['data-card-row'] === 'failed-1'
+    && failedRow.props['data-card-row-index'] === '1',
+  JSON.stringify(failRows.map((row) => row.props['data-card-row'])))
+check('启动失败项显示「没能开始」而不是「失败」',
+  Boolean(failedRow) && failedRow.props.children.some((item) => item && text(item) === '没能开始'),
+  failedRow ? text(failedRow) : 'missing')
+check('启动失败项显示 code 与原因',
+  Boolean(failedRow) && text(failedRow).includes('BAD_ARGS') && text(failedRow).includes('depends_on 必须是任务 id 数组'),
+  failedRow ? text(failedRow).replace(/\s+/g, ' ') : 'missing')
+check('失败项之后的行没有错位（第 3 行仍是 t-part-3）',
+  failRows.length === 3 && failRows[2].props['data-card-row'] === 't-part-3',
+  failRows.length === 3 ? String(failRows[2].props['data-card-row']) : 'missing')
+check('失败项没有 task_id（不编一个假 id）',
+  Boolean(failedRow) && !findAll(failedRow, (item) => item.props && String(item.props.className || '').includes('dsh-sa-dc-id'))[0])
+unmount(failTree)
+
+/* ── 单条派发共用同一组件 ── */
+
+const singleTree = mount(cardReg('dispatch_launch').component, {
+  phase: 'result',
+  callId: 'c-6',
+  toolName: 'dispatch_launch',
+  block: {
+    argsRaw: '',
+    args: { title: '修登录超时', brief: 'b' },
+    content: cardContent({ task: { task_id: 't-single', title: '修登录超时', status: 'queued' }, depends_on: [], note: '' }),
+    isError: false,
+  },
+})
+update(singleTree)
+const singleCard = cardOf(singleTree)
+check('dispatch_launch 只有 1 行且标题用任务标题', cardRowsOf(singleTree).length === 1
+  && Boolean(singleCard) && text(singleCard).includes('修登录超时'),
+  singleCard ? text(singleCard).replace(/\s+/g, ' ') : 'missing')
+check('单条派发没有 group 时不显示批次信息（不编造）',
+  Boolean(singleCard) && !findAll(singleTree.tree, (item) => item.props && item.props['data-card-group'])[0])
+check('单条派发仍然给 0/1 聚合（有确定总数就可以算）',
+  Boolean(findAll(singleTree.tree, (item) => item.props && item.props['data-card-ratio'] === 'true')[0]))
+unmount(singleTree)
+
+/* ── 降级：content 不是 JSON ── */
+
+const junkTree = mount(cardReg('dispatch_launch_many').component, {
+  phase: 'result',
+  callId: 'c-7',
+  toolName: 'dispatch_launch_many',
+  block: { argsRaw: '', args: manyArgs(2), content: [{ type: 'text', text: '这不是 JSON，是纯文本' }], isError: false },
+})
+update(junkTree)
+const junkCard = cardOf(junkTree)
+const junkRows = cardRowsOf(junkTree)
+check('content 不是 JSON 时卡片仍然渲染（不吞整卡）', Boolean(junkCard))
+check('解析失败时标题与行标题照常', Boolean(junkCard) && text(junkCard).includes('派发 2 个任务')
+  && junkRows.length === 2 && text(junkRows[0]).includes('任务 1'),
+  junkCard ? text(junkCard).replace(/\s+/g, ' ') : 'missing')
+check('解析失败时状态显示「未知」而不是「待定」',
+  junkRows.length === 2 && junkRows.every((row) => text(row).includes('未知')),
+  JSON.stringify(junkRows.map((row) => text(row).replace(/\s+/g, ' ').trim())))
+check('解析失败时 footer 说明原因',
+  Boolean(findAll(junkTree.tree, (item) => item.props && item.props['data-card-unparsed'] === 'true')[0]))
+unmount(junkTree)
+
+/* ── 样式节点：只插一次，卸载归零后摘掉 ── */
+
+const cardStyleNodes = () => styleNodes.filter((node) => node.getAttribute && node.getAttribute('data-plugin-css') === 'dsh-mini-superagent/cards')
+check('预览页此时没有任何卡片样式残留（上一段全部卸载干净）', cardStyleNodes().length === 0,
+  `实际 ${cardStyleNodes().length}`)
+
+const twoA = mount(cardReg('dispatch_launch_many').component, {
+  phase: 'start', callId: 'c-8', toolName: 'dispatch_launch_many', block: { argsRaw: '', args: manyArgs(1) },
+})
+update(twoA)
+const twoB = mount(cardReg('dispatch_launch').component, {
+  phase: 'start', callId: 'c-9', toolName: 'dispatch_launch', block: { argsRaw: '', args: { title: 'x' } },
+})
+update(twoB)
+check('两张卡同时挂载时样式节点仍然只有一个', cardStyleNodes().length === 1, `实际 ${cardStyleNodes().length}`)
+const cardCss = cardStyleNodes()[0] ? cardStyleNodes()[0].textContent : ''
+check('样式只含主题 token（不写死主色）',
+  cardCss.includes('--dsw-alias-border-l1') && !/#3b82f6|#4d6bfe|#dc2626|#16a34a/.test(cardCss),
+  cardCss.slice(0, 160))
+check('样式尊重 prefers-reduced-motion', cardCss.includes('prefers-reduced-motion'))
+check('样式节点带固定的 data-plugin-css（排障时一眼看出是谁插的）',
+  Boolean(cardStyleNodes()[0])
+    && cardStyleNodes()[0].getAttribute('data-plugin-css') === 'dsh-mini-superagent/cards')
+unmount(twoA)
+check('卸掉一张卡不摘样式（还有人在用）', cardStyleNodes().length === 1, `实际 ${cardStyleNodes().length}`)
+unmount(twoB)
+check('最后一张卡卸载后样式节点被摘掉', cardStyleNodes().length === 0, `实际 ${cardStyleNodes().length}`)
+
+// 插件卸载兜底：卡片没走 React 卸载（宿主直接换包）时也不许留下孤儿节点。
+const leftover = mount(cardReg('dispatch_launch_many').component, {
+  phase: 'start', callId: 'c-10', toolName: 'dispatch_launch_many', block: { argsRaw: '', args: manyArgs(1) },
+})
+update(leftover)
+check('（前置）卡片挂载会重新插样式', cardStyleNodes().length === 1)
+const cardCleanup = disposers.find((item) => item.label === 'dsh-mini-superagent: dispatch card cleanup')
+check('插件挂载了派发卡的卸载清理 effect', Boolean(cardCleanup), JSON.stringify(disposers.map((item) => item.label)))
+if (cardCleanup) cardCleanup.dispose()
+check('插件卸载后样式节点被强制摘掉（没有孤儿 <style>）', cardStyleNodes().length === 0,
+  `实际 ${cardStyleNodes().length}`)
+unmount(leftover)
+
+/* ── 降级：宿主没有 tool.call.toolview ── */
+
+/**
+ * plans/14 §5 G0 的最后一条：假 ctx **不提供** `tool.call.toolview` 时
+ * `apply` 不抛错、其余槽照常注册。
+ *
+ * 这里用一个独立的 ctx（而不是改共用 fakeCtx）：共用 ctx 的注册表已经被上面
+ * 几十条断言引用，往里加「条件不回放」的开关会让那些断言的前提变成隐式的。
+ * 明确把「宿主根本没这条槽」建模成 `inject` 回调不执行，正是宿主在旧版本里的行为。
+ */
+const degradedRegs = []
+const degradedDisposers = []
+const degradedCtx = {
+  get(name) {
+    if (name === 'uiWorkspace') return uiWorkspace
+    if (name === 'inputTriggers') return inputTriggers
+    return undefined
+  },
+  effect(builder, label) {
+    const dispose = typeof builder === 'function' ? builder() : undefined
+    if (typeof dispose === 'function') degradedDisposers.push({ label, dispose })
+    return () => { if (typeof dispose === 'function') dispose() }
+  },
+  logger: { info() {}, warn() {} },
+  slots: {
+    // 旧宿主：这条槽不存在，宿主就不回放注册回调。其余槽照常。
+    inject(name, register) { if (name !== 'tool.call.toolview') register() },
+    register(options, component) {
+      degradedRegs.push({ options, component })
+      return () => {}
+    },
+  },
+}
+
+let degradeThrew = null
+try {
+  mod.apply(degradedCtx)
+} catch (error) {
+  degradeThrew = error
+}
+check('宿主没有 tool.call.toolview 时 apply 不抛错', degradeThrew === null,
+  degradeThrew ? String(degradeThrew) : 'ok')
+check('降级时其余槽照常注册（看板 / 图标 / 输入框控件 / 分隔线）',
+  ['sidebar.panellist', 'main', 'conversation.input.left', 'conversation.chat.user.before']
+    .every((name) => degradedRegs.some((item) => item.options && item.options.name === name)),
+  JSON.stringify(degradedRegs.map((item) => item.options && item.options.name)))
+check('降级时没有任何 tool.call.toolview 注册（保持内置通用行）',
+  !degradedRegs.some((item) => item.options && item.options.name === 'tool.call.toolview'))
+check('降级时「派发卡卸载清理」effect 不挂（没有卡就没有需要清的东西）',
+  !degradedDisposers.some((item) => item.label === 'dsh-mini-superagent: dispatch card cleanup'),
+  JSON.stringify(degradedDisposers.map((item) => item.label)))
+
+/*
+ * 降级也要可观测（plans/14 §4.1）：旧宿主下 `registered` 里**没有**
+ * `tool.call.toolview`，`cards` 里也**没有** `batch` 键——「键不存在」表示
+ * 「宿主没提供这个能力」，不是失败。自检页按「未提供」展示。
+ */
+const degradedReadyReqs = requests.filter((item) => item.url.endsWith('/client-ready'))
+let degradedReadyBody = null
+try { degradedReadyBody = JSON.parse(degradedReadyReqs[degradedReadyReqs.length - 1].body) } catch (error) { degradedReadyBody = null }
+check('降级时自报仍发出，但 registered 不含 tool.call.toolview',
+  Boolean(degradedReadyBody) && Array.isArray(degradedReadyBody.registered)
+    && !degradedReadyBody.registered.includes('tool.call.toolview'),
+  degradedReadyBody ? JSON.stringify(degradedReadyBody.registered) : 'null')
+check('降级时 cards 里没有 batch 键（「未提供」而不是「失败」）',
+  Boolean(degradedReadyBody) && degradedReadyBody.cards
+    && !('batch' in degradedReadyBody.cards),
+  degradedReadyBody ? JSON.stringify(degradedReadyBody.cards) : 'null')
+
+/* ── 异步卡的补报（plans/14 §4.1） ── */
+
+/*
+ * `cards` 是异步就绪的：`slots.inject` 的回调由宿主导播，完全可能晚于 `apply` 返回。
+ * `apply` 末尾那次 POST 只能报同步就绪的槽，所以**必须**再补一次 POST 覆盖同一个
+ * `client.ready`；不补的话自检页里永远是空对象，可观测等于没做。
+ *
+ * 下面三个 ctx 分别覆盖：排队的回调晚到、注册抛错、重复注册不重复上报。
+ * 它们都从 `apply` 的**第一次** POST 之后开始计数，因为前面几十条断言已经在
+ * 共用 `requests` 上留下了一堆记录。
+ */
+const readyCount = () => requests.filter((item) => item.url.endsWith('/client-ready')).length
+const lastReadyBody = () => {
+  const list = requests.filter((item) => item.url.endsWith('/client-ready'))
+  try { return JSON.parse(list[list.length - 1].body) } catch (error) { return null }
+}
+
+/**
+ * 造一个假的宿主 ctx：`inject` 的回调默认进队列，由测试手动「晚播」。
+ * `syncSlots` 里的槽名同步回放（模拟不同宿主的就绪时机）；
+ * `throwOnRegister` 只在**指定槽**注册时抛错（注入失败），不影响看板那些槽。
+ */
+function pendingCtx(options) {
+  const opts = options || {}
+  const queue = []
+  const regs = []
+  return {
+    queue,
+    regs,
+    get(name) {
+      if (name === 'uiWorkspace') return uiWorkspace
+      if (name === 'inputTriggers') return inputTriggers
+      return undefined
+    },
+    effect(builder, label) {
+      const dispose = typeof builder === 'function' ? builder() : undefined
+      return () => { if (typeof dispose === 'function') dispose() }
+    },
+    logger: { info() {}, warn() {} },
+    slots: {
+      inject(slotName, register) {
+        if (opts.syncSlots && opts.syncSlots.includes(slotName)) { register(); return }
+        queue.push({ slotName, register })
+      },
+      register(registerOptions) {
+        const thrown = opts.throwOnRegister
+        if (thrown && registerOptions && registerOptions.name === thrown.slot) {
+          throw new Error(thrown.message)
+        }
+        regs.push({ options: registerOptions })
+        return () => {}
+      },
+    },
+  }
+}
+
+/* ① 排队就绪：apply 之后第一次 POST 只报同步槽，晚到的注册必须补报 */
+
+const lateCtx = pendingCtx({ syncSlots: ['sidebar.panellist', 'main', 'conversation.input.left', 'conversation.chat.user.before'] })
+const beforeLate = readyCount()
+mod.apply(lateCtx)
+const afterApplyReady = readyCount()
+check('补报前：apply 只发一次 client-ready（此时卡还没就绪）',
+  afterApplyReady - beforeLate === 1, `实际 ${afterApplyReady - beforeLate}`)
+const firstLateBody = lastReadyBody()
+check('第一次 POST 的 cards 是空对象（异步卡还没结论）',
+  Boolean(firstLateBody) && firstLateBody.cards && Object.keys(firstLateBody.cards).length === 0,
+  firstLateBody ? JSON.stringify(firstLateBody.cards) : 'null')
+
+// 宿主现在才回调 tool.call.toolview：两张卡各注册一次，两次状态变化合并成一次补报。
+const pendingCardInjects = lateCtx.queue.filter((item) => item.slotName === 'tool.call.toolview')
+check('（前置）排队的 tool.call.toolview 回调有两个', pendingCardInjects.length === 2,
+  `实际 ${pendingCardInjects.length}`)
+for (const item of pendingCardInjects) item.register()
+const afterLate = readyCount()
+check('派发卡注册成功后补报了一次 client-ready',
+  afterLate - afterApplyReady === 1, `实际 ${afterLate - afterApplyReady} 次`)
+check('补报体里 cards.batch === on',
+  Boolean(lastReadyBody()) && lastReadyBody().cards.batch === 'on',
+  JSON.stringify(lastReadyBody() && lastReadyBody().cards))
+check('补报体的 registered 补上了 tool.call.toolview',
+  Boolean(lastReadyBody()) && lastReadyBody().registered.includes('tool.call.toolview'),
+  JSON.stringify(lastReadyBody() && lastReadyBody().registered))
+check('补报不把 report 编出来（它还不存在，键必须缺席）',
+  Boolean(lastReadyBody()) && !('report' in lastReadyBody().cards),
+  JSON.stringify(lastReadyBody() && lastReadyBody().cards))
+
+/* ② 只报一次：同一张卡再注册一遍（HMR/重放）不重复 POST */
+
+const beforeRepeat = readyCount()
+for (const item of pendingCardInjects) item.register()
+check('重复注册同一张卡不再重复补报（签名没变就不发）',
+  readyCount() === beforeRepeat, `实际多发 ${readyCount() - beforeRepeat} 次`)
+
+/*
+ * ②' 同步就绪：宿主在 `inject` 里直接回放（最常见的宿主行为）。
+ * 此时卡在 `apply` **内部**就注册好了，`markCard` 只把状态记进表（此刻 `readyPayload`
+ * 还没赋值，POST 会被自己挡掉），由 `apply` 末尾那一次 POST 一并带出去。
+ * 守这条是因为反过来写（先赋值 payload 再注册）会变成「每次加载发两个包」——
+ * 功能上看不出差别，但每次热重载都多一次写，属于没人会去查的那种退步。
+ */
+const syncCtx = pendingCtx({ syncSlots: ['sidebar.panellist', 'main', 'conversation.input.left', 'conversation.chat.user.before', 'tool.call.toolview'] })
+const beforeSync = readyCount()
+mod.apply(syncCtx)
+check('同步就绪时也只发一次 client-ready（不因为卡已注册就多报一遍）',
+  readyCount() - beforeSync === 1, `实际 ${readyCount() - beforeSync} 次`)
+check('同步就绪时那一次 POST 里就带上了 cards.batch = on',
+  Boolean(lastReadyBody()) && lastReadyBody().cards.batch === 'on',
+  JSON.stringify(lastReadyBody() && lastReadyBody().cards))
+
+/* ③ 注入失败：slots.register 抛错 → error:register，且只 warn 一次 */
+
+const throwCtx = pendingCtx({
+  syncSlots: ['sidebar.panellist', 'main', 'conversation.input.left', 'conversation.chat.user.before'],
+  // 只让卡片视图的注册抛错：看板那些槽注册失败会让这条断言的前提变成「apply 垮了」。
+  throwOnRegister: { slot: 'tool.call.toolview', message: 'duplicate key' },
+})
+const beforeThrow = readyCount()
+mod.apply(throwCtx)
+check('（前置）注册抛错的 ctx 也是先发一次基础上报',
+  readyCount() - beforeThrow === 1, `实际 ${readyCount() - beforeThrow}`)
+for (const item of throwCtx.queue.filter((entry) => entry.slotName === 'tool.call.toolview')) item.register()
+check('slots.register 抛错后 cards.batch === error:register',
+  Boolean(lastReadyBody()) && lastReadyBody().cards.batch === 'error:register',
+  JSON.stringify(lastReadyBody() && lastReadyBody().cards))
+check('注册失败时 registered 不谎报 tool.call.toolview 已就位',
+  Boolean(lastReadyBody()) && !lastReadyBody().registered.includes('tool.call.toolview'),
+  JSON.stringify(lastReadyBody() && lastReadyBody().registered))
+
+/* ④ 两种失败要分得开：inject 抛错是 error:slot，未提供则键不存在 */
+
+const slotThrowCtx = pendingCtx({
+  syncSlots: ['sidebar.panellist', 'main', 'conversation.input.left', 'conversation.chat.user.before'],
+})
+slotThrowCtx.slots.inject = function (slotName, register) {
+  if (slotName === 'tool.call.toolview') throw new Error('unknown slot')
+  register()
+}
+mod.apply(slotThrowCtx)
+check('inject 抛错时 cards.batch === error:slot（与「未提供」区分）',
+  Boolean(lastReadyBody()) && lastReadyBody().cards.batch === 'error:slot',
+  JSON.stringify(lastReadyBody() && lastReadyBody().cards))
+check('「未提供」与「error:slot」是可区分的两个状态',
+  // 降级 ctx 里 batch 键**不存在**；抛错 ctx 里是字符串 error:slot。
+  Boolean(degradedReadyBody) && !('batch' in degradedReadyBody.cards)
+    && Boolean(lastReadyBody()) && lastReadyBody().cards.batch === 'error:slot')
+
+/* ═════════════════════ 派发卡 P1：轮询 / 退避 / blocked / 行点击 ═════════════════════ */
+
+/**
+ * plans/12 §12.1 第 9–12 条 + P1 补充（13–16）的离线证据。
+ *
+ * 全部跑在**可控时钟**上（`installClock()`）：2s / 15s / 退避阶梯这些节奏如果
+ * 用真实时间等，既慢又不稳。时钟只接管 `setTimeout`/`clearTimeout`，`await`
+ * 照常工作，所以一次 `advance(2000)` 就能精确说出「到点的是哪一次 tick」。
+ */
+console.log('\n派发卡 P1：实时轮询 / 退避 / 旧宿主降级 / blocked / 行点击（plans/12 §8.4、§10、§7.2）')
+
+/** 造一个 `/board?group=` 的响应（形状与 Host 的 `boardSnapshot()` 一致）。 */
+function cardBoardPayload(tasks) {
+  return {
+    version: '0.9.1',
+    generatedAt: new Date().toISOString(),
+    concurrency: { running: 0, queued: 0, max: 6 },
+    counts: {},
+    archive_after_hours: 168,
+    tasks,
+    truncated: null,
+  }
+}
+
+/** 一行看板任务（只给卡片真正读的那几个字段）。 */
+function cardBoardRow(taskId, group, status, extra) {
+  return Object.assign({
+    task_id: taskId,
+    title: '任务 ' + taskId,
+    status,
+    group,
+    depends_on: [],
+    worker_session_id: 'dispatch-' + taskId,
+    elapsed_ms: 1000,
+    last_report: null,
+  }, extra || {})
+}
+
+const p1Args = () => ({ tasks: [{ title: '甲' }, { title: '乙' }, { title: '丙' }] })
+const p1Payload = (group, statuses) => ({
+  group,
+  launched: statuses.map((status, index) => ({
+    task_id: 't-p1-' + (index + 1),
+    title: '任务 ' + (index + 1),
+    status,
+    depends_on: [],
+  })),
+  note: '',
+})
+
+const p1Props = (payload, args) => ({
+  phase: 'result',
+  callId: 'c-p1',
+  toolName: 'dispatch_launch_many',
+  block: { argsRaw: '', args: args || p1Args(), content: cardContent(payload), isError: false },
+})
+
+const clock = installClock()
+try {
+  /* ── 9. 轮询 URL 带 ?group=，同一 group 的两个实例只发一次请求 ── */
+
+  cardBoardMode = 'ok'
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-p1-1', 'g-p1', 'running'),
+    cardBoardRow('t-p1-2', 'g-p1', 'queued'),
+    cardBoardRow('t-p1-3', 'g-p1', 'queued'),
+  ])
+  const twoCardsPayload = p1Payload('g-p1', ['queued', 'queued', 'queued'])
+  const beforeFeed = cardBoardRequests().length
+  const feedA = mount(cardReg('dispatch_launch_many').component, p1Props(twoCardsPayload))
+  update(feedA)
+  await clock.flush()
+  const afterA = cardBoardRequests().length - beforeFeed
+  check('轮询 URL 带 ?group=（卡片只拉自己那一组）',
+    afterA >= 1 && cardBoardRequests().slice(beforeFeed).every((item) => item.url.includes('?group=g-p1')),
+    JSON.stringify(cardBoardRequests().slice(beforeFeed).map((item) => item.url)))
+  const feedB = mount(cardReg('dispatch_launch_many').component, p1Props(twoCardsPayload))
+  update(feedB)
+  await clock.flush()
+  check('同一 group 的两张卡共享一个 feed（第二张不再发请求）',
+    cardBoardRequests().length - beforeFeed === afterA,
+    `第一张 ${afterA} 次，两张合计 ${cardBoardRequests().length - beforeFeed} 次`)
+
+  /* ── 10. 卸载后定时器清空、不再发请求 ── */
+
+  const beforeUnmount = cardBoardRequests().length
+  unmount(feedA)
+  check('卸掉一张卡后 feed 还活着（另一张还在用）',
+    cardBoardRequests().length - beforeUnmount >= 0 && clock.size() > 0,
+    `剩余定时器 ${clock.size()}`)
+  clock.advance(2100)
+  await clock.flush()
+  const duringShared = cardBoardRequests().length
+  check('共享 feed 在第二张卡还在时不停止轮询',
+    duringShared - beforeUnmount >= 1, `${beforeUnmount} → ${duringShared}`)
+  unmount(feedB)
+  check('最后一张卡卸载后不再有定时器（refcount 归零）', clock.size() === 0, `剩余 ${clock.size()}`)
+
+  /* ── 13. 全部结算后降频到 15s（可控时钟断言） ── */
+
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-p1-1', 'g-p1', 'running'),
+    cardBoardRow('t-p1-2', 'g-p1', 'queued'),
+    cardBoardRow('t-p1-3', 'g-p1', 'queued'),
+  ])
+  const settleCard = mount(cardReg('dispatch_launch_many').component, p1Props(twoCardsPayload))
+  update(settleCard)
+  await clock.flush()
+  let settleCount = cardBoardRequests().length
+  // 有未结算成员：2s 一次。
+  clock.advance(2000)
+  await clock.flush()
+  update(settleCard)
+  check('还有成员未结算时按 2s 轮询',
+    cardBoardRequests().length === settleCount + 1,
+    `2s 后新增 ${cardBoardRequests().length - settleCount} 次`)
+  // 全部结算：下一次请求应该被排到 15s 之后。先把这份「都结算了」的响应送进卡片
+  // （这一次 2s tick 是**上一轮**排好的，不算降频），再看之后 2s 内会不会再拉。
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-p1-1', 'g-p1', 'done'),
+    cardBoardRow('t-p1-2', 'g-p1', 'failed'),
+    cardBoardRow('t-p1-3', 'g-p1', 'cancelled'),
+  ])
+  clock.advance(2000)
+  await clock.flush()
+  update(settleCard)
+  check('（前置）全部结算的那一版已落进卡片',
+    cardRowsOf(settleCard).length === 3
+      && cardRowsOf(settleCard).every((row) => text(row).includes('已完成') || text(row).includes('失败') || text(row).includes('已取消')),
+    JSON.stringify(cardRowsOf(settleCard).map((row) => text(row).replace(/\s+/g, ' '))))
+  settleCount = cardBoardRequests().length
+  clock.advance(2000)
+  await clock.flush()
+  update(settleCard)
+  check('全部结算后降频：2s 内不再发请求（不是每 2s 死拉）',
+    cardBoardRequests().length === settleCount,
+    `2s 后新增 ${cardBoardRequests().length - settleCount} 次`)
+  clock.advance(13000)
+  await clock.flush()
+  update(settleCard)
+  check('全部结算后 15s 到点才再拉一次',
+    cardBoardRequests().length === settleCount + 1,
+    `到 15s 时共新增 ${cardBoardRequests().length - settleCount} 次`)
+
+  /* ── 11. 页面隐藏暂停、恢复可见立即拉一次 ── */
+
+  documentStub.visibilityState = 'hidden'
+  const beforeHidden = cardBoardRequests().length
+  clock.advance(20000)
+  await clock.flush()
+  update(settleCard)
+  check('页面隐藏时暂停轮询（不再发请求）',
+    cardBoardRequests().length === beforeHidden,
+    `隐藏期间新增 ${cardBoardRequests().length - beforeHidden} 次`)
+  check('页面隐藏时不留定时器（不是空转）', clock.size() === 0, `剩余 ${clock.size()}`)
+  documentStub.visibilityState = 'visible'
+  const beforeVisible = cardBoardRequests().length
+  const fired = documentStub.emit('visibilitychange')
+  await clock.flush()
+  update(settleCard)
+  check('（前置）document 上确实挂着 visibilitychange 监听', fired >= 1, `调用了 ${fired} 个监听器`)
+  check('恢复可见立即补一次（不等下一个 tick）',
+    cardBoardRequests().length === beforeVisible + 1,
+    `恢复后新增 ${cardBoardRequests().length - beforeVisible} 次`)
+  unmount(settleCard)
+
+  /* ── 12. 请求失败保留上次状态；连续 3 次后「状态可能已过期」 ── */
+
+  cardBoardMode = 'ok'
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-p1-1', 'g-p2', 'running'),
+    cardBoardRow('t-p1-2', 'g-p2', 'queued'),
+    cardBoardRow('t-p1-3', 'g-p2', 'queued'),
+  ])
+  const failPayload = p1Payload('g-p2', ['queued', 'queued', 'queued'])
+  const failCard = mount(cardReg('dispatch_launch_many').component, p1Props(failPayload))
+  update(failCard)
+  await clock.flush()
+  update(failCard)
+  check('（前置）中断前已拿到 running 状态',
+    cardRowsOf(failCard).some((row) => text(row).includes('运行中')),
+    JSON.stringify(cardRowsOf(failCard).map((row) => text(row).replace(/\s+/g, ' '))))
+  cardBoardMode = 'fail'
+  // 三次失败分别发生在 2s / 4s / 8s（退避阶梯），不能一次 advances 到底。
+  for (let i = 0; i < 3; i += 1) {
+    clock.advance(30000)
+    await clock.flush()
+    update(failCard)
+  }
+  check('请求失败后保留上次状态（行没有被删掉）',
+    cardRowsOf(failCard).length === 3 && cardRowsOf(failCard).some((row) => text(row).includes('运行中')),
+    JSON.stringify(cardRowsOf(failCard).map((row) => text(row).replace(/\s+/g, ' '))))
+  check('连续 3 次失败后出现「状态可能已过期」',
+    findAll(failCard.tree, (item) => item.props && item.props['data-card-stale'] === 'true')
+      .some((item) => text(item).includes('状态可能已过期')),
+    text(cardOf(failCard) || {}))
+  unmount(failCard)
+
+  /* ── 14. 旧宿主模拟：忽略 group 返回全量快照 → 自行过滤、成员不全时停表 ── */
+
+  cardBoardMode = 'ok'
+  const legacyPayload = p1Payload('g-legacy', ['queued', 'queued', 'queued'])
+  /*
+   * 旧宿主的 `/board` 忽略 `?group=`：返回的是**全量**快照，而且被 200 条上限截断了。
+   * 这一批 3 个成员里只有 2 个还在快照里（第 3 个被别的批次挤掉了）。
+   */
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-p1-1', 'g-legacy', 'running'),
+    cardBoardRow('t-p1-2', 'g-legacy', 'done'),
+    cardBoardRow('t-other-1', 'g-someone-else', 'running'),
+    cardBoardRow('t-other-2', 'g-someone-else', 'queued'),
+  ])
+  const legacyCard = mount(cardReg('dispatch_launch_many').component, p1Props(legacyPayload))
+  update(legacyCard)
+  await clock.flush()
+  update(legacyCard)
+  const legacyRows = cardRowsOf(legacyCard)
+  check('旧宿主返回全量快照时前端自行按 group 过滤（不把别批次的行画进来）',
+    legacyRows.length === 3 && !text(legacyCard.tree).includes('任务 t-other-1')
+      && !text(legacyCard.tree).includes('g-someone-else'),
+    `行数 ${legacyRows.length}`)
+  check('旧宿主截断导致成员不全时标「状态为派发时快照」',
+    findAll(legacyCard.tree, (item) => item.props && item.props['data-card-snapshot'] === 'true')
+      .some((item) => text(item).includes('状态为派发时快照')),
+    text(cardOf(legacyCard) || {}))
+  check('成员不全时停止轮询（定时器已摘掉）', clock.size() === 0, `剩余 ${clock.size()}`)
+  const beforeFrozen = cardBoardRequests().length
+  clock.advance(20000)
+  await clock.flush()
+  check('停表之后确实不再请求（不拿截断快照冒充实时状态）',
+    cardBoardRequests().length === beforeFrozen,
+    `多发了 ${cardBoardRequests().length - beforeFrozen} 次`)
+  unmount(legacyCard)
+
+  /*
+   * 晚挂载的第二张卡不能把 feed 误判成「成员不全」。
+   *
+   * 这条守的是上面 `expectedProbes` 的存在理由：`expected` 如果只在建条目那天取一次，
+   * 第二张卡（或同一张卡的第一次渲染在 `launched` 补齐之前）报的行数是 0，之后
+   * 就再也追不上——于是宿主的正常响应被当成「旧宿主截断」，卡直接停表。
+   * 这是**假降级**：它比不降级更糟，因为用户看到的是一张永远停在派发快照的卡。
+   */
+  cardBoardMode = 'ok'
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-late-1', 'g-late', 'running'),
+    cardBoardRow('t-late-2', 'g-late', 'queued'),
+    cardBoardRow('t-late-3', 'g-late', 'queued'),
+  ])
+  const latePayload = {
+    group: 'g-late',
+    launched: [
+      { task_id: 't-late-1', title: '甲', status: 'queued', depends_on: [] },
+      { task_id: 't-late-2', title: '乙', status: 'queued', depends_on: [] },
+      { task_id: 't-late-3', title: '丙', status: 'queued', depends_on: [] },
+    ],
+    note: '',
+  }
+  const lateA = mount(cardReg('dispatch_launch_many').component, p1Props(latePayload))
+  update(lateA)
+  await clock.flush()
+  // 第二张卡晚到：此时第一张已经把 feed 建好、expected = 3。
+  const lateB = mount(cardReg('dispatch_launch_many').component, p1Props(latePayload))
+  update(lateB)
+  await clock.flush()
+  update(lateB)
+  check('同 group 的第二张卡直接拿到已有数据（不重复请求）',
+    cardRowsOf(lateB).some((row) => text(row).includes('运行中')),
+    JSON.stringify(cardRowsOf(lateB).map((row) => text(row).replace(/\s+/g, ' '))))
+  check('第二张卡不会把 feed 误判成「成员不全」（没有冻结标记）',
+    !findAll(lateB.tree, (item) => item.props && item.props['data-card-snapshot'] === 'true').length)
+  unmount(lateA)
+  unmount(lateB)
+
+  /* ── 15. blocked_by 行显示「等 t-…」而不是「排队中」 ── */
+
+  cardBoardMode = 'ok'
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-p1-1', 'g-dep', 'running'),
+    cardBoardRow('t-p1-2', 'g-dep', 'queued', { blocked_by: 't-p1-1', blocked_reason: 'running' }),
+    cardBoardRow('t-p1-3', 'g-dep', 'blocked', { blocked_reason: '前置 t-p1-2 失败' }),
+  ])
+  const depPayload = p1Payload('g-dep', ['running', 'queued', 'queued'])
+  const depCard = mount(cardReg('dispatch_launch_many').component, p1Props(depPayload))
+  update(depCard)
+  await clock.flush()
+  update(depCard)
+  const depRows = cardRowsOf(depCard)
+  check('blocked_by 行显示「等 t-…」（不是「排队中」）',
+    Boolean(depRows[1]) && text(depRows[1]).includes('等 t-p1-1') && !text(depRows[1]).includes('排队中'),
+    depRows[1] ? text(depRows[1]).replace(/\s+/g, ' ') : 'missing')
+  check('blocked 行显示「已阻塞」+ 一行 blocked_reason',
+    Boolean(depRows[2]) && text(depRows[2]).includes('已阻塞') && text(depRows[2]).includes('前置 t-p1-2 失败'),
+    depRows[2] ? text(depRows[2]).replace(/\s+/g, ' ') : 'missing')
+
+  /* ── 行点击准入：已结算/已退休的行不可点 ── */
+
+  const openedBeforeCardClick = opened.length
+  const runningRow = depRows[0]
+  check('运行中的行可点（拿到 worker_session_id 才给点击）',
+    runningRow.props['data-card-open'] === 'true' && typeof runningRow.props.onClick === 'function')
+  runningRow.props.onClick()
+  await clock.flush()
+  check('点可点的行 → uiWorkspace.openSession 拿到那个子会话',
+    opened.length === openedBeforeCardClick + 1
+      && opened[opened.length - 1] === 'dispatch-t-p1-1',
+    JSON.stringify(opened.slice(-2)))
+
+  // 第 2 行（queued + blocked_by）仍可点：它在等前置，子会话还活着。
+  check('被挡但还在排队的行可点（等前置 ≠ 已结算）',
+    depRows[1].props['data-card-open'] === 'true' && typeof depRows[1].props.onClick === 'function',
+    `data-card-open=${String(depRows[1].props['data-card-open'])}`)
+  depRows[1].props.onClick()
+  await clock.flush()
+  check('点被挡的行 → 同样走 openSession',
+    opened.length === openedBeforeCardClick + 2 && opened[opened.length - 1] === 'dispatch-t-p1-2',
+    JSON.stringify(opened.slice(-2)))
+  check('blocked（已结算）行不可点（它不会自己再跑起来）',
+    depRows[2].props.onClick === undefined && depRows[2].props['data-card-open'] === undefined,
+    `onClick=${String(typeof depRows[2].props.onClick)}`)
+
+  /* ── 16. 已结算行的点击不触发 openSession ── */
+
+  unmount(depCard)
+  cardBoardMode = 'ok'
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-done-a', 'g-settled', 'done'),
+    cardBoardRow('t-done-b', 'g-settled', 'failed', { error_code: 'E_BOOM' }),
+    cardBoardRow('t-done-c', 'g-settled', 'cancelled', { cancel_reason: 'dependency_failed' }),
+  ])
+  const settledPayload = {
+    group: 'g-settled',
+    launched: [
+      { task_id: 't-done-a', title: '已完成的那条', status: 'running', depends_on: [] },
+      { task_id: 't-done-b', title: '失败的那条', status: 'running', depends_on: [] },
+      { task_id: 't-done-c', title: '被连坐的那条', status: 'running', depends_on: [] },
+    ],
+    note: '',
+  }
+  const settledCard = mount(cardReg('dispatch_launch_many').component, p1Props(settledPayload))
+  update(settledCard)
+  await clock.flush()
+  update(settledCard)
+  const settledRows = cardRowsOf(settledCard)
+  const openedBeforeSettled = opened.length
+  for (const row of settledRows) {
+    if (typeof row.props.onClick === 'function') row.props.onClick()
+  }
+  await clock.flush()
+  check('已结算行的点击不触发 openSession（点不开已完成/失败/取消的行）',
+    opened.length === openedBeforeSettled,
+    `多开了 ${opened.length - openedBeforeSettled} 次`)
+  check('已结算行干脆不挂 onClick（连指针态都不给）',
+    settledRows.every((row) => row.props.onClick === undefined && row.props['data-card-open'] === undefined),
+    JSON.stringify(settledRows.map((row) => Boolean(row.props.onClick))))
+  check('失败行给出 error_code',
+    Boolean(settledRows[1]) && text(settledRows[1]).includes('E_BOOM'),
+    settledRows[1] ? text(settledRows[1]).replace(/\s+/g, ' ') : 'missing')
+  check('已取消行区分「前置未执行」而不是「人取消」',
+    Boolean(settledRows[2]) && text(settledRows[2]).includes('前置没成，未执行')
+      && !text(settledRows[2]).includes('人取消'),
+    settledRows[2] ? text(settledRows[2]).replace(/\s+/g, ' ') : 'missing')
+  unmount(settledCard)
+
+  /* ── 人取消：没有 dependency 原因时显示「人取消」 ── */
+
+  cardBoardResponse = cardBoardPayload([cardBoardRow('t-human', 'g-human', 'cancelled', { cancel_reason: 'user' })])
+  const humanCard = mount(cardReg('dispatch_launch_many').component, p1Props({
+    group: 'g-human',
+    launched: [{ task_id: 't-human', title: '人取消的任务', status: 'running', depends_on: [] }],
+    note: '',
+  }))
+  update(humanCard)
+  await clock.flush()
+  update(humanCard)
+  check('人取消显示「人取消」（与前置未执行分开）',
+    text(humanCard.tree).includes('人取消') && !text(humanCard.tree).includes('前置没成'),
+    text(cardOf(humanCard) || {}).replace(/\s+/g, ' '))
+  unmount(humanCard)
+
+  /* ── 降级：/board 返回形状不对时保留快照、不崩 ── */
+
+  cardBoardMode = 'bad'
+  const badCard = mount(cardReg('dispatch_launch_many').component, p1Props({
+    group: 'g-bad',
+    launched: [
+      { task_id: 't-bad-1', title: '甲', status: 'running', depends_on: [] },
+      { task_id: 't-bad-2', title: '乙', status: 'queued', depends_on: [] },
+      { task_id: 't-bad-3', title: '丙', status: 'queued', depends_on: [] },
+    ],
+    note: '',
+  }))
+  update(badCard)
+  await clock.flush()
+  update(badCard)
+  check('响应形状不对时卡片仍渲染、状态用派发快照（不白屏）',
+    cardRowsOf(badCard).length === 3 && text(badCard.tree).includes('运行中'),
+    cardOf(badCard) ? text(cardOf(badCard)).replace(/\s+/g, ' ') : 'missing')
+  unmount(badCard)
+  cardBoardMode = 'ok'
+
+  /* ── 页面隐藏的全部 feed 都要停表（不是只停最后一个） ── */
+
+  cardBoardResponse = cardBoardPayload([
+    cardBoardRow('t-v-1', 'g-vis-a', 'running'),
+    cardBoardRow('t-v-2', 'g-vis-b', 'running'),
+  ])
+  const visA = mount(cardReg('dispatch_launch_many').component, p1Props({
+    group: 'g-vis-a', launched: [{ task_id: 't-v-1', title: 'A', status: 'running', depends_on: [] }], note: '',
+  }))
+  update(visA)
+  await clock.flush()
+  const visB = mount(cardReg('dispatch_launch_many').component, p1Props({
+    group: 'g-vis-b', launched: [{ task_id: 't-v-2', title: 'B', status: 'running', depends_on: [] }], note: '',
+  }))
+  update(visB)
+  await clock.flush()
+  documentStub.visibilityState = 'hidden'
+  documentStub.emit('visibilitychange')
+  check('页面隐藏时所有 feed 一起停表（不是一个 group 一个监听器各停各的）',
+    clock.size() === 0, `剩余 ${clock.size()}`)
+  documentStub.visibilityState = 'visible'
+  const beforeResume = cardBoardRequests().length
+  documentStub.emit('visibilitychange')
+  await clock.flush()
+  check('恢复可见时每个 group 各补拉一次',
+    cardBoardRequests().length === beforeResume + 2,
+    `新增 ${cardBoardRequests().length - beforeResume} 次`)
+  unmount(visA)
+  unmount(visB)
+} finally {
+  clock.uninstall()
+  documentStub.visibilityState = 'visible'
+  cardBoardMode = 'ok'
+}
+
+/* ── package.json 的注入清单 ── */
+
+const pkg = JSON.parse(readFileSync(resolve(HERE, '..', 'dsh-mini-superagent', 'package.json'), 'utf8'))
+const injectList = (pkg.dsh && pkg.dsh.client && Array.isArray(pkg.dsh.client.inject)) ? pkg.dsh.client.inject : []
+check('package.json 的 dsh.client.inject 含 @deepseek-ai/dsh-client-ui-tool',
+  injectList.includes('@deepseek-ai/dsh-client-ui-tool'), JSON.stringify(injectList))
+
+/* ═════════════ 本轮派发摘要（常驻可见，不被工作详情折叠） ═════════════ */
+
+/*
+ * 为什么这一节必须存在：派发卡挂在 `tool.call.toolview`，那是工具调用树里的原子
+ * 视图，必然随宿主的「工作详情」一起折叠——用户得先点开才看得见派了什么，正是
+ * 要修的症状。所以真正的修复是 `conversation.chat.turnTail` 上的这条摘要，
+ * 它落在 Turn 页脚（与「复制/重新生成」同层），**不在 process 分组里**。
+ *
+ * 这里断言的核心是**默认可见性**：不点任何东西、不展开任何折叠，关键信息
+ * （批次标题 + 已完成/总数 + 前 2 条任务标题与状态）就已经在树里。
+ */
+console.log('\n本轮派发摘要：常驻可见 / 与卡片同源 / 降级（不被折叠）')
+
+const tailRegs = () => registrations.filter((item) =>
+  item.options && item.options.name === 'conversation.chat.turnTail')
+const tailReg = () => tailRegs()[0]
+
+check('conversation.chat.turnTail 注册一次', tailRegs().length === 1, `实际 ${tailRegs().length}`)
+check('摘要注册带自己的稳定 id（不与 deliverables / plan / action-cards 抢同一条）',
+  Boolean(tailReg()) && tailReg().options.id === 'dsh-mini-superagent/dispatch-tail',
+  tailReg() ? String(tailReg().options.id) : 'missing')
+check('摘要 id 与另外三个已知占用者都不同',
+  Boolean(tailReg()) && ![
+    '@deepseek-ai/dsh-client-ui-action-cards',
+    '@deepseek-ai/dsh-client-ui-deliverables',
+    '@deepseek-ai/dsh-client-ui-plan',
+  ].includes(tailReg().options.id),
+  tailReg() ? String(tailReg().options.id) : 'missing')
+
+/**
+ * 宿主 `TurnTailOwnerProps.turn` 的**真实形状**：`TurnLocation` 对象，不是数字。
+ *
+ * 权威定义（`app.asar` 内 `@deepseek-ai/dsh-client-ui-chat/src/client/contract/slots.ts`）：
+ *
+ *     export interface TurnTailOwnerProps {
+ *       turn: TurnLocation
+ *       seq: number
+ *       openFile: (path: string) => void
+ *     }
+ *
+ * 而 `TurnLocation`（`@deepseek-ai/dsh-client-ui-conversation/src/client/contract/conversation.ts`）：
+ *
+ *     export interface TurnLocation {
+ *       readonly turn: number
+ *       readonly start: SessionEvent<'turn/start'> | undefined
+ *       readonly end: SessionEvent<'turn/end'> | undefined
+ *       readonly status: 'open' | 'closed' | 'unknown'
+ *       readonly steps: readonly StepLocation[]
+ *       readonly data: ConversationLocationDataStore<ConversationTurnDataMap>
+ *     }
+ *
+ * **这个 helper 就是当初那 bug 的教训**：旧断言喂的是 `turn: 3` 这种自造数字，
+ * 于是 `typeof props.turn === 'number'` 在测试里恒为真、在真宿主里恒为假——
+ * 589 项全绿但用户在会话里永远看不见摘要。凡是「宿主给的形状」，mock 必须照抄，
+ * 不许为了让被测代码通过而简化。
+ *
+ * @param {number} turn 轮次序号
+ * @returns {object} 与 `TurnLocation` 同形的只读对象
+ */
+function turnLocationOf(turn) {
+  return {
+    turn: turn,
+    start: { type: 'turn/start', seq: turn * 100, time: Date.now(), data: { turn: turn } },
+    end: { type: 'turn/end', seq: turn * 100 + 50, time: Date.now(), data: { turn: turn } },
+    status: 'closed',
+    steps: [],
+    // `data` 是 keyed reader（`get` / `source`）；摘要不读 Turn 级业务值，这里给空实现。
+    data: { get: () => undefined, source: () => ({ getSnapshot: () => undefined, subscribe: () => () => {} }) },
+  }
+}
+
+/**
+ * 造一个「本轮工具调用」的 useChat：宿主页脚给的是 `{ turn, seq, openFile }`，
+ * 其中 `turn` 是上面那个 `TurnLocation` 对象。
+ *
+ * `locations.getTurn(turn)` 要的是**数字序号**（`ChatLocationNodeIndex`：
+ * `getTurn(turn: number): readonly string[]`），所以 stub 这里按数字比较 ——
+ * 与宿主一致；生产代码必须先把对象里的 `.turn` 取出来再传进来。
+ *
+ * `nodes` 是一组 `{ key, name, root }`；只有 `tool-call` 节点会被扫到——
+ * 这正是生产代码里那条判据，用假快照也守得住。
+ */
+function chatStubFor(turn, nodes) {
+  const store = new Map(nodes.map((node) => [node.key, {
+    kind: 'tool-call',
+    data: { root: node.root },
+  }]))
+  const keys = nodes.map((node) => node.key)
+  return {
+    snapshot: {
+      locations: { getTurn: (t) => (t === turn ? keys : []) },
+      nodes: { get: (key) => store.get(key) },
+      order: keys,
+    },
+  }
+}
+
+/** 一条 useChat：直接拿假快照喂选择器（等价宿主的 selector hook）。 */
+function useChatOf(stub) {
+  return function useChat(selector) { return selector(stub.snapshot) }
+}
+
+/** 一条真正的批量工具调用节点（result 阶段，与卡片看到的是同一份数据）。 */
+function tailCall(key, name, args, content) {
+  return {
+    key,
+    name,
+    root: {
+      kind: 'tool-result',
+      callId: key,
+      name,
+      seq: 10,
+      time: Date.now(),
+      args,
+      call: { name, argsRaw: JSON.stringify(args) },
+      content,
+      isError: false,
+      subCalls: [],
+    },
+  }
+}
+
+const tailCard = tailReg() ? tailReg().component : null
+check('摘要是函数组件（可作为 list 条目渲染）', typeof tailCard === 'function')
+
+/* ── ① 默认可见：不点任何东西，标题 / 聚合 / 前 2 行都在 ── */
+
+const tailArgs = manyArgs(4)
+const tailStub = chatStubFor(3, [tailCall('c-tail-1', 'dispatch_launch_many', tailArgs, cardContent(batchResultFixture()))])
+const tailTree = typeof tailCard === 'function'
+  // `turn` 传**宿主真实形状**（对象），不是数字：见 `turnLocationOf` 的注释。
+  ? mount(tailCard, { turn: turnLocationOf(3), seq: 99, useChat: useChatOf(tailStub) })
+  : null
+const tailRoot = tailTree
+  ? findAll(tailTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0]
+  : null
+check('摘要默认渲染（turnTail 槽里不给 useChat 也不白屏）', Boolean(tailRoot),
+  tailTree ? text(tailTree.tree).slice(0, 200) : 'missing component')
+
+const tailBody = tailTree ? text(tailTree.tree).replace(/\s+/g, ' ') : ''
+const tailRatio = tailTree
+  ? findAll(tailTree.tree, (item) => item && item.props && item.props['data-dispatch-tail-ratio'] === 'true')[0]
+  : null
+const tailRows = tailTree
+  ? findAll(tailTree.tree, (item) => item && item.props && typeof item.props['data-dispatch-tail-row'] === 'string')
+  : []
+check('不展开任何折叠就能看到批次标题「派发 4 个任务」', tailBody.includes('派发 4 个任务'), tailBody.slice(0, 200))
+check('不展开就能看到「已完成/总数」（2/4，与卡片同一口径）',
+  Boolean(tailRatio) && text(tailRatio).trim() === '2/4', tailRatio ? text(tailRatio) : 'missing')
+check('不展开就能看到前 2 条任务标题与状态',
+  tailRows.length === 2 && tailBody.includes('拆分 auth/types.js') && tailBody.includes('拆分 auth/index.js')
+    && tailBody.includes('运行中') && tailBody.includes('已完成'),
+  JSON.stringify(tailRows.map((row) => text(row).replace(/\s+/g, ' ').trim())))
+check('摘要默认只列 2 行（它不长成第二张卡）', tailRows.length === 2, `实际 ${tailRows.length}`)
+const tailMoreBtn = tailTree
+  ? findAll(tailTree.tree, (item) => item && item.props && item.props['data-dispatch-tail-more'] === 'true')[0]
+  : null
+check('剩下的用「还有 2 条」提示，且那个提示是**真 <button>**（不再是死文本）',
+  tailBody.includes('还有 2 条')
+    && Boolean(tailMoreBtn) && tailMoreBtn.type === 'button'
+    // 摘要的折叠按钮与卡片的 `data-card-more` 必须是两个不同的节点：
+    // 否则「摘要展开了」会被误当成「卡片展开了」。
+    && !findAll(tailTree.tree, (item) => item && item.props && item.props['data-card-more'] === 'true')[0],
+  tailBody.slice(0, 300))
+check('折叠态 aria-expanded=false（读屏器能说出「现在只显示前 2 条」）',
+  Boolean(tailMoreBtn) && tailMoreBtn.props['aria-expanded'] === false,
+  tailMoreBtn ? String(tailMoreBtn.props['aria-expanded']) : 'missing')
+check('摘要根是 role=group 且 aria-label 说明这是什么',
+  Boolean(tailRoot) && tailRoot.props.role === 'group'
+    && String(tailRoot.props['aria-label']).includes('4') && String(tailRoot.props['aria-label']).includes('2'),
+  tailRoot ? String(tailRoot.props['aria-label']) : 'missing')
+check('摘要不重复渲染卡片根（不会出现「同一批两张卡」）',
+  tailTree ? !findAll(tailTree.tree, (item) => item && item.props && item.props['data-card-root'] === 'true')[0] : false)
+/*
+ * 头部必须**横向排布**：标题与 `已完成/总数` 是同一个 flex 容器的两个子节点。
+ * 这条是用户「样式好丑 / 像调试输出」的**结构断言**——上一版把每个字段放进
+ * 各自独立的块里垂直堆叠，光看渲染文本是看不出差别的（文本一模一样），
+ * 只有盯住「它们是不是同一个容器的兄弟节点」才能钉住这件事。
+ */
+const tailHead = tailTree
+  ? findAll(tailTree.tree, (item) => item && item.props && item.props['data-dispatch-tail-head'] === 'true')[0]
+  : null
+const tailHeadKids = tailHead && Array.isArray(tailHead.props.children) ? tailHead.props.children : []
+check('头部标题与 done/total 在同一个 flex 容器内（横向一行，不是两个独立块）',
+  Boolean(tailHead)
+    && tailHeadKids.some((kid) => kid && hasClass(kid, 'dsh-sa-dr-title') && text(kid).includes('派发 4 个任务'))
+    && tailHeadKids.some((kid) => kid && hasClass(kid, 'dsh-sa-dr-ratio') && text(kid).trim() === '2/4'),
+  `head children ${tailHeadKids.length}：${JSON.stringify(tailHeadKids.map((kid) => text(kid).trim()).slice(0, 6))}`)
+check('任务行同样横排：圆点 + 标题 + 状态是同一行的三个兄弟节点',
+  tailRows.length === 2 && tailRows.every((row) => {
+    const kids = Array.isArray(row.props.children) ? row.props.children : []
+    return kids.some((kid) => hasClass(kid, 'dsh-sa-dr-name'))
+      && kids.some((kid) => hasClass(kid, 'dsh-sa-dr-state'))
+  }),
+  JSON.stringify(tailRows.map((row) => (row.props.children || []).length)))
+check('长标题有省略处理：行与标题节点都带完整 title 属性',
+  tailRows.length === 2 && tailRows.every((row) => {
+    const nameNode = (row.props.children || []).find((kid) => hasClass(kid, 'dsh-sa-dr-name'))
+    // 省略是 CSS 的（text-overflow），所以「全文不丢」只能靠 title 属性保证；
+    // 两个节点都带上，鼠标停在哪一段都能看到全文。
+    return typeof row.props.title === 'string' && row.props.title.length > 0
+      && Boolean(nameNode) && nameNode.props.title === row.props.title
+      && text(nameNode).trim() === row.props.title
+  }),
+  JSON.stringify(tailRows.map((row) => row.props.title)))
+
+/* ── ② 与卡片同源：同一份放在卡片里和摘要里得说同一句话 ── */
+
+if (tailTree) {
+  const sameDataCard = mount(cardReg('dispatch_launch_many').component, {
+    phase: 'result',
+    callId: 'c-tail-1',
+    toolName: 'dispatch_launch_many',
+    block: {
+      argsRaw: JSON.stringify(tailArgs),
+      args: tailArgs,
+      content: cardContent(batchResultFixture()),
+      isError: false,
+    },
+  })
+  update(sameDataCard)
+  const cardRatio = findAll(sameDataCard.tree, (item) => item && item.props && item.props['data-card-ratio'] === 'true')[0]
+  check('摘要的聚合数字与卡片完全一致（同一套行模型，不各算一套）',
+    Boolean(cardRatio) && Boolean(tailRatio) && text(cardRatio).trim() === text(tailRatio).trim(),
+    `卡片 ${cardRatio ? text(cardRatio) : 'missing'} / 摘要 ${tailRatio ? text(tailRatio) : 'missing'}`)
+  unmount(sameDataCard)
+  unmount(tailTree)
+}
+
+/* ── ②b 展开 / 收起：「还有 N 条」必须真的能点开看到全部 ── */
+
+/*
+ * 这一节直接对应用户的第二条反馈：「没展开的也看不到」。
+ *
+ * 用 6 条（而不是 4 条）的批次：`CARD_TAIL_ROWS` 是 2，所以要藏 4 条——
+ * 与用户截图里的「派发 6 个任务 / 还有 4 条」完全同形。断言必须真的**点**那个
+ * 按钮再重新渲染，不能只检查「有没有按钮」：死文本也可以长得像个按钮。
+ */
+const expandStub = chatStubFor(21, [tailCall('c-exp', 'dispatch_launch_many', manyArgs(6), cardContent(manyPayload(6)))])
+const expandTree = mount(tailCard, { turn: turnLocationOf(21), seq: 2101, useChat: useChatOf(expandStub) })
+const tailRowCount = (root) => findAll(root.tree, (item) => item
+  && item.props && typeof item.props['data-dispatch-tail-row'] === 'string').length
+const tailMoreOf = (root) => findAll(root.tree, (item) => item
+  && item.props && item.props['data-dispatch-tail-more'] === 'true')[0]
+
+check('6 条批次默认只渲染 2 行 + 「还有 4 条」',
+  tailRowCount(expandTree) === 2
+    && text(expandTree.tree).replace(/\s+/g, ' ').includes('还有 4 条'),
+  `行数 ${tailRowCount(expandTree)} / ${text(expandTree.tree).replace(/\s+/g, ' ').slice(0, 160)}`)
+const expandBtn = tailMoreOf(expandTree)
+check('「还有 4 条」是真 button 且能点（有 onClick）',
+  Boolean(expandBtn) && expandBtn.type === 'button' && typeof expandBtn.props.onClick === 'function',
+  expandBtn ? `type=${expandBtn.type} onClick=${typeof expandBtn.props.onClick}` : 'missing')
+if (expandBtn) expandBtn.props.onClick()
+update(expandTree)
+check('点开之后渲染全部 6 行（剩下的 4 条不再是死文本）',
+  tailRowCount(expandTree) === 6, `实际 ${tailRowCount(expandTree)}`)
+check('点开后 aria-expanded=true（读屏器知道现在是展开态）',
+  Boolean(tailMoreOf(expandTree)) && tailMoreOf(expandTree).props['aria-expanded'] === true,
+  tailMoreOf(expandTree) ? String(tailMoreOf(expandTree).props['aria-expanded']) : 'missing')
+check('点开后按钮文案变「收起」（带总数，展开后仍能一眼看到 6）',
+  Boolean(tailMoreOf(expandTree)) && text(tailMoreOf(expandTree)).trim().includes('收起')
+    && text(tailMoreOf(expandTree)).includes('6'),
+  tailMoreOf(expandTree) ? text(tailMoreOf(expandTree)) : 'missing')
+check('点开后 6 条任务标题与状态都能看到（不只是行数对）',
+  ['任务 1', '任务 6', '排队中'].every((needle) => text(expandTree.tree).includes(needle))
+    && !text(expandTree.tree).includes('还有 4 条'),
+  text(expandTree.tree).replace(/\s+/g, ' ').slice(0, 200))
+check('展开态记在根节点的 data 属性上（便于排障，不进 store）',
+  Boolean(findAll(expandTree.tree, (item) => item && item.props
+    && item.props['data-dispatch-tail-expanded'] === 'true')[0]))
+const collapseBtn2 = tailMoreOf(expandTree)
+if (collapseBtn2) collapseBtn2.props.onClick()
+update(expandTree)
+check('再点「收起」回到 2 行，aria-expanded 回 false',
+  tailRowCount(expandTree) === 2
+    && Boolean(tailMoreOf(expandTree)) && tailMoreOf(expandTree).props['aria-expanded'] === false,
+  `行数 ${tailRowCount(expandTree)} / aria=${tailMoreOf(expandTree) ? String(tailMoreOf(expandTree).props['aria-expanded']) : 'missing'}`)
+check('收起后「还有 4 条」又回来了',
+  text(expandTree.tree).replace(/\s+/g, ' ').includes('还有 4 条'),
+  text(expandTree.tree).replace(/\s+/g, ' ').slice(0, 160))
+unmount(expandTree)
+
+/* 展开后超过 12 条才加滚动容器：摘要不该把整页顶开。 */
+const bigStub = chatStubFor(22, [tailCall('c-big', 'dispatch_launch_many', manyArgs(14), cardContent(manyPayload(14)))])
+const bigTree = mount(tailCard, { turn: turnLocationOf(22), seq: 2201, useChat: useChatOf(bigStub) })
+const bigBtn = tailMoreOf(bigTree)
+if (bigBtn) bigBtn.props.onClick()
+update(bigTree)
+const bigList = findAll(bigTree.tree, (item) => item && item.props && item.props['data-dispatch-tail-list'] === 'true')[0]
+check('展开超过 12 条时列表加滚动容器（max-height 由 CSS 给，不撑爆页面）',
+  Boolean(bigList) && String(bigList.props.className).includes('dsh-sa-dr-list-scroll'),
+  bigList ? String(bigList.props.className) : 'missing')
+unmount(bigTree)
+
+/* 2 条及以下没有可展开的东西：按钮不该出现（那会是个点了没反应的死按钮）。 */
+const twoStub = chatStubFor(23, [tailCall('c-two', 'dispatch_launch_many', manyArgs(2), cardContent(manyPayload(2)))])
+const twoTree = mount(tailCard, { turn: turnLocationOf(23), seq: 2301, useChat: useChatOf(twoStub) })
+check('只有 2 条时不给展开按钮（没有藏起来的行就不该有这个按钮）',
+  !tailMoreOf(twoTree) && tailRowCount(twoTree) === 2,
+  `按钮 ${tailMoreOf(twoTree) ? '出现' : '缺失'} / 行数 ${tailRowCount(twoTree)}`)
+unmount(twoTree)
+
+/*
+ * 轮次切换：展开态必须被重置，不能把上一轮的展开带进下一轮。
+ *
+ * 两个 stub 都必须**有 6 条**：如果新一轮是空的，摘要整体返回 null、
+ * `tailRowCount` 也是 0，那条断言会因为「什么都没渲染」而假绿——它证明不了
+ * 展开态被重置，只证明了「换轮之后没东西可画」。
+ */
+const turnResetStub = chatStubFor(24, [tailCall('c-t24', 'dispatch_launch_many', manyArgs(6), cardContent(manyPayload(6)))])
+const turnResetStub25 = chatStubFor(25, [tailCall('c-t25', 'dispatch_launch_many', manyArgs(6), cardContent(manyPayload(6)))])
+const turnResetTree = mount(tailCard, { turn: turnLocationOf(24), seq: 2401, useChat: useChatOf(turnResetStub) })
+const turnResetBtn = tailMoreOf(turnResetTree)
+if (turnResetBtn) turnResetBtn.props.onClick()
+update(turnResetTree)
+const expandedBefore = tailRowCount(turnResetTree)
+// 换一轮：宿主在同一个位置重新渲染同一个组件（React 会复用实例）。
+turnResetTree.props = { turn: turnLocationOf(25), seq: 2501, useChat: useChatOf(turnResetStub25) }
+update(turnResetTree)
+/*
+ * 再 update 一次：**effect 里的 setState 在真实 React 里会触发一次重渲染**，
+ * 而这个离线 stub 只提交 effect、不会自己重画。少了这一次，「turn 变了 → 收起」
+ * 的效果永远来不及出现在树上（第一次 update 拿到的是 effect 之前的树）。
+ * 这不是给被测代码开口子：真实宿主上那一次重渲染是 React 自己做的。
+ */
+update(turnResetTree)
+const resetBtn = tailMoreOf(turnResetTree)
+check('轮次切换后展开态被重置（回到 CARD_TAIL_ROWS 行，不带着上一轮的展开）',
+  expandedBefore === 6
+    && tailRowCount(turnResetTree) === 2
+    // 新一轮的摘要必须**真的在**：否则这条只是「什么都没渲染」的假绿。
+    && Boolean(findAll(turnResetTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0])
+    && Boolean(resetBtn) && resetBtn.props['aria-expanded'] === false,
+  `切换前 ${expandedBefore} 行 / 切换后 ${tailRowCount(turnResetTree)} 行 / aria=${resetBtn ? String(resetBtn.props['aria-expanded']) : 'missing'}`)
+unmount(turnResetTree)
+
+/* ── ③ 空轮次：没有任何派发调用时什么都不画（不占位、不画空条） ── */
+
+const emptyStub = chatStubFor(4, [])
+const emptyTree = mount(tailCard, { turn: turnLocationOf(4), seq: 100, useChat: useChatOf(emptyStub) })
+check('这一轮没派发时摘要返回 null（不占位、不画空条）',
+  !findAll(emptyTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0],
+  text(emptyTree.tree).slice(0, 120))
+unmount(emptyTree)
+
+/* ── ④ 别的轮的派发不算进来 ── */
+
+const otherTurnStub = chatStubFor(5, [tailCall('c-other', 'dispatch_launch_many', manyArgs(2), cardContent(manyPayload(2)))])
+const otherTree = mount(tailCard, { turn: turnLocationOf(6), seq: 101, useChat: useChatOf(otherTurnStub) })
+check('只统计本轮（turn 不匹配时不算进摘要）',
+  !findAll(otherTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0],
+  text(otherTree.tree).slice(0, 120))
+unmount(otherTree)
+
+/* ── ⑤ 单条派发：标题用任务标题（与卡片同一口径） ── */
+
+const singleTailArgs = { title: 'auth 令牌刷新', brief: 'b' }
+const singleStub = chatStubFor(7, [tailCall('c-single', 'dispatch_launch', singleTailArgs, cardContent({
+  task: { task_id: 't-single-1', title: 'auth 令牌刷新', status: 'running', depends_on: [] },
+}))])
+const singleTail = mount(tailCard, { turn: turnLocationOf(7), seq: 102, useChat: useChatOf(singleStub) })
+const singleBody = text(singleTail.tree).replace(/\s+/g, ' ')
+check('单条派发时摘要标题就是任务标题，且聚合是 0/1',
+  singleBody.includes('auth 令牌刷新') && singleBody.includes('0/1'), singleBody.slice(0, 200))
+unmount(singleTail)
+
+/* ── ⑤b 回归：按 `TurnTailOwnerProps` **真实形状**（turn 为对象）必须渲染出内容 ── */
+
+/*
+ * 这一节是那个「注册成功但会话里永远看不见」bug 的**直接回归**。
+ *
+ * 旧实现写 `typeof props.turn === 'number'`，而宿主给的是 `TurnLocation` 对象，
+ * 判据恒假 → 序号 -1 → 选择器立即返回空 → 组件永远 null。当时 589 项断言全绿，
+ * 因为所有 mock 都喂的数字。所以这里**只喂宿主真实形状**，并且额外断言
+ * `locations.getTurn()` 收到的是**数字**——把对象直接传进去同样会静默返回空
+ * （`getTurn(turn: number)`），那是一条不报错的死路，必须单独钉住。
+ */
+
+const realArgs = manyArgs(4)
+const realStub = chatStubFor(11, [tailCall('c-real-1', 'dispatch_launch_many', realArgs, cardContent(batchResultFixture()))])
+// 记下 getTurn 实际收到的实参：它必须是数字，不能是 TurnLocation 对象。
+const getTurnCalls = []
+const realUseChat = (selector) => selector({
+  locations: {
+    getTurn: (t) => {
+      getTurnCalls.push(t)
+      return t === 11 ? ['c-real-1'] : []
+    },
+  },
+  nodes: realStub.snapshot.nodes,
+  order: ['c-real-1'],
+})
+const realTree = mount(tailCard, {
+  // 宿主真实形状：turn 是 TurnLocation 对象（含 turn 数字、start/end、status、steps、data）。
+  turn: turnLocationOf(11),
+  seq: 1101,
+  openFile: () => {},
+  useChat: realUseChat,
+})
+const realRoot = findAll(realTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0]
+const realBody = text(realTree.tree).replace(/\s+/g, ' ')
+const realRatio = findAll(realTree.tree, (item) => item && item.props && item.props['data-dispatch-tail-ratio'] === 'true')[0]
+check('【回归】按 TurnTailOwnerProps 真实形状（turn 为 TurnLocation 对象）传参时，摘要渲染出内容',
+  Boolean(realRoot) && realBody.includes('派发 4 个任务'), realBody.slice(0, 200) || '(空)')
+check('【回归】真实形状下「已完成/总数」正确（2/4）',
+  Boolean(realRatio) && text(realRatio).trim() === '2/4', realRatio ? text(realRatio) : 'missing')
+check('【回归】真实形状下前 2 条任务标题也渲染出来',
+  realBody.includes('拆分 auth/types.js') && realBody.includes('拆分 auth/index.js'), realBody.slice(0, 200))
+check('【回归】getTurn() 收到的是数字序号，不是 TurnLocation 对象（传对象会静默返回空）',
+  getTurnCalls.length > 0 && getTurnCalls.every((value) => typeof value === 'number' && value === 11),
+  JSON.stringify(getTurnCalls))
+check('【回归】摘要根上的 data-dispatch-tail-turn 是序号字符串',
+  Boolean(realRoot) && realRoot.props['data-dispatch-tail-turn'] === '11',
+  realRoot ? String(realRoot.props['data-dispatch-tail-turn']) : 'missing')
+unmount(realTree)
+
+/* ── ⑤c 兼容：宿主 rc 版本直接给数字 / 给 `{ index }` / 给垃圾时都不炸 ── */
+
+const numericStub = chatStubFor(12, [tailCall('c-num', 'dispatch_launch_many', manyArgs(2), cardContent(manyPayload(2)))])
+const numericTree = mount(tailCard, { turn: 12, seq: 1102, useChat: useChatOf(numericStub) })
+check('兼容旧形状：turn 直接是数字时摘要照常渲染',
+  Boolean(findAll(numericTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0])
+    && text(numericTree.tree).includes('派发 2 个任务'),
+  text(numericTree.tree).replace(/\s+/g, ' ').slice(0, 160))
+unmount(numericTree)
+
+// `{ index }`：另一种宿主版本可能给的形状，兜底也要认。
+const indexStub = chatStubFor(13, [tailCall('c-idx', 'dispatch_launch_many', manyArgs(2), cardContent(manyPayload(2)))])
+const indexTree = mount(tailCard, { turn: { index: 13 }, seq: 1103, useChat: useChatOf(indexStub) })
+check('兼容 { index } 形状：摘要照常渲染',
+  Boolean(findAll(indexTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0]),
+  text(indexTree.tree).replace(/\s+/g, ' ').slice(0, 160))
+unmount(indexTree)
+
+// 认不出来的形状：安静不渲染，**绝不抛**（页脚还挂着复制/重新生成）。
+let badShapeThrew = null
+let badShapeTree = null
+try {
+  badShapeTree = mount(tailCard, { turn: { nope: true }, seq: 1104, useChat: useChatOf(numericStub) })
+} catch (error) {
+  badShapeThrew = error
+}
+check('认不出的 turn 形状不抛错，且不渲染摘要（安静降级）',
+  badShapeThrew === null
+    && !findAll(badShapeTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0],
+  badShapeThrew ? String(badShapeThrew) : text(badShapeTree.tree).slice(0, 120))
+if (badShapeTree) unmount(badShapeTree)
+
+/* ── ⑥ 降级：宿主不给 useChat（旧标准 hook 缺失）时安静返回 null，绝不抛 ── */
+
+let noHookThrew = null
+let noHookTree = null
+try {
+  noHookTree = mount(tailCard, { turn: turnLocationOf(8), seq: 103 })
+} catch (error) {
+  noHookThrew = error
+}
+check('拿不到 useChat（旧宿主）时摘要不抛错', noHookThrew === null,
+  noHookThrew ? String(noHookThrew) : 'ok')
+check('拿不到 useChat 时摘要渲染为空（页脚其余动作不受影响）',
+  noHookTree
+    ? !findAll(noHookTree.tree, (item) => item && item.props && item.props['data-dispatch-tail'] === 'true')[0]
+    : true)
+if (noHookTree) unmount(noHookTree)
+
+/* ── ⑦ 自报：摘要槽进了 registered 且 cards.tail = on ── */
+
+check('自报的 registered 含 conversation.chat.turnTail',
+  Boolean(readyBody) && Array.isArray(readyBody.registered)
+    && readyBody.registered.includes('conversation.chat.turnTail'),
+  readyBody ? JSON.stringify(readyBody.registered) : 'null')
+check('自报的 cards.tail = on（摘要的可观测字段，与 cards.batch 分开记）',
+  Boolean(readyBody) && readyBody.cards && readyBody.cards.tail === 'on',
+  readyBody ? JSON.stringify(readyBody.cards) : 'null')
+check('摘要的结论不影响 cards.batch（仍为 on）',
+  Boolean(readyBody) && readyBody.cards && readyBody.cards.batch === 'on',
+  readyBody ? JSON.stringify(readyBody.cards) : 'null')
+
+/* ── ⑧ 降级宿主：没有 turnTail 槽时摘要不注册，但卡片照旧 ── */
+
+const noTailRegs = []
+const noTailCtx = {
+  get(name) {
+    if (name === 'uiWorkspace') return uiWorkspace
+    if (name === 'inputTriggers') return inputTriggers
+    return undefined
+  },
+  effect(builder) {
+    const dispose = typeof builder === 'function' ? builder() : undefined
+    return () => { if (typeof dispose === 'function') dispose() }
+  },
+  logger: { info() {}, warn() {} },
+  slots: {
+    // 这个宿主有 tool.call.toolview，但**没有** conversation.chat.turnTail。
+    inject(name, register) { if (name !== 'conversation.chat.turnTail') register() },
+    register(options, component) {
+      noTailRegs.push({ options, component })
+      return () => {}
+    },
+  },
+}
+let noTailThrew = null
+try {
+  mod.apply(noTailCtx)
+} catch (error) {
+  noTailThrew = error
+}
+check('宿主没有 turnTail 槽时 apply 不抛错', noTailThrew === null, noTailThrew ? String(noTailThrew) : 'ok')
+check('宿主没有 turnTail 槽时摘要一个都不注册',
+  !noTailRegs.some((item) => item.options && item.options.name === 'conversation.chat.turnTail'),
+  JSON.stringify(noTailRegs.map((item) => item.options && item.options.name)))
+check('摘要缺席时派发卡照常注册（只降自己）',
+  noTailRegs.filter((item) => item.options && item.options.name === 'tool.call.toolview').length === 2,
+  JSON.stringify(noTailRegs.map((item) => item.options && item.options.name)))
+
+/* ── ⑨ 摘要样式走主题 token，且不自带折叠按钮 ── */
+
+/*
+ * 样式断言用**源码切片**而不是渲染树（离线 stub 不解析 CSS）：只取 `.dsh-sa-dr {`
+ * 到卡片样式块结束之间的那一段，检查它是否只使用 `--dsw-alias-*` 主题令牌。
+ * 写死颜色在明暗两套主题下必有一边糊掉，而那种问题肉眼很难在暗色里发现。
+ */
+check('摘要样式只用 --dsw-alias-* 主题令牌（不写死颜色）',
+  (() => {
+    const start = source.indexOf('const CARD_STYLE =')
+    const end = source.indexOf('卡片样式的单例节点', start)
+    if (start < 0 || end < 0) return false
+    const styleBlock = source.slice(start, end)
+    const tailStart = styleBlock.indexOf('.dsh-sa-dr {')
+    if (tailStart < 0) return false
+    const tailBlock = styleBlock.slice(tailStart)
+    const hardcoded = tailBlock.match(/#[0-9a-fA-F]{3,8}|rgb\(/g)
+    return tailBlock.includes('--dsw-alias-') && hardcoded === null
+  })())
+check('摘要源码里没有第二处定义 TAIL_NO_CALLS（空值必须唯一，否则引用比较失效）',
+  source.split('const TAIL_NO_CALLS = Object.freeze').length - 1 === 1,
+  `实际 ${source.split('const TAIL_NO_CALLS = Object.freeze').length - 1} 处`)
+
+/*
+ * 「像调试输出」是个**布局**问题，离线渲染树里看不出来（文本一模一样）。
+ * 所以这里直接对样式源码做切片断言：头部与任务行必须是 flex 横排，
+ * 而且要真的用到 `text-overflow: ellipsis`（长标题靠它省略，全文靠 title 属性）。
+ */
+const tailCssBlock = (() => {
+  const start = source.indexOf('const CARD_STYLE =')
+  const end = source.indexOf('卡片样式的单例节点', start)
+  if (start < 0 || end < 0) return ''
+  const styleBlock = source.slice(start, end)
+  const tailStart = styleBlock.indexOf('.dsh-sa-dr {')
+  return tailStart < 0 ? '' : styleBlock.slice(tailStart)
+})()
+// 取某条选择器后面的规则体（到下一个 `}` 为止），避免「别处的 flex」误判通过。
+function cssRuleOf(selector) {
+  const at = tailCssBlock.indexOf(selector + ' {')
+  if (at < 0) return ''
+  return tailCssBlock.slice(at, tailCssBlock.indexOf('}', at) + 1)
+}
+check('头部规则是 flex 横排（不是 block 垂直堆叠）',
+  /display:\s*flex/.test(cssRuleOf('.dsh-sa-dr-head'))
+    && /align-items:\s*center/.test(cssRuleOf('.dsh-sa-dr-head')),
+  cssRuleOf('.dsh-sa-dr-head').replace(/\s+/g, ' ').slice(0, 160))
+check('任务行规则是 flex 横排且标题真的会省略',
+  /display:\s*flex/.test(cssRuleOf('.dsh-sa-dr-row'))
+    && /text-overflow:\s*ellipsis/.test(cssRuleOf('.dsh-sa-dr-name'))
+    && /white-space:\s*nowrap/.test(cssRuleOf('.dsh-sa-dr-name')),
+  cssRuleOf('.dsh-sa-dr-name').replace(/\s+/g, ' ').slice(0, 160))
+check('摘要容器不铺卡片底色（`--dsw-alias-bg-layer-1` 是卡片自己的表面色）',
+  !/background:\s*var\(--dsw-alias-bg-layer-1/.test(cssRuleOf('.dsh-sa-dr')),
+  cssRuleOf('.dsh-sa-dr').replace(/\s+/g, ' ').slice(0, 200))
+check('展开态超过 CARD_TAIL_MAX_VISIBLE 条时才有滚动容器',
+  cssRuleOf('.dsh-sa-dr-list-scroll').includes('max-height')
+    && cssRuleOf('.dsh-sa-dr-list-scroll').includes('overflow-y'),
+  cssRuleOf('.dsh-sa-dr-list-scroll').replace(/\s+/g, ' ').slice(0, 160))
+check('展开按钮的样式类只来自摘要自己的命名空间（不与卡片的 .dsh-sa-dc-more 混用）',
+  tailCssBlock.includes('.dsh-sa-dr-more')
+    && !tailCssBlock.includes('.dsh-sa-dc-more'), '')
+
+/*
+ * hook 顺序：`useChat` 是宿主有条件提供的标准 hook。**绝不能**写成
+ * `typeof useChat === 'function' ? useChat(...) : …`——那是有条件调用 hook，
+ * React 会抛「Rendered fewer hooks than expected」，把整条轮次页脚（含
+ * 复制/重新生成）一起废掉。这层约束只能靠源码守：离线 stub 不跑真实 React。
+ */
+const dispatchTailSrc = source.slice(source.indexOf('function DispatchTail('), source.indexOf('function DispatchTailBody('))
+// 先剥掉注释：这段注释本身就在解释「不要写 useChat(...)」，不剥会自己撞自己。
+const dispatchTailCode = dispatchTailSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+check('DispatchTail 外层不做有条件 hook 调用（先判 useChat，再有 hook 的子组件）',
+  !dispatchTailCode.includes('useChat(') && dispatchTailCode.includes('DispatchTailBody'),
+  dispatchTailCode.replace(/\s+/g, ' ').slice(0, 200))
 
 /* ═════════════════════ 文案成对（zh/en） ═════════════════════ */
 
