@@ -94,7 +94,6 @@ Host 与 Client 不共享内存：Client 只认这几个同源 HTTP 端点（GET
 | --- | --- | --- | --- |
 | `src/index.js` | 插件入口：建 `Dispatch`、`restore` + `provision`、注册 10 个工具、接宿主事件、注册看板路由、启动归档巡检、`ctx.effect` 清理 | `dispatch` / `tools` / `board` / `constants` | 不含业务逻辑 |
 | `src/constants.js` | 名称、版本、日志前缀、消息来源 kind、提示段名、状态集合、默认配置（含工作区/归档）、任务 id 与消息 id 生成、账本结构版本与可读下限（`FILE_VERSION` / `OLDEST_FILE_VERSION`） | 无 | 不读文件、不碰 ctx |
-| `src/config.js` | `Config` Schemastery：类型/范围/枚举值 + `DEFAULTS` 默认值；供 Cordis 在 `apply` 前校验、供插件管理器生成字段说明 | 无 | 只在加载期被宿主读取 |
 | `src/tasks.js` | `TaskTable`：并发位、排队、结算、等待者；纯函数 `clip` / `oneLine` / `lastAssistantText` | `constants` | 不做 I/O，不调宿主 API |
 | `src/store.js` | `tasks.json` 读回与原子替换写；`{version, savedAt, tasks, targets, retired}`（`version` 取 `constants.FILE_VERSION` = 4；缺 `targets` 按空对象、缺 `retired` 按空数组） | Node 内置模块 / `constants` | 不校验业务字段、不做迁移；唯一会拒绝读取的是账本版本不兼容（见下文「`version` 是账本结构的版本闸门」） |
 | `src/sessions.js` | `SessionGateway`：`freezeMessage` 懒加载、构造插件来源消息、双通道投递、`holds`（投递判重）、按目录取 cwd、workspace 解析、建子会话、权限预设、`applyModel`（model 透传）、`restrictTools`（路由模式收窄工具面）、系统提示注入、`enterDirectory`（切工作目录） | `constants` / `prompt` | 不管任务状态 |
@@ -194,19 +193,18 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 
 工具注册在插件根 ctx，等于全局层：所有 Session 都能看到（`api-contracts.md` §6）。
 
-没有用 `agent.ctx.tools.register` + 每会话装配做隔离，原因：
+没有用 `agent.ctx.tools.register` + `restrict` 做隔离，原因：
 
-- 10 个工具在插件根 context 注册一次，主会话可见；worker 的身份用「它是不是某个任务的 `workerSessionId`」反查（`TaskTable.byWorker`）就够了。
-- worker 创建后，`SessionGateway.restrictWorkerTools()` 从它的 agent context 收走除 `dispatch_report` 外的
-  9 个 `dispatch_*`，所以 worker 连工具都看不到，不需要靠提示词约束。
+- `restrict` 只能过滤「继承来的」工具，且必须在 scoped ctx 上调用；要给每个会话分别装配，复杂度不成比例。
+- 10 个工具在全局层注册一次，worker 的身份用「它是不是某个任务的 `workerSessionId`」反查（`TaskTable.byWorker`）就够了。
 
-**路由模式（§21）另做一层。** 「必派发的会话不许改代码」必须靠 `restrict`，因为它是**结构性**的
-（模型看不到 write/edit），而「谁能调哪个 dispatch 工具」首先是注册面的，其次才由 `execute` 语义兜底。
-两者不冲突：路由 restrict 只 deny 两个非本插件的工具名；worker 的 dispatch 收窄发生在建会话之后。
+**例外：路由模式（§21）。** 「必派发的会话不许改代码」这条必须靠 `restrict`，因为它是**结构性**的
+（模型看不到 write/edit），而「谁能调哪个 dispatch 工具」是**语义**的（靠 `execute` 判定就够）。
+两者不冲突：restrict 只 deny 两个非本插件的工具名，本插件的 10 个工具照旧全局可见。
 
 代价与兜底：
 
-- worker 的 `dispatch_*` 不可见（只剩 `dispatch_report`）；系统提示第 5 条仍保留，作为第二道说明。
+- worker 也能看到并调用 `dispatch_launch`（会以 worker 为派发者新开任务）。系统提示第 5 条明确禁止；`maxTasksPerSession` 防失控。
 - `dispatch_report` 只认 worker：找不到任务直接抛错，主会话调不了。
 
 ### 8. 并发靠队列，不靠拒绝
@@ -405,8 +403,8 @@ React 从 `require('react')` 取。理由：
   `syncRouter()` 是「模式 ↔ 工具面」的对齐器：`always` 就上锁，其余就解锁。
 - 动作：`agent.ctx.tools.restrict({ deny: routerDenyTools })`，默认 deny = `['write','edit']`。
   之后模型**看不到**这两个工具——这是结构性约束，不是提示。
-- 幂等：同一个 agent 只收窄一次（`Dispatch.routers` 记账）；worker 不参与路由收窄
-  （它的 `dispatch_*` 已在创建时收走，这里再收一次只会重复登记）。
+- 幂等：同一个 agent 只收窄一次（`Dispatch.routers` 记账）；worker 递归派发时**跳过**
+  （`table.byWorker(agent.id)` 命中说明它是执行者，收窄它等于让它干不了活）。
 - 收回：选回「不派发」→ `forgetRouter()` 立刻释放；另外插件卸载、会话销毁
   （`agent/disposed`）也会收回——否则重载后 write/edit 仍然不可见。
 - 同时把「已被收窄」写进提示段（`ROUTER_LOCKED`）：模型看不到工具时的默认反应是
@@ -1079,11 +1077,7 @@ id 对不上、`done` 要翻译一次、标题还得和 id 抢注意力。所以
 - 工作区解析回归 `test/workspace-resolve.test.js`：`resolveOrCreate()` 的 `reason` 归因
   （精确歧义 / 包含歧义 / not-found / 空引用不给 reason / 成功时字段缺席），以及
   `SessionGateway.workspaceFor()` 的标题去重（仓库根 vs 包根不再同名、逐段加长、不改已有标题、无注册表安全返回）。
-- 插件工程测试：`test/config-schema.test.js`（默认值、错配置 fail loud、旧值 `target` 兼容）、
-  `test/worker-boundary.test.js`（worker 只留 `dispatch_report`、复用/存量补收）、
-  `test/board-registration.test.js`（webServer 晚到、`server.register` 抛错隔离）、
-  `test/apply-lifecycle.test.js`（apply 注册 10 个工具、路由失败不影响工具）。
-- 路由与投递测试 `test/router.test.js`（14 个用例）：路由模式的触发时机与幂等、worker 不参与路由收窄、
+- 路由与投递测试 `test/router.test.js`（14 个用例）：路由模式的触发时机与幂等、worker 递归派发不被收窄、
   `restrictRouter: false` 的退路、`restrictTools` 只 deny 真存在的工具（未知名字会让 `restrict` 抛错）、
   `model` 从 `launch` 一路传到 `createWorker`、`applyModel` 的能力缺失分支、报告重试复用同一 id 与 `holds` 判重。
 - 放置测试 `test/placement.test.js`、非阻塞测试 `test/nonblocking.test.js`、模式测试 `test/mode.test.js`

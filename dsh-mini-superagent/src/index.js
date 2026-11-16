@@ -19,7 +19,7 @@ import { registerTools } from './tools.js'
 export const name = NAME
 
 /** 硬依赖的服务；缺任何一个插件都不会激活，而不是半残运行。 */
-export const inject = ['tools', 'agents', 'sessionController', 'workspaceRegistry']
+export const inject = ['tools', 'agents', 'sessionController']
 
 /**
  * 插件入口。
@@ -114,12 +114,9 @@ export async function apply(ctx, config) {
   dispatch.resumeBackgroundWatches()
   // 已有会话按当前模式刷新一次（插件重载后不会重复注册段，只换文本）。
   dispatch.refreshAllHints()
-  // 升级/HMR 前派出去的 worker 也要补上「只留 dispatch_report」的边界。
-  dispatch.restrictExistingWorkers()
   // 过期子会话自动归档（archiveAfterHours / archiveSweepMinutes 都为 0 时不起）。
   dispatch.startArchiveSweep()
   ctx.logger?.info?.('%s 已加载：maxWorkers=%d', LOG_PREFIX, dispatch.table.maxWorkers)
 }
 
 export { DEFAULTS, VERSION } from './constants.js'
-export { Config } from './config.js'

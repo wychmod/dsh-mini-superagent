@@ -1,6 +1,6 @@
 {
   "name": "dsh-mini-superagent",
-  "version": "0.10.1",
+  "version": "0.10.0",
   "description": "DSH 任务派发与工作台：主会话把任务派给独立后台子会话，立即返回、报告自动回流；侧边栏「派发工作台」看并发、排队、批次进度与失败原因，可取消、重试、归档。",
   "icon": "icon.svg",
   "author": "wychmod",
@@ -52,12 +52,6 @@
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
     "dsh": ">=0.2.1-rc.2"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/schemastery": "^3.19.0"
-  },
-  "devDependencies": {
-    "@deepseek-ai/schemastery": "^3.19.0"
   },
   "dsh": {
     "bundle": {

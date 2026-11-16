@@ -487,39 +487,6 @@ export class Dispatch {
   }
 
   /**
-   * worker 自己的工具面：保留工作工具，只允许用 `dispatch_report` 汇报。
-   *
-   * 为什么不只靠 `maxTasksPerSession`：那个上限按会话计，worker 仍能自己
-   * `dispatch_launch` 出 64 条子任务，每条子任务又能再派 64 条；提示词里的
-   * 「worker 别调」是软约束，模型不照做时没有硬边界。这里和上游
-   * `limitSubagent()` 对齐：把 9 个非汇报工具从 worker 的 agent context 上收走，
-   * 只留 `dispatch_report`。读写/执行工具不受影响，worker 照常干活。
-   *
-   * 收窄发生在 `createWorker` 之后、投递简报之前；复用路径
-   * （`#startReused`）也会再确认一次，覆盖「老版本派的 worker 升级后继续用」。
-   */
-  restrictWorkerTools(agent) {
-    if (!agent?.id) return
-    // 测试夹具/旧适配层可能没有这个方法：没有就保持原状，不在这里直接碰 restrictTools，
-    // 否则「只测路由模式」的用例会把 worker 的收窄也算进去。
-    this.sessions.restrictWorkerTools?.(agent)
-  }
-
-  /**
-   * 对账本里还活着的 worker 补一次工具收窄。
-   *
-   * 覆盖两类旧会话：升级前已经派出去的 worker，以及 HMR 换包后仍活着的 worker。
-   * 只碰未结算任务，已结算的会话不再归本插件管。
-   */
-  restrictExistingWorkers() {
-    for (const task of this.table.tasks.values()) {
-      if (SETTLED.has(task.status)) continue
-      const agent = this.ctx.agents?.get?.(task.workerSessionId)
-      if (agent) this.restrictWorkerTools(agent)
-    }
-  }
-
-  /**
    * worker 派生出来的 subagent 也受 worker 的工具面约束——至少不能自己再派发。
    *
    * 为什么需要：10 个工具注册在全局层，所以 worker 的 subagent 也能看到 `dispatch_launch`，
@@ -538,7 +505,7 @@ export class Dispatch {
     if (this.subagentOf.has(agent.id)) return
     const workerId = this.workerAncestorOf(agent)
     if (!workerId) return
-    const dispose = this.sessions.restrictTools(agent, TOOL_NAMES, 'subagent 工具面')
+    const dispose = this.sessions.restrictTools(agent, TOOL_NAMES)
     if (typeof dispose !== 'function') return
     this.subagentOf.set(agent.id, workerId)
     this.log('%s subagent %s 继承 worker %s 的工具面（收走 %d 个 dispatch 工具）',
@@ -1844,8 +1811,6 @@ export class Dispatch {
       task.updatedAt = now()
       this.schedulePersist()
     }
-    // 先收窄工具面，再投简报：worker 从第一条消息起就不该能把 dispatch_launch 当出口。
-    this.restrictWorkerTools(agent)
     // 会话刚建出来就发现任务已结算：立刻取消它，别留僵尸。
     if (this.abortIfSettled(task, '建会话之后')) {
       this.cancelWorkerAgent(agent)
@@ -1880,9 +1845,7 @@ export class Dispatch {
   async #startReused(task) {
     const parent = this.resolveTask(task.parentTaskId)
     // 只确认存活；拿到的 Agent 不需要再操作（投递走 sessions.deliver）。
-    const agent = await this.#resolveReusedAgent(task)
-    // 老版本派出的 worker 没有收窄过工具面；复用前补一次，覆盖升级窗口。
-    this.restrictWorkerTools(agent)
+    await this.#resolveReusedAgent(task)
     if (this.abortIfSettled(task, '复用确认子会话之后')) return task
 
     task.lastText = ''
@@ -4751,15 +4714,6 @@ export class Dispatch {
   async provision() {
     if (!this.config.provisionDefaultWorkspace) return
     try {
-      /*
-       * `workspaceRegistry` 已进硬 inject，正常不会缺；这里仍显式判一次：
-       * 服务在启动窗口里被卸载/替换时，静默 return 会留下「默认工作区永远没建」
-       * 且日志里没有任何线索的结果。宁可留一条 warn，也不要让用户去猜。
-       */
-      if (!this.workspaces.registry) {
-        this.warn(`${LOG_PREFIX} 没有 workspaceRegistry，跳过默认工作区准备（派发仍可用）`)
-        return
-      }
       const workspace = await this.workspaces.defaultWorkspace()
       if (!workspace) return
       this.defaultWorkspace = workspace

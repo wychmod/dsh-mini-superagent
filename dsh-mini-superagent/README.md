@@ -55,7 +55,7 @@
 | --- | --- | --- |
 | DSH | `>=0.2.1-rc.2` | `package.json` 的 `engines.dsh` |
 | Node | `^22.19.0 \|\| >=24.0.0` | `package.json` 的 `engines.node` |
-| 依赖 / 构建 | 运行时无；开发时 `npm install` 只为 Config schema 装 Schemastery（peer/dev，不进 tarball） | `dependencies` 为空，`main` 直接指向 `src/index.js` |
+| 依赖 / 构建 | 无 | `dependencies` 为空，`main` 直接指向 `src/index.js` |
 | 派发工作台 | 仅 Web 形态 | 需要宿主 `webServer` 与浏览器页面；headless 形态没有看板，派发与工具照常 |
 
 实测环境：DSH `0.2.1-rc.5`，`desktop` profile。
@@ -64,19 +64,19 @@
 
 ## 安装
 
-插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.1` 已发布到 npm（`latest`），**按包名即可安装**。
+插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.0` 已发布到 npm（`latest`），**按包名即可安装**。
 
 ### 方式一：按包名安装（推荐）
 
 在 DSH 里调用：
 
 ```text
-plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.1")
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.0")
 ```
 
 也可以把这句话交给 DSH 里的任意会话：
 
-> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.1`，装完确认 10 个 `dispatch_*` 工具已注册。
+> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.0`，装完确认 10 个 `dispatch_*` 工具已注册。
 
 ### 方式二：从源码 / 本地目录安装
 
@@ -93,10 +93,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.10.1","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.10.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.1`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.0`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
@@ -133,10 +133,11 @@ Copy-Item "$env:DSH_HOME\dsh-dispatch\tasks.json" "$env:DSH_HOME\dsh-mini-supera
 | `dispatch_wait` | 主会话 | 阻塞等待若干任务结算（**少用**，报告本来就会自己回来） |
 | `dispatch_report` | 子会话 | worker 向派发者汇报 `done` / `blocked` / `failed` / `progress` |
 
-工具注册在插件根 context，**主会话可见全部 10 个**；worker 创建后，除 `dispatch_report` 外的
-`dispatch_*` 会从它的 agent context 收走，所以 worker 只能汇报、不能继续派生。权限仍在 `execute`
-里兜一层：`dispatch_report` 只接受 worker，其余工具只操作本会话派出的任务。
+工具注册在插件根 context，**对所有会话可见**；权限不靠注册作用域，而是在 `execute` 里判断
+「调用者是不是已登记的 worker」：`dispatch_report` 只接受 worker，其余工具只操作本会话派出的任务。
 `dispatch_workspaces` 是纯只读，不要求调用者是 Agent，也不受任务归属限制。
+worker 调用 `dispatch_launch` 不会被拦（只受 `maxTasksPerSession` 限制），所以系统提示里明确要求 worker 别调；
+见[已知限制](#已知限制)。
 
 逐条参数、返回值与错误信息见 [docs/tools.md](docs/tools.md)。
 
@@ -448,14 +449,12 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 
 ## 配置
 
-全部可选，写在 bundle 的 `cordis.patch.yml` 的 `config` 里（默认值见 `src/constants.js` 的 `DEFAULTS`）。
-配置由 `src/config.js` 的 Schemastery schema 在 `apply` 之前校验：类型、范围、枚举值不对时插件直接加载失败，
-不会带着半份配置跑；插件管理器也从同一份 schema 生成字段说明。
+全部可选，写在 bundle 的 `cordis.patch.yml` 的 `config` 里（默认值见 `src/constants.js` 的 `DEFAULTS`）：
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `maxWorkers` | `6` | **全局**同时 `running` 的上限；超出的进 `queued`，有空位自动开始（按登记顺序） |
-| `maxTasksPerSession` | `64` | 每个会话累计派发上限（第二道防递归闸门；worker 已在工具面收走派发工具） |
+| `maxTasksPerSession` | `64` | 每个主会话累计派发上限（防递归派发失控） |
 | `autoHandoff` | `false` | **只控制提示注入**：打开时提示里多一段「接续判断」，提醒模型派发前想一次「这条是不是接着上一条」。它**不会**让插件自动绑定——插件里没有相似度/阈值，接不接始终由模型判断；关掉后 `dispatch_candidates` / `handoff_from` 照常可用 |
 | `handoffCandidatesDays` | `7` | `dispatch_candidates` 的时间窗：只看最近 N 天**结算**的任务（与 `archiveAfterHours` 的 7 天对齐） |
 | `handoffCandidatesLimit` | `5` | `dispatch_candidates` 每次返回的候选上限（工具参数 1–10 可覆盖） |
@@ -619,9 +618,8 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 - **任务目录不自动清理**：`taskDirRoot` 下的目录随任务一直留着（和归档只收起不删除一致），需要清理请让 `prepareCommand` 或外部脚本处理。
 - **`maxWorkers` 是软的**：`dispatch_message` 唤醒已结算的 worker 会直接置 `running`，可能短暂超过上限
   （有意的：人的追问不该排在批量任务后面）。
-- **worker 的工具面在创建时收窄**：除 `dispatch_report` 外的 9 个 `dispatch_*` 从 worker 的 agent context 收走，
-  读写/执行工具不受影响。复用老版本派出的会话时会在投递交接摘要前补收一次；要更严的 worker 工具面，
-  仍可用 `agent_preset` 给子会话指定收紧的 preset。
+- **worker 能看到全部全局工具**，包括 `dispatch_launch`。插件只对**主会话**做 `restrict`（路由模式，收走 write/edit），
+  不对 worker 收窄；要更严的 worker 工具面，用 `agent_preset` 给子会话指定收紧的 preset。
 - **`dispatch_wait` 阻塞当前 step**：**默认不要用**。唯一允许的情形是用户在同一个消息里明确要求
   「等结果再继续」；其余一律结束本轮（结束本轮 ≠ 没回答，报告会自己回流）。系统提示与工具描述
   都把这条写成硬约束——它对应一次「连续等待约 33 分钟、零产出」的真实事故。
@@ -748,7 +746,6 @@ dsh-mini-superagent/
   cordis.patch.yml    # 插入插件行 + 默认配置（可整段删掉，靠代码默认值）
   src/
     index.js          # 入口：建 Dispatch、注册工具、接宿主事件、看板路由、启动准备
-    config.js         # Config schema：类型/范围/默认值，apply 之前由 Cordis 校验
     constants.js      # 名称/版本/日志前缀/source kind/默认配置/状态集合
     tasks.js          # TaskTable（并发位/排队/结算/等待）+ 纯函数
     store.js          # tasks.json 读写

@@ -19,9 +19,10 @@
 | 主会话（派发者） | `dispatch_launch` / `dispatch_launch_many` / `dispatch_workspaces` / `dispatch_candidates` / `dispatch_list` / `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` / `dispatch_wait` | 正常 |
 | 主会话 | `dispatch_report` | 抛错：当前会话不属于任何派发任务 |
 | worker | `dispatch_report` | 正常 |
-| worker | 其余 9 个 `dispatch_*` | **不可见**：worker 创建时已从它的 agent context 收走（只保留 `dispatch_report`） |
-
-> 工具先在注册面收窄，再由 `execute` 的归属校验兜底。worker 即使绕过提示词，也没有 `dispatch_launch` 可调。
+| worker | `dispatch_workspaces` | 正常（只读，不要求 Agent，也不受任务归属限制） |
+| worker | `dispatch_candidates` | 正常（只读）；只看得到 worker 自己派出的任务（通常是空） |
+| worker | `dispatch_list` / `dispatch_inspect` / `dispatch_message` / `dispatch_cancel` | 看不到父会话的任务；对父任务会报「不属于本会话」 |
+| worker | `dispatch_launch` | 不拦，会以 worker 自己为派发者新建任务；只受 `maxTasksPerSession` 限制。系统提示禁止这样做 |
 
 ---
 
@@ -467,7 +468,7 @@ workspace / cwd**、来源必须已结算且未退休归档。这三条违反时
 
 ```json
 {
-  "version": "0.10.1",
+  "version": "0.10.0",
   "total": 3,
   "running": 2,
   "max_workers": 6,

@@ -2,36 +2,6 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
-## 0.10.1 — 2026-11-16
-
-### 修复：P0 四项工程收口
-
-**1. Config schema（`src/config.js`）**：导出 Schemastery `Config`，在 `apply` 之前校验类型、范围与枚举值，
-默认值全部引用 `DEFAULTS`。错配置现在 fail loud，不再带着半份配置跑；插件管理器也从同一份 schema 读字段。
-`@deepseek-ai/schemastery` 作为 peer/dev 依赖（不进 tarball，运行时由宿主提供）。
-
-**2. 可选服务不再 apply 时只读一次**：`webServer` 改用 `ctx.inject(['webServer'], cb)` 等待服务出现；
-`workspaceRegistry` 进硬 `inject`，`provision()` 缺服务时至少留一条 warn。看板不再因为服务晚到而静默消失，
-默认工作区也不会因为时序而静默不建。
-
-**3. worker 工具面硬边界**：`SessionGateway.restrictWorkerTools()` 在建会话后收走除 `dispatch_report` 外的
-9 个 `dispatch_*`，复用老会话时在投递交接摘要前补收一次。worker 不能再递归派生；`maxTasksPerSession` 退为第二道闸门。
-
-**4. 看板路由失败隔离**：`registerBoardRoutes()` 包住 `server.register`，路由冲突/HMR 重复注册只 warn，
-不再让整个 `apply` 抛错；看板起不来不影响 10 个工具。
-
-验证：`npm test` **660 pass / 0 fail**（新增 Config、worker 边界、看板注册、apply 生命周期四组用例）；
-`node scripts/client-smoke.mjs` 817 项全过。CI 增加 `npm ci`（仅为安装 Schemastery 开发依赖）。
-
-### 变更：安装页先说清「派发 + 派发工作台」
-
-`locale/zh.json` / `locale/en.json` 的 `meta.title` 与 `meta.description`、`package.json` 的 `description`
-都改成先讲两件事：**主会话能把任务派给独立后台子会话、报告自动回流**，以及**侧边栏有一块「派发工作台」
-看并发、排队、批次进度与失败原因**。包 README、根 README 与落地页 Hero 同步了同一套说法。
-
-**为什么**：插件管理器安装时展示的是 locale meta / package description，旧的「任务派发」只说了
-一半能力，用户装完才知道还有工作台。介绍必须在安装前就回答「装它能干什么」。
-
 ## 0.10.0 — 2026-11-16
 
 ### 新增：派发卡与报告卡（plans/12 / 13）

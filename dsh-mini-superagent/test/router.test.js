@@ -169,7 +169,7 @@ test('同一个会话只收窄一次，后续派发不重复登记', async () =>
   })
 })
 
-test('router 模式不再额外收窄 worker（worker 边界在创建时已收）', async () => {
+test('worker 自己再派发时不会被收窄（它还要干活）', async () => {
   await withDispatch({}, async ({ d, host }) => {
     const calls = []
     d.sessions.restrictTools = (agent) => { calls.push(agent.id); return () => {} }
@@ -185,7 +185,7 @@ test('router 模式不再额外收窄 worker（worker 边界在创建时已收�
 
     await d.launch(worker, { title: '子任务', brief: 'b' })
 
-    assert.deepEqual(calls, [], 'router 不该再对 worker 做第二套收窄；worker 的 dispatch_* 在创建时已经收走')
+    assert.deepEqual(calls, [], 'worker 递归派发不该把 write/edit 从它自己手里拿走')
   })
 })
 
