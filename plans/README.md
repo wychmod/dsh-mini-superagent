@@ -65,11 +65,16 @@
 `test/stats.test.js` +6 条、`test/analytics.test.js` +6 条、`test/memory.test.js` +2 条、
 `test/board.test.js` +1 条；`scripts/client-smoke.mjs` +6 项（图表判空、轮询停摆、口径行跟 payload）。
 
-## 补充：卡片落地与发布前缺口（2026-11-16）
+## 补充：卡片落地与 0.10.0 发布（2026-11-16）
 
 12 / 13 的代码已全部进 `main`（`203358f` 派发卡、`834efd8` 的 `/board?group=`、`f140c73` 的
 `client.ready.cards`、`f6db9c2` 报告卡正式版与派发卡实时状态）。当前实测：`npm test` **643 pass / 0 fail**，
 `node scripts/client-smoke.mjs` **817 项全过**。
+
+**发布面已收口**：`dsh-mini-superagent@0.10.0` 已上 npm（`latest`，2026-11-16 11:36:28 +08:00，
+tarball integrity 与本地 pack 一致）；`v0.10.0` tag 与 GitHub Release 已创建。GitHub Pages 已启用
+（`main` 根目录 + `.nojekyll`），`https://wychmod.github.io/dsh-mini-superagent/` 返回 200，
+线上 `index.html` 与仓库版本字节一致（127,108 B）。
 
 已能指认的落地面：
 
@@ -87,14 +92,16 @@
    （单测已覆盖过滤与截断语义）；报告卡 G2 五条只有「`<details>` 点击被重渲染收回」这一条有真机记录，
    其余（单条报告、轮次导航、compact、刷新去重、热重载）未逐条验收。
 2. **手工视觉清单未跑**：plans/12 §12.3、plans/13 §12.3 的间距、对比度、窄屏折行、portal 翻转
-   仍以离线断言为准，未截图目视。
-3. **发布环境**：npm 登录已恢复（`npm whoami` = `wychmod`，2026-11-16 由用户完成）；默认 registry
-   仍是 Tencent 镜像，publish 必须显式 `--registry=https://registry.npmjs.org/ --access public`。
+   仍以离线断言为准，未截图目视。落地页也受同一限制：浏览器控制器截图超过 10 MiB，无法做像素级目视。
 
 本次已收口（0.10.0）：版本号已同源到 `package.json`、`src/constants.js`、根 README、包内 README、
 `index.html`、`docs/board.md` / `docs/tools.md` 示例与 CHANGELOG 标题；CHANGELOG 补了派发卡 / 报告卡 /
 轮次摘要条目，并补上 0.9.1 / 0.9.0 的正式版本标题；`docs/board.md` 不再声称报告卡未实现；
 根 README 与落地页的 629 / 450 已改成 643 / 817；包内 README 补了「会话里的两张卡」一节。
+
+发布与页面：npm `0.10.0` 已发布（`latest`）、`v0.10.0` tag 与 GitHub Release 已建；GitHub Pages
+已启用并完成两次构建，线上页面与本地字节一致，0 个未闭合标签 / 重复 id / 失效锚点，6 个按钮均有
+`type`，5 个外链中 4 个 200（npmjs.com 对 curl 返回 403，属反爬，不是死链）。
 
 ## 状态口径
 
