@@ -237,6 +237,10 @@ h1 .latin{font-family:Montserrat,var(--sans);font-weight:500}
 .code code{font:400 12px/1.6 var(--mono);color:var(--tx2);white-space:pre-wrap;word-break:break-all}
 .code .dollar{color:var(--brand)}
 .cmd-card .code + .code{margin-top:8px}
+.cmd-card.wide{grid-column:1/-1}
+.cmd-steps{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 16px}
+.cmd-step{display:flex;align-items:baseline;gap:8px;background:var(--s2);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.6;color:var(--tx2)}
+.cmd-step em{flex:none;font:500 11px var(--mono);font-style:normal;color:var(--brand)}
 .copy{margin-left:auto;flex:none;font:400 11px var(--mono);color:var(--tx4);padding:3px 7px;border-radius:5px;transition:color .2s,background .2s}
 .copy:hover{color:var(--tx);background:var(--hover)}
 .copy.done{color:var(--brand)}
@@ -362,6 +366,7 @@ h1 .latin{font-family:Montserrat,var(--sans);font-weight:500}
   .sec-title,.final h2{font-size:22px}
   .demo{position:relative;left:auto;right:auto;bottom:auto;margin-top:22px;border-bottom:1px solid var(--bd);height:190px}
   .feature{min-height:0}
+  .cmd-steps{grid-template-columns:1fr}
   .ver-pill{display:none}
   .brand-name{font-size:13px}
   .preview-wrap{width:calc(100% - 32px);max-width:100%;min-width:0;margin-top:48px}
@@ -576,23 +581,33 @@ h1 .latin{font-family:Montserrat,var(--sans);font-weight:500}
 <section class="section container" id="quickstart">
   <div class="sec-left reveal"><span class="eyebrow">02 / DEVELOPER EXPERIENCE</span><h2 class="sec-title zh mt-s">开发者体验</h2></div>
   <div class="cmd-grid">
-    <article class="cmd-card reveal" style="--rd:0s">
+    <article class="cmd-card wide reveal" style="--rd:0s">
+      <h3>图形界面安装（最省事）</h3>
+      <p>打开 DeepSeek Harness 的插件页面，点右上角「添加插件」，输入 <code>dsh-mini-superagent</code> 即可安装；装完刷新一次 GUI 页面。不需要命令行，也不需要写 target。</p>
+      <div class="cmd-steps">
+        <div class="cmd-step"><em>01</em>打开 DeepSeek Harness 的插件页面</div>
+        <div class="cmd-step"><em>02</em>点右上角「添加插件」</div>
+        <div class="cmd-step"><em>03</em>输入包名，确认安装</div>
+      </div>
+      <div class="code"><span class="dollar">$</span><code>dsh-mini-superagent</code><button class="copy" type="button">复制</button></div>
+    </article>
+    <article class="cmd-card reveal" style="--rd:.08s">
       <h3>一行安装（npm）</h3>
       <p>dsh-mini-superagent@0.10.0 已发布到 npm（latest）。在 DSH 里按包名安装即可，不用 clone、不用构建、也不用 npm install。装完确认 10 个 dispatch_* 工具已注册。</p>
       <div class="code"><span class="dollar">$</span><code>plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.0")</code><button class="copy" type="button">复制</button></div>
     </article>
-    <article class="cmd-card reveal" style="--rd:.08s">
+    <article class="cmd-card reveal" style="--rd:.16s">
       <h3>从源码 / 本地目录安装</h3>
       <p>想改代码或用本地目录装，先 clone 再把 target 换成本地路径。装完刷新一次 GUI，侧边栏图标与输入框控件才会加载。</p>
       <div class="code"><span class="dollar">$</span><code>git clone https://github.com/wychmod/dsh-mini-superagent.git</code><button class="copy" type="button">复制</button></div>
       <div class="code"><span class="dollar">$</span><code>plugin_manager(action="install_bundle", target="&lt;仓库路径&gt;/dsh-mini-superagent")</code><button class="copy" type="button">复制</button></div>
     </article>
-    <article class="cmd-card reveal" style="--rd:.16s">
+    <article class="cmd-card reveal" style="--rd:.24s">
       <h3>验证版本与并发上限</h3>
       <p>version 与 src/constants.js 的 VERSION 一致；max_workers 等于配置里的 maxWorkers（默认 6）。</p>
       <div class="code"><span class="dollar">$</span><code>dispatch_list() → {"version":"0.10.0","total":0,"running":0,"max_workers":6}</code><button class="copy" type="button">复制</button></div>
     </article>
-    <article class="cmd-card reveal" style="--rd:.24s">
+    <article class="cmd-card reveal" style="--rd:.32s">
       <h3>环境与安装注意</h3>
       <p>不要和旧插件 dsh-dispatch 同时安装：两者有 8 个同名工具，同一全局层重复注册会直接抛错。</p>
       <div class="code"><span class="dollar">$</span><code>DSH &gt;= 0.2.1-rc.2 · Node ^22.19.0 || &gt;=24.0.0 · 0 运行时依赖</code><button class="copy" type="button">复制</button></div>
