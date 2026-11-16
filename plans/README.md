@@ -42,7 +42,7 @@
   `#blockedStateOf()` 现算一次，被挡就抛 `dispatch/conflict`（`dispatch_message` / 续派 / 看板续派三条入口同时受约束），
   见 CHANGELOG「修复：截断标记误报、热重载误判与依赖准入绕过」。
 
-## 补充：分析数据看板（未发布，不属于 09 的四视图）
+## 补充：分析数据看板（已随 0.9.1 发布，不属于 09 的四视图）
 
 顶层新增 `任务看板 / 分析看板` 二选一切换，任务看板零改动。分析看板走**另一条**只读路由
 `GET /board/analytics`（`src/analytics.js`），按 `createdAt` 的队列口径统计任务总量、状态分布、
