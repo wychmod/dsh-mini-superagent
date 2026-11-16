@@ -15,11 +15,11 @@
 | [`06-board-redesign.md`](06-board-redesign.md) | 任务看板从「流水账」重排成「指挥台」：问题拆解、参考对象、信息架构、效果数字怎么算 | **已落地**：三段式（`需要你处理` / `在跑与排队` / `最近完成`，`client/index.js:138-142`）+ 四个效果数字 + 并发条已上线（CHANGELOG「任务看板改版」）；**真机视觉验收仍未做** |
 | [`07-memory-governance.md`](07-memory-governance.md) | 派发记忆治理：哪些事实是权威、哪些只是投影、何时合并、何时退休 | **P0 五项 + P1「降噪」已实现**：`src/dispatch.js` 的 `memoryStats()` / `enforceLedgerCap()` / `sweepMemory()` / `forgetTargets()` / `mergeableOf()` / `projectText()`，`test/memory.test.js` 16 条 + `test/p1-noise.test.js` 15 条用例；**P2「结构」未做** |
 | [`08-session-reuse.md`](08-session-reuse.md) | 会话复用与任务连续性：复用被派发的会话、显式续派 + 候选建议 + 硬校验的可行性与成本 | **阶段 0「解耦」+ 阶段 1「最小可用」（模型 A）+ 阶段 2「复用会话」（模型 B）已落地**：显式绑定 `TaskTable.activeTaskId()` / `activeTaskOf()` / `tasksOfWorker()` / `workerState()`（`src/tasks.js`，`byWorker()` 优先走绑定；`task.threadId` 见 `src/constants.js` 的 `THREAD_PREFIX`），`test/thread-binding.test.js` 19 条；`dispatch_launch({ continue_task_id })` 走 `Dispatch.continueLaunch()`，五条硬校验后转发为 `message()`、不新建任务，看板已结算行有「续派」按钮（`client/index.js` 的 `continueTask`），`test/continue-launch.test.js` 19 条；`handoff_from` / `handoff_reason` / `no_reuse` 新建任务并沿用来源子会话，`launch()` 记录 `parentTaskId` 血缘（`src/dispatch.js` 的 `#startReused()`，落盘与 `restore()` 都保留，看板 `handoff_from` 由 `boardTask()` 投影），`test/session-reuse.test.js` 35 条。§四 的「候选建议」已由只读工具 `dispatch_candidates` 落地（plans/11）。**未做**：阶段 3（线程级归档/退休，检索不到对应实现）；`cancel()` 仍是会话级打断，同会话有活跃任务时会间接波及 |
-| [`09-board-analytics.md`](09-board-analytics.md) | 看板统计口径与多视图：从状态列表升级为判断工具，规划「总览 / 效果 / 拆解 / 历史」四视图、指标字典与数据契约 | **P0 + P1 + P2 已落地**：P0「统计口径地基」= 权威 `settledAt`（`src/tasks.js` 的 `settle()` / `transition()` 写、`reopen()` 清）+ `boardStats` 聚合与 coverage + 四数字补分子分母，`src/stats.js`（8 个导出：`boardStats` / `degradedStats` / `quantile` / `median` / `normalizeWindow` / `defaultWindowDays` / `settleTimeOf` / `inWindow`）+ `test/stats.test.js` 48 条 + 更新 `GET /board/stats`（`src/board.js:519`），活宿主实测 200：`statsVersion:1, coverage.sourceTasks:63, settled:31, timeBasis:mixed, daily:2 行`；P1「效果 + 拆解」= `EffectView` / `BreakdownView`（`client/index.js`）；P2「历史 + 详情抽屉」= `HistoryView` / `TaskDrawer`，`scripts/client-smoke.mjs` 实测 `全部通过：346 项检查`。**未做**：P3 全部四项——时间加权并发利用率（需宿主有界采样或 running 数变化事件，`src/` 检索不到 `utilization`）、消息级投递流水（检索不到 `deliveryLog` / `messageLog`）、稳定错误码与失败类型分布（检索不到 `errorCode` / `error_code`）、token/成本（检索不到 `tokenUsage` / `costUsd`，且需宿主先给真实模型用量）；均为缺宿主数据源，不是缺视图 |
+| [`09-board-analytics.md`](09-board-analytics.md) | 看板统计口径与多视图：从状态列表升级为判断工具，规划「总览 / 效果 / 拆解 / 历史」四视图、指标字典与数据契约 | **P0 + P1 + P2 已落地**：P0「统计口径地基」= 权威 `settledAt`（`src/tasks.js` 的 `settle()` / `transition()` 写、`reopen()` 清）+ `boardStats` 聚合与 coverage + 四数字补分子分母，`src/stats.js`（8 个导出：`boardStats` / `degradedStats` / `quantile` / `median` / `normalizeWindow` / `defaultWindowDays` / `settleTimeOf` / `inWindow`）+ `test/stats.test.js` 48 条 + 更新 `GET /board/stats`（`src/board.js:519`），活宿主实测 200：`statsVersion:1, coverage.sourceTasks:63, settled:31, timeBasis:mixed, daily:2 行`；P1「效果 + 拆解」= `EffectView` / `BreakdownView`（`client/index.js`）；P2「历史 + 详情抽屉」= `HistoryView` / `TaskDrawer`，`scripts/client-smoke.mjs` 当时实测 346 项检查（当前全套 817 项）。**未做**：P3 全部四项——时间加权并发利用率（需宿主有界采样或 running 数变化事件，`src/` 检索不到 `utilization`）、消息级投递流水（检索不到 `deliveryLog` / `messageLog`）、稳定错误码与失败类型分布（检索不到 `errorCode` / `error_code`）、token/成本（检索不到 `tokenUsage` / `costUsd`，且需宿主先给真实模型用量）；均为缺宿主数据源，不是缺视图 |
 | [`10-voice-style.md`](10-voice-style.md) | 主会话的语言风格：先认领任务、再说人话、能一眼看懂（报告文案形状与提示词里的说话规则） | **P0 + P1 已落地**：`headline` 字段、`reportText()` 四段式、失败/中断/批次文案在 `src/voice.js`（`test/voice-contract.test.js` 31 条）；提示词「说话方式」段 `SPEAK_RULE` 在 `src/prompt.js`，受 `test/voice-prompt.test.js` 的 ≤8 行 / ≤500 字门禁约束。**未做**：P2「`dispatch_inspect` 返回可直接转述的详情」、P3 追问率校准；`docs/voice-samples.md` 的 10 场景人工盲评仍待人跑 |
-| [`12-dispatch-card.md`](12-dispatch-card.md) | 派发卡：把 `dispatch_launch` / `dispatch_launch_many` 的通用工具行改成批次卡（Tool View 接缝：`tool.call.toolview`） | **规划中，未实现**。方案、数据契约、交互规格与 14 条离线断言已定；前置是 `GET /board?group=` 与 `tool.call.toolview` 注册 |
-| [`13-report-card.md`](13-report-card.md) | 报告卡：把回流报告从 `context` 行改成卡片（Conversation Node 接缝：`events.register` + `conversation.chat.node`） | **规划中，未实现**。第一方已有先例（`ui-user-questions` 的 `questionReplyDefinition` 用 `exclusive` 认领自己的 `user/message`），第三方包复用仍需真机 spike；不通过则退回方案 B（只加卡头装饰） |
-| [`14-cards-degradation-validation.md`](14-cards-degradation-validation.md) | 12/13 的配套策略：L0–L3 降级阶梯、逐项降级矩阵、`client-ready` 可观测、G0–G3 四道验证闸门与回滚 | **策略文档**，非功能项。关键约束：报告卡必须先注册 renderer 再认领消息；S3 的 spike 五条硬指标不过就停 |
+| [`12-dispatch-card.md`](12-dispatch-card.md) | 派发卡：把 `dispatch_launch` / `dispatch_launch_many` 的通用工具行改成批次卡（Tool View 接缝：`tool.call.toolview`） | **已落地（2026-11-16）**：`tool.call.toolview` 注册见 `client/index.js:11210`，`package.json` 的 `dsh.client.inject` 已加 `@deepseek-ai/dsh-client-ui-tool`；三阶段 `preparing/start/result`、超 4 行折叠、启动失败占位；P1 实时按 `?group=` / `?task=` 轮询（`src/board.js:413`）、一个 group 一个定时器、全部结算后降频 15s、`document.hidden` 暂停、连续 3 次失败标「状态可能已过期」；另注册 `conversation.chat.turnTail` 本轮派发摘要（工具行被折叠时仍可见）。**未做**：plans/14 §12.3 的手工视觉清单未逐项记录 |
+| [`13-report-card.md`](13-report-card.md) | 报告卡：把回流报告从 `context` 行改成卡片（Conversation Node 接缝：`events.register` + `conversation.chat.node`） | **已落地（2026-11-16）**：`REPORT_NODE_KIND = 'dispatch-report'`（`client/index.js:123`），`uiConversation.events.register` 以 `exclusive` 认领插件来源的 relay `user/message`，再在 `conversation.chat.node` 渲染；按【任务】【结果】【备注】【需要】四段解析，**任一段解析不出就整份退回原文卡**（原文始终在 DOM，【细节】里是完整 raw）；状态 chip + 一键复制原文；注册顺序固定「先 renderer 再 Definition」，失败 warn 一次并撤 renderer；`test/voice-contract.test.js` 反向钉住 `REPORT_SECTIONS` 段名。**未核实**：plans/14 G2 的五条真机标准（只出现一次 / 轮次导航 / compact / 刷新去重 / 热重载）没有逐条验收记录；真机只抓到并修掉了 `<details>` 把 `open` 当受控属性导致的「点了没反应」 |
+| [`14-cards-degradation-validation.md`](14-cards-degradation-validation.md) | 12/13 的配套策略：L0–L3 降级阶梯、逐项降级矩阵、`client-ready` 可观测、G0–G3 四道验证闸门与回滚 | **策略已部分执行**：G0 离线闸门落在 `scripts/client-smoke.mjs`（当前 817 项，覆盖 L2/L3 降级、10 条失败注入、parser 畸形 fixture、槽注册与 `CARD_FEATURES` kill switch）；G3 常量级关闭已实现（`client/index.js:88` 的 `CARD_FEATURES`），`GET /board/selfcheck` 的 `client.ready.cards` 可读（`docs/board.md`）。**未做 / 未记录**：G1 的三条 `http-smoke.mjs` 用例（`?group=` / `?task=` / `cards`）尚未补；G2 真机五条没有逐条验收记录；§12.3 / §6 的真机目视与部分失败注入（`clipboard` 缺失、断网）只在离线层覆盖 |
 | [`prd-01-task-plan-visibility.md`](../2026-11-11/code-structure-analysis/outputs/prd-01-task-plan-visibility.md) | 任务级计划透出：worker 在报告里说「分几步、走到哪一步」，看板用 `2/5` 与当前步骤透出，但不新增消息、不放大快照 | **已落地**：`dispatch_report.plan`（`[{text,status}]`、整版替换、`maxPlanSteps` 12 / `maxPlanStepChars` 120、`plan_accepted` / `plan_truncated`）、`#applyPlan()` 的终态冻结与幂等、`boardTask()` 的 `plan_total` / `plan_done` / `plan_current`（已结算不下发）。**审计确认的缺口**：① §6「计划更新后显示『计划已更新』一次」**已实现**（A7 收口：`client/index.js` 的 `lastPlan` / `planNotice` 两张表 + `PLAN_NOTICE_MS = POLL_MS * 3` = 6 秒窗口；验收见 `scripts/client-smoke.mjs` 的「归档按钮改名与提示 / 计划已更新」段）；② §5 写归一化在 `#admitEntry`，实际在 `report()` 里调 `normalizePlan()`（等价，位置不符）；③ 原记录的「`card()` / `detail()` 都不投影 `task.plan`，「全量计划走 `dispatch_inspect`」在代码里没有落点」**已被 A2 收口**——`detail()` 现在投影全量 `plan`（已结算任务照样返回，`test/inspect-plan-deps.test.js` 断言），`card()` 仍刻意不投影（列表是每轮全量，步骤数组会撑大返回体），这句话在代码里已有落点 |
 | [`prd-02-batch-dependencies.md`](../2026-11-11/code-structure-analysis/outputs/prd-02-batch-dependencies.md) | 批次依赖：后一步等前一步结算，被挡任务仍 `queued` 但不占并发位；前置失败则连带取消并标注原因 | **已落地**：`dispatch_launch.depends_on` / `launch_many` 的 `depends_on_index`、开始前判定（`blockedBy` / `blockedReason`）、连带取消 `#cancelDependents()`（`cancel_reason` / `error_code`）、恢复收敛、看板五字段、四个错误码、`maxDependsOn`（默认 8，超限报错不截断）。**审计确认的缺口**：§6「前置被 retry 重开 → 记一条 warn」未实现（`#cancelDependents()` 只对「后继 running」记 warn，见 §4.4）；见下方「已知限制」小结 |
 
@@ -64,6 +64,37 @@
 新增用例：`test/resume-after-settle.test.js`（7 条，钉复活路径的四条事实）、
 `test/stats.test.js` +6 条、`test/analytics.test.js` +6 条、`test/memory.test.js` +2 条、
 `test/board.test.js` +1 条；`scripts/client-smoke.mjs` +6 项（图表判空、轮询停摆、口径行跟 payload）。
+
+## 补充：卡片落地与发布前缺口（2026-11-16）
+
+12 / 13 的代码已全部进 `main`（`203358f` 派发卡、`834efd8` 的 `/board?group=`、`f140c73` 的
+`client.ready.cards`、`f6db9c2` 报告卡正式版与派发卡实时状态）。当前实测：`npm test` **643 pass / 0 fail**，
+`node scripts/client-smoke.mjs` **817 项全过**（根 README 与落地页仍写 629 / 450，属待改的过时数字）。
+
+已能指认的落地面：
+
+- 派发卡：`tool.call.toolview` 双 key 注册、三阶段、4 行折叠、`?group=` / `?task=` 轮询、
+  单 group 单定时器、结算后降频、页面隐藏暂停、3 次失败标「可能已过期」；`conversation.chat.turnTail`
+  本轮摘要与它各自独立降级。
+- 报告卡：`dispatch-report` 节点、`exclusive` 认领、四段解析、原文卡兜底、状态 chip、复制原文；
+  先 renderer 后 Definition 的顺序被失败注入用例钉住。
+- 降级可观测：`GET /board/selfcheck` 的 `client.ready.cards.batch` / `.report` 三态
+  （`on` / `error:slot` / `error:register` / `error:parse`）；`CARD_FEATURES` 常量级关闭。
+
+发布前仍未收口（按阻塞程度排）：
+
+1. **CHANGELOG 没有卡片条目**：`## 未发布` 顶部仍是 0.9.1 的「A 类七条」，派发卡 / 报告卡 /
+   轮次尾部摘要都没有记录。npm 包会带 `CHANGELOG.md`，发布前必须补。
+2. **`docs/board.md` 仍写「report 卡尚未实现…`cards.report` 预期缺席」**，与代码相反；
+   同节的排障表也把「报告变成普通用户消息」当默认现象。属必须改的错文档。
+3. **G1 未做**：`scripts/http-smoke.mjs` 还没有 `?group=` / `?task=` / `cards` 三条用例；
+   G2 真机五条只有「`<details>` 点击被重渲染收回」这一条有真机记录，其余（单条报告、
+   轮次导航、compact、刷新去重、热重载）未逐条验收。
+4. **版本与数字未同源**：`package.json` / `VERSION` 仍是 0.9.1（已发布，不能覆盖）；
+   根 README（629 / 450）、落地页 `index.html`、包内 README、CHANGELOG 需要一起改到新版本号与
+   643 / 817，然后才能打包。
+5. **手工视觉清单未跑**：plans/12 §12.3、plans/13 §12.3 的间距、对比度、窄屏折行、portal 翻转
+   仍以离线断言为准，未截图目视。
 
 ## 状态口径
 
