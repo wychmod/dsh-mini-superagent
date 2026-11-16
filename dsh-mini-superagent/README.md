@@ -1,18 +1,22 @@
-# dsh-mini-superagent · 任务派发
+# dsh-mini-superagent · 任务派发与工作台
 
-给 DeepSeek Harness 装一张任务台：主会话派活，子会话干活，报告自己回来。
+给 DeepSeek Harness 装一套派发工具 + 一块派发工作台：主会话派活，子会话干活，报告自己回来，过程在侧边栏看得见。
 
 主会话用 `dispatch_launch` 把任务派给**独立的后台子会话**（自己的 Session、自己的工作目录、独立跑完整的一轮或多轮），
 命令**立即返回**；子会话干完用 `dispatch_report` 汇报，报告作为一条插件来源的消息回到主会话——
 主会话空闲时被唤醒，忙碌时并入下一个 step。于是主会话可以「派发 → 收报告 → 追问/纠偏 → 再派发」，
 而不是卡在等结果上。
 
-能力模型参考 DSH 官方 [dsh-superagent 原型](https://github.com/deepseek-ai/dsh-superagent-prototype)，
-但只保留派发这一件事：**没有** GitHub/飞书监听、没有工单与授权策略、没有数据库、没有构建步骤。
-纯 ESM，零运行时依赖。
+装上之后你会得到两样东西：
 
-从 0.3.0 起附带一个常驻侧边栏的看板（本版更名「派发工作台」）：Host 侧注册同源 HTTP 路由提供快照，浏览器侧是一个不打包、不编译的
-ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直接取消/重试。它不占模型上下文，也不需要 agent 调工具。
+- **能派发**：10 个 `dispatch_*` 工具，覆盖派发、批量派发、查询、追问/续派、取消与汇报；
+  不占住当前 step，报告会自动回流。
+- **能看见**：侧边栏常驻「派发工作台」，看并发、排队、耗时、批次进度（`2/5`）与失败原因，
+  并直接取消、重试、归档；Host 侧只注册同源 HTTP 路由，浏览器侧不打包、不编译，不占模型上下文。
+
+能力模型参考 DSH 官方 [dsh-superagent 原型](https://github.com/deepseek-ai/dsh-superagent-prototype)，
+但只保留派发与工作台这两件事：**没有** GitHub/飞书监听、没有工单与授权策略、没有数据库、没有构建步骤。
+纯 ESM，零运行时依赖。
 
 从 0.4.0 起有**工作区**：启动时准备一个默认工作区与固定主会话；每天一个【派发】工作区收拢子会话；
 派发时可以用 `workspace` 指定目标工作区（id / 绝对路径 / 标题）；结束超过保留期的子会话会自动归档。
@@ -60,19 +64,19 @@ ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直�
 
 ## 安装
 
-插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.0` 已发布到 npm（`latest`），**按包名即可安装**。
+插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.1` 已发布到 npm（`latest`），**按包名即可安装**。
 
 ### 方式一：按包名安装（推荐）
 
 在 DSH 里调用：
 
 ```text
-plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.0")
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.1")
 ```
 
 也可以把这句话交给 DSH 里的任意会话：
 
-> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.0`，装完确认 10 个 `dispatch_*` 工具已注册。
+> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.1`，装完确认 10 个 `dispatch_*` 工具已注册。
 
 ### 方式二：从源码 / 本地目录安装
 
@@ -89,10 +93,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.10.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.10.1","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.0`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.1`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
