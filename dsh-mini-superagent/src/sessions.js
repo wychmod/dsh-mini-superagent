@@ -6,6 +6,7 @@
  * agent.steer 这些细节，换版本时只需要改这一个文件。
  */
 import { LOG_PREFIX, PROMPT_SECTION, SOURCE_KIND } from './constants.js'
+import { TOOL_NAMES } from './tools.js'
 
 /**
  * 两条路径是否指向同一个目录（用于「这个标题是不是被**别的**目录占着」）。
@@ -45,6 +46,8 @@ export class SessionGateway {
      * 同上：`agent.ctx` 的生命周期比插件长，卸载时要主动收回。
      */
     this.restrictDisposers = new Map()
+    /** 已经收窄过 worker 工具面的 agent id；复用时不必重复调用。 */
+    this.workerRestricted = new Set()
     /**
      * 提示收敛钩子（`agent/pre-step` 的 disposer），按 agent id 记。
      * 与提示段同源：都挂在 `agent.ctx` 上，生命周期比插件长，卸载时要主动收回。
@@ -186,12 +189,13 @@ export class SessionGateway {
    *
    * @param {object} agent 目标 Agent
    * @param {string[]} deny 要收走的工具名
+   * @param {string} [label] 日志里的收窄用途（路由模式 / worker 工具面 / subagent 工具面）
    * @returns {(() => void) | undefined} disposer；宿主不支持时返回 undefined
    */
-  restrictTools(agent, deny) {
+  restrictTools(agent, deny, label = '路由模式') {
     const tools = agent?.ctx?.tools
     if (typeof tools?.restrict !== 'function') {
-      this.warn(`${LOG_PREFIX} 宿主没有 agent.ctx.tools.restrict，跳过路由模式的工具收窄`)
+      this.warn(`${LOG_PREFIX} 宿主没有 agent.ctx.tools.restrict，跳过${label}的工具收窄`)
       return undefined
     }
     const names = []
@@ -206,23 +210,47 @@ export class SessionGateway {
     }
     if (!names.length) {
       // 一个都没命中就明确记一条：配了却没生效，静默会让「说好的禁止」变成空话。
-      this.warn(`${LOG_PREFIX} 路由模式没有可收窄的工具（配置：%s）`, (deny ?? []).join(', ') || '(空)')
+      this.warn(`${LOG_PREFIX} ${label}没有可收窄的工具（配置：%s）`, (deny ?? []).join(', ') || '(空)')
       return undefined
     }
     try {
       const dispose = tools.restrict({ deny: names })
       if (typeof dispose !== 'function') return undefined
+      // 同一个 agent 可能被二次收窄（例如 worker 复用时再确认一次边界）：
+      // 先收回上一条，否则旧 disposer 会被覆盖且永远不会执行。
+      const previous = this.restrictDisposers.get(agent.id)
+      if (previous) {
+        try { previous() } catch { /* 宿主已回收 */ }
+        this.restrictDisposers.delete(agent.id)
+      }
       // 由这里统一持有，插件卸载时一次性收回；Dispatch 只记「谁的已经收窄过」。
       this.restrictDisposers.set(agent.id, dispose)
       return dispose
     } catch (error) {
-      this.warn(`${LOG_PREFIX} 路由模式收窄工具失败: %s`, String(error))
+      this.warn(`${LOG_PREFIX} ${label}收窄工具失败: %s`, String(error))
       return undefined
     }
   }
 
+  /**
+   * worker 的硬边界：只保留 `dispatch_report`，收走其余 9 个 `dispatch_*`。
+   *
+   * worker 是「干活的人」，不是第二个调度器。`maxTasksPerSession` 只能限速，
+   * 不能阻止递归派生；把这个边界放在建会话之后、投递简报之前，模型从第一条
+   * 消息起就没有 `dispatch_launch` 可调。读写/执行工具不受影响。
+   */
+  restrictWorkerTools(agent) {
+    if (!agent?.id || this.workerRestricted.has(agent.id)) return
+    const deny = TOOL_NAMES.filter(name => name !== 'dispatch_report')
+    const dispose = this.restrictTools(agent, deny, 'worker 工具面')
+    // 只在真的收窄成功后记账：宿主不支持 restrict 时下次复用还会再试一次，
+    // 而不是把「没限制」记成「已限制」。
+    if (typeof dispose === 'function') this.workerRestricted.add(agent.id)
+  }
+
   /** 会话被销毁时收回它的工具收窄，别让登记表随会话数一直长。 */
   forgetRestrict(agentId) {
+    this.workerRestricted.delete(agentId)
     const dispose = this.restrictDisposers.get(agentId)
     if (!dispose) return
     this.restrictDisposers.delete(agentId)
@@ -510,5 +538,6 @@ export class SessionGateway {
       try { dispose() } catch { /* 宿主已回收 */ }
     }
     this.restrictDisposers.clear()
+    this.workerRestricted.clear()
   }
 }

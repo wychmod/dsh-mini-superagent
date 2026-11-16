@@ -1030,10 +1030,40 @@ export function createBoardHandler(ctx, dispatch) {
  * @returns {(() => void) | undefined} 注销函数
  */
 export function registerBoardRoutes(ctx, dispatch) {
-  const server = ctx.get('webServer')
+  /**
+   * 注册动作单独包一层：路由冲突、HMR 重复注册、宿主实现抛错都只该让看板消失。
+   * 0.10.0 及更早这里直接 `server.register(...)`，一次抛错会把整个 `apply` 拖垮，
+   * 连 10 个工具都注册不上——「看板起不来」和「插件没装」是两件事。
+   */
+  const register = server => {
+    if (!server || typeof server.register !== 'function') return undefined
+    try {
+      return server.register({ kind: 'prefix', path: BASE, handler: createBoardHandler(ctx, dispatch) })
+    } catch (error) {
+      ctx.logger?.warn?.('%s 看板路由注册失败（工具与派发照常）: %s', LOG_PREFIX, String(error))
+      return undefined
+    }
+  }
+
+  /*
+   * `webServer` 是可选服务：headless 没有它，web 形态下它也可能晚于本插件就绪。
+   * 用 `ctx.inject` 等它出现，而不是在 apply 时 `ctx.get` 一次——后者在并发启动时
+   * 会静默拿到 undefined，看板永远不注册，日志里只有「没有 webServer」。
+   */
+  if (typeof ctx.inject === 'function') {
+    try {
+      ctx.inject(['webServer'], scope => register(scope?.webServer ?? scope?.get?.('webServer')))
+    } catch (error) {
+      ctx.logger?.warn?.('%s 订阅 webServer 失败（看板不可用，工具照常）: %s', LOG_PREFIX, String(error))
+    }
+    return undefined
+  }
+
+  // 旧宿主/测试夹具可能没有 ctx.inject：退回同步读取，行为与 0.10.0 一致。
+  const server = ctx.get?.('webServer')
   if (!server || typeof server.register !== 'function') {
     ctx.logger?.info?.('%s 没有 webServer，跳过任务看板路由', LOG_PREFIX)
     return undefined
   }
-  return server.register({ kind: 'prefix', path: BASE, handler: createBoardHandler(ctx, dispatch) })
+  return register(server)
 }

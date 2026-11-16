@@ -98,7 +98,7 @@ test('普通会话（父会话不是 worker）不收窄', async () => {
   })
 })
 
-test('worker 自己不算 subagent', async () => {
+test('worker 自己不算 subagent（它的工具边界在 start 里单独收）', async () => {
   await withDispatch(async ({ d }) => {
     let count = 0
     d.sessions.restrictTools = () => { count += 1; return () => {} }
@@ -110,7 +110,7 @@ test('worker 自己不算 subagent', async () => {
 
     d.decorateSubagent(makeAgent('dispatch-t-parent', 'lead'))
 
-    assert.equal(count, 0, 'worker 需要保留全部工具去干活')
+    assert.equal(count, 0, 'worker 的 dispatch_* 收窄由 restrictWorkerTools 负责，不在这里重复做')
   })
 })
 

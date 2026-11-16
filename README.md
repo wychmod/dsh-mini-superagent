@@ -8,7 +8,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-mini-superagent?color=blue&label=npm)](https://www.npmjs.com/package/dsh-mini-superagent)
 [![runtime deps](https://img.shields.io/badge/runtime_dependencies-0-brightgreen.svg)](dsh-mini-superagent/package.json)
 
-**10** 个工具 · **643** 个单元测试 · **817** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
+**10** 个工具 · **660** 个单元测试 · **817** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
 
 > **In English**: `dsh-mini-superagent` is a task dispatch and workbench plugin for DeepSeek Harness (DSH): the main session hands a self-contained brief to an independent background sub-session, the report flows back automatically, and a sidebar Dispatch Workbench shows concurrency, queueing and progress. Pure ESM, zero runtime dependencies, 10 tools, a web board and an auditable JSON ledger. Docs live under `dsh-mini-superagent/docs/` and are not shipped in the npm package.
 
@@ -45,7 +45,7 @@
 | 会话卡片 | 派发卡（三阶段、4 行折叠、批次实时状态、轮次尾部摘要）+ 报告卡（四段解析、原文兜底、复制原文）；两张卡独立降级 | Web 形态 |
 | 记忆治理 | 1.5 秒通知合并窗口（上限 2 秒）、事实与投影分离、账本 1000 条 / 90 天封顶、退休留痕（13 字段摘要，不保留报告正文） | 已实现 |
 | 健康度 | `retry_health`（重试次数 / 起始时间 / 最后错误）与 `GET /board/stats` 全量聚合（不受 200 条快照上限影响） | 已实现 |
-| 质量闸门 | `npm run check:dev`（原 `check`）= 语法检查 + 643 单测 + 817 客户端离线渲染检查；GitHub Actions 跑同一条链 | 已实现 |
+| 质量闸门 | `npm run check:dev`（原 `check`）= 语法检查 + 660 单测 + 817 客户端离线渲染检查；GitHub Actions 跑同一条链 | 已实现 |
 
 > 看板路由前缀均为 `/dsh-mini-superagent`。
 
@@ -192,7 +192,7 @@ dispatch_launch({
 - 会话卡片：派发卡（批次 / 三阶段 / 实时状态 / 轮次尾部摘要）+ 报告卡（四段解析 / 原文兜底 / 复制原文），两张卡独立降级。
 - 续派（`continue_task_id`）、交接（`handoff_from`）、计划透出（`plan`）、批次依赖（`depends_on`）。
 - 记忆治理 P0/P1：通知合并窗口、事实与投影分离、账本封顶与退休留痕。
-- 质量闸门：`npm run check:dev`（643 单测 / 817 客户端检查）与 GitHub Actions CI。
+- 质量闸门：`npm run check:dev`（660 单测 / 817 客户端检查）与 GitHub Actions CI。
 - 发布面：`dsh-mini-superagent@0.10.1` 已上 npm（`latest`），并打 `v0.10.1` tag、发 GitHub Release。
 
 ### 未做（真实缺口）
@@ -209,10 +209,11 @@ dispatch_launch({
 
 ```bash
 cd dsh-mini-superagent
+npm install          # 只装 Config schema 的开发依赖（Schemastery）
 npm run check:dev
 ```
 
-约束：不引入运行时依赖、不加构建步骤、不跳过失败断言；文档里的数字（工具数、版本号、测试数）必须与代码 / `CHANGELOG.md` 同源。新增或修改面板行为时，同时补 `test/` 与 `scripts/client-smoke.mjs` 的断言。
+约束：不引入运行时依赖、不加构建步骤、不跳过失败断言；`Config` 的默认值必须引用 `DEFAULTS`，不要在 schema 里另抄数字。文档里的数字（工具数、版本号、测试数）必须与代码 / `CHANGELOG.md` 同源。新增或修改面板行为时，同时补 `test/` 与 `scripts/client-smoke.mjs` 的断言。
 
 ## License
 

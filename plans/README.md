@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | [`00-vision.md`](00-vision.md) | 五条需求的判定、依据与分期。结论：五条都能做，没有一条卡在 DSH 能力缺失上；真正要拍板的是四个产品语义问题 | 调研结论有效；需求 2/3/4/5 已落地（默认工作区 `src/dispatch.js:2237 provision()`、`workspace`/`create_workspace` 参数、`uiWorkspace.openSession` 跳转），需求 1 属 0.1–0.2 的派发+回报。**真机视觉验收仍未做** |
 | [`01-composer.md`](01-composer.md) | 输入框工作区选择器与 `@` 选择两个控件的能力边界（逐条取证） | **已落地**：选择器注册在 `conversation.input.left`，`@` 触发源已注册，chip 的 `appearance` 省略（CHANGELOG 0.5.0 §新增）；界面**未在真浏览器里跑过** |
-| [`02-workspace-ui.md`](02-workspace-ui.md) | 侧边栏 / 会话界面骨架与看板跳转的可行性调研 | **已落地**：跳转走 `uiWorkspace.openSession`（`client/index.js:2784`）；归档行按宿主导航策略改为不可点（CHANGELOG「未发布」§修复） |
+| [`02-workspace-ui.md`](02-workspace-ui.md) | 侧边栏 / 会话界面骨架与看板跳转的可行性调研 | **已落地**：跳转走 `uiWorkspace.openSession`（`client/index.js:2784`）；归档行按宿主导航策略改为不可点（CHANGELOG「修复」节） |
 | [`03-client-graph.md`](03-client-graph.md) | Web 客户端模块图的构建时机、漏检条件、能否不重启重建（答案：**不能**） | 结论已落地为排障口径：`scripts/http-smoke.mjs:65` 打印 `client.inGraph`，根 README「开发」节据此要求重启宿主。属调研结论，无独立功能项 |
 | [`04-post-restart.md`](04-post-restart.md) | 重启宿主后的验收清单（三关按顺序跑，每关失败指向不同原因） | 验收清单，非功能项；随时可执行，无「已实现」状态 |
 | [`05-superagent-router-worker.md`](05-superagent-router-worker.md) | 与上游 `dsh-superagent-prototype` @ `8c32a9d` 的架构对照：router 与 worker 两种会话角色 | **大部分已落地**：该文 §七「已对齐」列 10 条 + 「可对齐」标 ✅ 的 13/14/16/17/18/19/20/21 共 8 条，代码里可检索到（`enforceRouter` `src/dispatch.js:178`、`selfCheck`、`handOffToBackground`、`decorateSubagent`、`src/prepare.js` 等）；**未做**：#11/#15 明确撤回或不做，上游的「两个 agent preset 硬边界」与「带优先级预留的槽位」未照搬 |
@@ -68,13 +68,18 @@
 ## 补充：卡片落地与 0.10.0 发布（2026-11-16）
 
 12 / 13 的代码已全部进 `main`（`203358f` 派发卡、`834efd8` 的 `/board?group=`、`f140c73` 的
-`client.ready.cards`、`f6db9c2` 报告卡正式版与派发卡实时状态）。当前实测：`npm test` **643 pass / 0 fail**，
+`client.ready.cards`、`f6db9c2` 报告卡正式版与派发卡实时状态）。当前实测：`npm test` **660 pass / 0 fail**，
 `node scripts/client-smoke.mjs` **817 项全过**。
 
 **发布面已收口**：`dsh-mini-superagent@0.10.0` 已上 npm（`latest`，2026-11-16 11:36:28 +08:00，
 tarball integrity 与本地 pack 一致）；`v0.10.0` tag 与 GitHub Release 已创建。GitHub Pages 已启用
 （`main` 根目录 + `.nojekyll`），`https://wychmod.github.io/dsh-mini-superagent/` 返回 200，
 线上 `index.html` 与仓库版本字节一致（127,108 B）。
+
+**P0 工程收口（0.10.1）**：补了 `src/config.js` 的 Schemastery `Config`（错配置 fail loud，默认值引用
+`DEFAULTS`）；`webServer` 改 `ctx.inject` 延迟注入、`workspaceRegistry` 进硬 `inject`；
+`restrictWorkerTools()` 把 worker 收窄到只剩 `dispatch_report`；看板路由注册包了一层失败隔离。
+新增四组用例（Config / worker 边界 / 看板注册 / apply 生命周期），单测从 643 升到 **660**。
 
 已能指认的落地面：
 
@@ -97,7 +102,7 @@ tarball integrity 与本地 pack 一致）；`v0.10.0` tag 与 GitHub Release �
 本次已收口（0.10.0）：版本号已同源到 `package.json`、`src/constants.js`、根 README、包内 README、
 `index.html`、`docs/board.md` / `docs/tools.md` 示例与 CHANGELOG 标题；CHANGELOG 补了派发卡 / 报告卡 /
 轮次摘要条目，并补上 0.9.1 / 0.9.0 的正式版本标题；`docs/board.md` 不再声称报告卡未实现；
-根 README 与落地页的 629 / 450 已改成 643 / 817；包内 README 补了「会话里的两张卡」一节。
+根 README 与落地页的 629 / 450 已改成当前实测数字（现为 660 / 817）；包内 README 补了「会话里的两张卡」一节。
 
 发布与页面：npm `0.10.0` 已发布（`latest`）、`v0.10.0` tag 与 GitHub Release 已建；GitHub Pages
 已启用并完成两次构建，线上页面与本地字节一致，0 个未闭合标签 / 重复 id / 失效锚点，6 个按钮均有
