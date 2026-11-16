@@ -240,7 +240,7 @@ dispatch.clientReady = {
 
 ```json
 {
-  "version": "0.9.1",
+  "version": "0.10.0",
   "generatedAt": "2026-11-05T10:42:07.000Z",
   "concurrency": { "running": 2, "queued": 1, "max": 6 },
   "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0, "archived": 2, "retired": 3 },
@@ -268,7 +268,7 @@ dispatch.clientReady = {
   所以那 200 条是**过滤后**的 200 条，不是全量的前 200 条。
 - `truncated`：任务总数超过 200 时为 `{shown, total}`，否则 `null`。**这是给界面的提示**——没有它的时候「总计 500 / 列表 200」看起来像数据丢了。
   带 `?group=` / `?task=` 时按**过滤后**的条数判断（客户端问的是「我这次的列表被截了多少」）。
-- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.9.1`）。
+- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.10.0`）。
 - `memory`：记忆治理口径，**形状逐字冻结**为 `memoryStats()` 的返回值。五块的含义：
   - `window`：指标窗口（最近 `days` 天 / `tasks` 条，`since` 是窗口起点 ISO 串，
     `count` 是窗口**实际命中**的条数——未套 `tasks` 上限，按 `updated_at`（没有则 `settled_at`）

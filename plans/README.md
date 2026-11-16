@@ -81,20 +81,19 @@
 - 降级可观测：`GET /board/selfcheck` 的 `client.ready.cards.batch` / `.report` 三态
   （`on` / `error:slot` / `error:register` / `error:parse`）；`CARD_FEATURES` 常量级关闭。
 
-发布前仍未收口（按阻塞程度排）：
+仍未收口（不阻塞 0.10.0 发布，但要记在案）：
 
-1. **版本未 bump**：`package.json` / `VERSION` 仍是 0.9.1（已发布，不能覆盖）。发新版必须同步
-   `package.json`、`src/constants.js`、根 README、包内 README、`index.html`、`docs/board.md` /
-   `docs/tools.md` 的示例版本号与 CHANGELOG 标题；测试数字已同步为 643 / 817。
-2. **G1 / G2 未收口**：`scripts/http-smoke.mjs` 还没有 `?group=` / `?task=` / `cards` 三条用例
+1. **G1 / G2 未收口**：`scripts/http-smoke.mjs` 还没有 `?group=` / `?task=` / `cards` 三条用例
    （单测已覆盖过滤与截断语义）；报告卡 G2 五条只有「`<details>` 点击被重渲染收回」这一条有真机记录，
    其余（单条报告、轮次导航、compact、刷新去重、热重载）未逐条验收。
-3. **手工视觉清单未跑**：plans/12 §12.3、plans/13 §12.3 的间距、对比度、窄屏折行、portal 翻转
+2. **手工视觉清单未跑**：plans/12 §12.3、plans/13 §12.3 的间距、对比度、窄屏折行、portal 翻转
    仍以离线断言为准，未截图目视。
-4. **npm 登录失效**：`npm whoami` 返回 401；默认 registry 是 Tencent 镜像，publish 必须显式
-   `--registry=https://registry.npmjs.org/ --access public`。
+3. **发布环境**：npm 登录已恢复（`npm whoami` = `wychmod`，2026-11-16 由用户完成）；默认 registry
+   仍是 Tencent 镜像，publish 必须显式 `--registry=https://registry.npmjs.org/ --access public`。
 
-已收口（`9b10e93`）：CHANGELOG 补了派发卡 / 报告卡 / 轮次摘要条目；`docs/board.md` 不再声称报告卡未实现；
+本次已收口（0.10.0）：版本号已同源到 `package.json`、`src/constants.js`、根 README、包内 README、
+`index.html`、`docs/board.md` / `docs/tools.md` 示例与 CHANGELOG 标题；CHANGELOG 补了派发卡 / 报告卡 /
+轮次摘要条目，并补上 0.9.1 / 0.9.0 的正式版本标题；`docs/board.md` 不再声称报告卡未实现；
 根 README 与落地页的 629 / 450 已改成 643 / 817；包内 README 补了「会话里的两张卡」一节。
 
 ## 状态口径

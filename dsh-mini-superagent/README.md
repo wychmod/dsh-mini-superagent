@@ -60,19 +60,19 @@ ModuleLoader 面板，可以看并发、排队、耗时与报告摘要，并直�
 
 ## 安装
 
-插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.9.1` 已发布到 npm（`latest`），**按包名即可安装**。
+插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.0` 已发布到 npm（`latest`），**按包名即可安装**。
 
 ### 方式一：按包名安装（推荐）
 
 在 DSH 里调用：
 
 ```text
-plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.9.1")
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.0")
 ```
 
 也可以把这句话交给 DSH 里的任意会话：
 
-> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.9.1`，装完确认 10 个 `dispatch_*` 工具已注册。
+> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.0`，装完确认 10 个 `dispatch_*` 工具已注册。
 
 ### 方式二：从源码 / 本地目录安装
 
@@ -89,10 +89,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.9.1","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.10.0","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.9.1`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.0`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。

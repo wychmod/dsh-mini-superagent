@@ -468,7 +468,7 @@ workspace / cwd**、来源必须已结算且未退休归档。这三条违反时
 
 ```json
 {
-  "version": "0.9.1",
+  "version": "0.10.0",
   "total": 3,
   "running": 2,
   "max_workers": 6,
