@@ -187,8 +187,8 @@ client.ready.cards.report = error:register
 （`cards` 不存在本身也只说明「没有结论可报」；整个 `/selfcheck`
 响应里连 `client.ready` 都没有，才是「模块没进图 / 页面没刷新」。）
 
-`report` 卡尚未实现（`plans/13` 的 spike 未做），当前 `cards.report` **预期缺席**，
-这不是故障；接入后它才会出现 `on` 或 `error:*`。
+`report` 卡已接入（`plans/13`）：注册成功为 `on`，失败按上表读 `error:slot` / `error:register` /
+`error:parse`；**键缺席**只说明客户端没刷新或宿主版本不提供该能力，报告会按 `context` 行显示，不是故障。
 
 #### 宿主侧的收口：`cards` 只收白名单键与白名单值
 
@@ -1051,7 +1051,7 @@ Host 聚合是纯内存遍历（不读盘、不发网络），
 | --- | --- | --- |
 | 派发后还是通用一行 | 先看 `client.ready.cards.batch` | `on` = 注册成功，问题在渲染；`error:register` = key 重复/参数不符；键不存在 = 宿主没有 `tool.call.toolview`（旧版本，正常降级） |
 | `client.ready` 里没有 `cards` 字段 | 再往上看 `client.ready.registered` | 有 `tool.call.toolview` = 注册回调还没被宿主回放；没有 = 宿主不提供这条槽；整个 `client.ready` 都没有 = 客户端没进图/没刷新 |
-| 报告变成一条普通用户消息 | `client.ready.cards.report` | 键缺席 = 报告卡还没接入（当前默认）；`error:slot` / `error:register` = 接了但注册失败 |
+| 报告变成一条普通用户消息 | `client.ready.cards.report` | `on` = 注册成功，查渲染与消息匹配；`error:slot` / `error:register` / `error:parse` = 接了但降级；键缺席 = 客户端没刷新或旧宿主 |
 | 侧边栏没有「派发工作台」 | 装/升级后是否刷新过页面；宿主是否 web 形态 | 刷新 GUI 页面；确认 `package.json` 的 `dsh.client` 已生效 |
 | 面板显示「看板数据暂时取不到」 | 浏览器控制台里 GET 的状态码 | 403 → 用同源页面或本机访问；404 → Host 没注册路由（无 `webServer` 或旧版本）；500 → 看日志 `dsh-mini-superagent:` |
 | 点取消/重试后红条提示 | 红条里的中文原因 | 409 → 任务状态不允许（running/queued/cancelled）；404 → 任务已不在表里 |

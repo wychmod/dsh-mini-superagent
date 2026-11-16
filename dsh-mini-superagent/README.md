@@ -407,6 +407,23 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 
 完整契约、失败降级与限制见 [docs/composer.md](docs/composer.md)。
 
+## 会话里的两张卡
+
+派发与回流在会话里各有卡片（plans/12 / plans/13）。两张卡**各自独立降级**：一张起不来，看板、输入框与工具照常工作。
+
+- **派发卡**（`tool.call.toolview`）：`dispatch_launch` / `dispatch_launch_many` 的通用工具行换成批次卡。
+  `preparing`（还没发出）/ `start`（工具调用已出行）/ `result`（拿到批次 group 与逐任务状态）三阶段；
+  超过 4 行折叠成「展开 n 条」；按 `?group=`（批量）或 `?task=`（单条）轮询 `/board` 取实时状态，
+  一个 group 一个定时器，全部结算后降频 15 秒，页面隐藏时暂停，连续 3 次失败标「状态可能已过期」。
+- **报告卡**（`dispatch-report` 节点）：插件来源的报告消息不再是一条灰色的 context 行，而是分成
+  【任务】【结果】【备注】【需要】四段渲染；**任何一段解析不出就整份退回原文卡**，原文始终保留在
+  【细节】里；带状态 chip 与一键复制原文。
+- **轮次尾部摘要**（`conversation.chat.turnTail`）：工具调用行会被宿主折叠，卡片也随之不可见，所以每轮
+  尾部另有一条常驻摘要，横向列出这一轮派了哪些任务。
+- **查它为什么没出现**：`GET /board/selfcheck` 的 `client.ready.cards.batch` / `.report` 给出
+  `on` / `error:slot` / `error:register` / `error:parse`；键缺席说明客户端没刷新，或宿主版本不提供这条槽。
+  客户端常量 `CARD_FEATURES` 可以单独关掉某张卡（见 `client/index.js` 顶部）。
+
 ## 会话轮次分隔线
 
 0.9.0 起，会话流里**每条用户消息上方**多一条分隔线，长会话滚动时能看见「这一轮从哪开始」。

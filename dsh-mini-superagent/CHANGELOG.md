@@ -4,6 +4,29 @@
 
 ## 未发布
 
+### 新增：派发卡与报告卡（plans/12 / 13）
+
+会话里的派发与回流从「通用工具行 + context 行」变成两张卡，两者**各自独立降级**（plans/14）。
+
+**派发卡**：注册 `tool.call.toolview`，`dispatch_launch` / `dispatch_launch_many` 渲染为批次卡；
+`preparing` / `start` / `result` 三阶段，超过 4 行折叠；按 `?group=` / `?task=` 轮询 `/board`，
+一个 group 一个定时器共享 feed，全部结算后降频 15s，页面隐藏（`document.hidden`）暂停，
+连续 3 次失败在卡头标「状态可能已过期」。另注册 `conversation.chat.turnTail` 本轮派发摘要，
+工具行被宿主折叠时仍能看到这一轮派了什么。
+
+**报告卡**：注册 `dispatch-report` 节点，以 `exclusive` 认领插件来源的 relay `user/message`；
+按【任务】【结果】【备注】【需要】四段解析，**任一段解析不出就整份退回原文卡**，原文始终保留在
+DOM（【细节】里是完整 raw）；带状态 chip 与一键复制原文。注册顺序固定「先 renderer 再
+Definition」，失败只 warn 一次并撤掉刚注册的 renderer。
+
+**可观测**：`GET /board/selfcheck` 的 `client.ready.cards.batch` / `.report` 给出
+`on` / `error:slot` / `error:register` / `error:parse`；`CARD_FEATURES` 可在客户端常量级关闭单卡，
+关报告卡不影响派发卡。
+
+**验证**：`npm test` 643 pass / 0 fail；`node scripts/client-smoke.mjs` 817 项全过
+（含 L2/L3 降级、10 条失败注入、parser 畸形 fixture、`details` 非受控展开回归）。
+**未做**：plans/14 G1 的 `http-smoke` 三条用例、G2 五条真机验收记录、plans/12/13 §12.3 的手工视觉清单。
+
 ### 工程收口：A 类七条（0.9.1）
 
 PRD「A 类七条」不做新功能，只把**已经实现的东西钉住**：每一处都补上「为什么这样、不这样会怎么坏」，

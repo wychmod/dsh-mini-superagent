@@ -8,7 +8,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-mini-superagent?color=blue&label=npm)](https://www.npmjs.com/package/dsh-mini-superagent)
 [![runtime deps](https://img.shields.io/badge/runtime_dependencies-0-brightgreen.svg)](dsh-mini-superagent/package.json)
 
-**10** 个工具 · **629** 个单元测试 · **450** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
+**10** 个工具 · **643** 个单元测试 · **817** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
 
 > **In English**: `dsh-mini-superagent` is a task dispatch and orchestration plugin for DeepSeek Harness (DSH): the main session hands a self-contained brief to an independent background sub-session, and the report flows back automatically. Pure ESM, zero runtime dependencies, 10 tools, a web board and an auditable JSON ledger. Docs live under `dsh-mini-superagent/docs/` and are not shipped in the npm package.
 
@@ -40,9 +40,10 @@
 | 计划透出 | worker 在 `dispatch_report` 里带 `plan`，看板任务行显示 `2/5`，抽屉显示当前步骤（上限 12 步 × 120 字） | 已实现 |
 | 批次依赖 | `depends_on` / `depends_on_index`；前置未结算时保持 `queued`，不占并发位；前置失败或取消会连带取消 | 已实现 |
 | 看板 | 四视图（全部 / 进行中 / 需要处理 / 已归档）+ 独立「已退休」视图 + 分析看板；另有 `GET /board`、`/board/retired`、`/board/stats`、`/board/analytics` | Web 形态 |
+| 会话卡片 | 派发卡（三阶段、4 行折叠、批次实时状态、轮次尾部摘要）+ 报告卡（四段解析、原文兜底、复制原文）；两张卡独立降级 | Web 形态 |
 | 记忆治理 | 1.5 秒通知合并窗口（上限 2 秒）、事实与投影分离、账本 1000 条 / 90 天封顶、退休留痕（13 字段摘要，不保留报告正文） | 已实现 |
 | 健康度 | `retry_health`（重试次数 / 起始时间 / 最后错误）与 `GET /board/stats` 全量聚合（不受 200 条快照上限影响） | 已实现 |
-| 质量闸门 | `npm run check:dev`（原 `check`）= 语法检查 + 629 单测 + 450 客户端离线渲染检查；GitHub Actions 跑同一条链 | 已实现 |
+| 质量闸门 | `npm run check:dev`（原 `check`）= 语法检查 + 643 单测 + 817 客户端离线渲染检查；GitHub Actions 跑同一条链 | 已实现 |
 
 > 看板路由前缀均为 `/dsh-mini-superagent`。
 
@@ -188,7 +189,7 @@ dispatch_launch({
 - 看板四视图 + 独立「已退休」视图 + 分析看板；`retry_health` 与 `/board/stats`。
 - 续派（`continue_task_id`）、交接（`handoff_from`）、计划透出（`plan`）、批次依赖（`depends_on`）。
 - 记忆治理 P0/P1：通知合并窗口、事实与投影分离、账本封顶与退休留痕。
-- 质量闸门：`npm run check:dev`（629 单测 / 450 客户端检查）与 GitHub Actions CI。
+- 质量闸门：`npm run check:dev`（643 单测 / 817 客户端检查）与 GitHub Actions CI。
 - 发布面：`dsh-mini-superagent@0.9.1` 已上 npm（`latest`），并打 `v0.9.1` tag、发 GitHub Release。
 
 ### 未做（真实缺口）
