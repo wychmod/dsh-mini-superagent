@@ -255,7 +255,7 @@ DSH 的 Inbox 对同一 id 的待投递消息直接抛 `message "<id>" is alread
 
 - 写：`Dispatch.persist()` 覆盖写 `{version: 4, savedAt, tasks, targets, retired}`；密集的状态变化由 800ms 定时器合并（`timer.unref()`，不阻止进程退出）。
   0.5.0 起多一个 `targets`（会话 id → 派发目标），旧文件缺它时按空对象；
-  本版未发布起多一个 `retired`（退休留痕数组），旧文件缺它时按空数组。格式细节见 §29。
+  0.9.0 起多一个 `retired`（退休留痕数组），旧文件缺它时按空数组。格式细节见 §29。
 - 落盘的原子性在 `store.js`：先写 `<file>.tmp` + `fsync`，把当前有效文件留一份 `<file>.bak`，再 `rename` 覆盖。
   `readState()` 主文件损坏时自动回退 `.bak` 并标 `recovered: 'bak'`，两者都坏才抛错。
 - 读：`restore()` 启动时读一次；读失败只 warn，不阻止插件启动——但**读不到的是派发事实，不是会话内容**。

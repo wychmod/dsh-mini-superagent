@@ -267,7 +267,7 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 - 原因：插件注册的具名路由排在 DSH 页面鉴权之前。若全放开，把 Web 暴露到局域网时任何人都能读到任务标题、工作目录与报告摘要。
   代价是远程访问只能用同源页面，远程 `curl` 读不到看板。
 
-看板接口（0.5.0 起，本版未发布新增退休视图）：`GET /board`、`GET /board/retired`、`POST /board/cancel`、`POST /board/retry`、
+看板接口（0.5.0 起，0.9.0 新增退休视图）：`GET /board`、`GET /board/retired`、`POST /board/cancel`、`POST /board/retry`、
 `POST /board/archive`、`POST /board/target`。
 快照带 `workspaces`、`targets`、`counts.archived`、`counts.retired` 与 `memory` 块，任务卡带 `workspace_*` / `archived_*` / `group` / `input_*`。
 `memory` 是记忆治理口径（窗口、账本容量、准入计数、待读/不知道、退休数），`null` 表示宿主没提供。

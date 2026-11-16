@@ -117,7 +117,7 @@ dispatch_launch({ workspace: "某项目", ... })
 
 > **旧文档把第 3 步写成「标题精确匹配」，暗示它是唯一的、没有歧义——那是错的。**
 > 精确匹配同样可能命中多个同名工作区，而且它的歧义比包含匹配**更难发现**：查询看起来「就是这个名字」，
-> 调用方很容易以为是唯一的。本版未发布起，四级一律按同一条规矩处理：
+> 调用方很容易以为是唯一的。0.9.0 起，四级一律按同一条规矩处理：
 
 ```text
 命中 0 个  → undefined（交给调用方决定要不要新建）
@@ -345,7 +345,7 @@ dispatch_launch({ workspace: "某项目", ... })
 | --- | --- | --- |
 | 没有默认工作区 | 日志 `创建默认工作区失败`；`workspaceRoot` 是否可写 | 修目录权限/换 `workspaceRoot`；`provisionDefaultWorkspace` 为 true 才自动建 |
 | `dispatch_launch` 报「找不到工作区 … 且允许新建被关闭」 | `create_workspace` 是否为 false；`dispatch_workspaces` 里有没有；日志里有没有「有歧义，命中 N 个」 | 若是**歧义**，那句话是假的（没人关掉新建）：日志里会列出带 `path` 的候选，改用 id 或绝对路径。否则去掉 `create_workspace: false` |
-| 两个工作区标题一样 | `dispatch_workspaces` 里它们的 `path` 与 `id` | 本版（未发布）起按目录登记会用 `distinctTitle()` 避开撞名，但**已存在的**同名条目不会被改名（改了等于偷换用户认过的名字）；需要区分就在标题上认 `path` |
+| 两个工作区标题一样 | `dispatch_workspaces` 里它们的 `path` 与 `id` | 0.9.0 起按目录登记会用 `distinctTitle()` 避开撞名，但**已存在的**同名条目不会被改名（改了等于偷换用户认过的名字）；需要区分就在标题上认 `path` |
 | 子会话不在预期的项目工作区 | 目标工作区是否还在注册表里（`dispatch_workspaces`）；`workspace_title` 与 `host_workspace` 分别是什么 | 目标被删了才会退回【派发】；重新指定一个存在的目标。有目标时它一定在目标里，与 `workerWorkspace` 无关 |
 | 冒出 `【派发】YYYY-MM-DD` 工作区 | 是否真的没给目标（或目标已被删除） | 这是兜底行为，不是 bug；不想要兜底就设 `workerWorkspace: cwd` |
 | 子会话工作目录不对 | 是否同时给了 `workspace` 和 `cwd`；会话里是否记住了派发目标 | 显式 `cwd` 现在**优先于**记住的目标；两者同时给时 `workspace` 胜、`cwd` 仍是任务工作目录。若仍不对，用 `dispatch_inspect().cwd` 看实际值 |

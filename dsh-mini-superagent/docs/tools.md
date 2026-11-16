@@ -81,7 +81,7 @@
 | `title` | string | 是 | 任务短标题，超过 120 字符会被截断；用于列表与子会话标题 `[派发] <title>` |
 | `brief` | string | 是 | 自包含简报：目标、约束、验收、已知事实。子会话看不到主会话历史 |
 | `cwd` | string | 否 | 子会话工作目录的绝对路径。**显式 `cwd` 优先于**会话记住的派发目标（auto / 目标）；与 `workspace` 同时给时 `workspace` 决定会话归属、`cwd` 决定实际工作目录（两者分工，不是二选一丢弃）。都没有才退到继承主会话目录、进程 cwd |
-| `workspace` | string | 否 | 工作区 id / 绝对路径 / 标题；解析顺序见 [workspaces.md](workspaces.md)。**任何一级命中多个都会抛错**（本版未发布起不再静默取第一个），错误里带现有工作区清单 |
+| `workspace` | string | 否 | 工作区 id / 绝对路径 / 标题；解析顺序见 [workspaces.md](workspaces.md)。**任何一级命中多个都会抛错**（0.9.0 起不再静默取第一个），错误里带现有工作区清单 |
 | `create_workspace` | boolean | 否 | 默认 `true`；`workspace` 解析不到时是否新建（绝对路径就地建，名字在工作区根下建） |
 | `model` | string | 否 | 子会话模型：`model` 或 `provider/model`；省略用部署默认。宿主不支持切换模型时这次派发失败并说明原因（不会静默改用默认） |
 | `agent_preset` | string | 否 | 子会话 agent preset id；省略用部署默认 |
@@ -502,7 +502,7 @@ workspace / cwd**、来源必须已结算且未退休归档。这三条违反时
 
 `{ "task": detail }`，字段见上文[任务对象](#任务对象)。
 
-**退休任务也能查**（本版未发布起）：`dispatch_inspect` 走 `resolveTask()`，先查活表、再查退休留痕，所以
+**退休任务也能查**（0.9.0 起）：`dispatch_inspect` 走 `resolveTask()`，先查活表、再查退休留痕，所以
 「记录已移出活表」不等于「查不到」。此时返回：
 
 ```json
@@ -681,20 +681,20 @@ worker 向派发者汇报。主会话不要调用。
 
 1. 找不到调用者对应的任务 → 抛错（说明它不是被派发的 worker）。
 2. 任务已 `cancelled` → 返回 `{recorded:false}`，不再回流。
-3. **入库即截断**（本版未发布，P0-3）：条目在写进 `task.reports` **之前**就按上面 `headline` / `summary` / `detail` 三个上限 `clip`，
+3. **入库即截断**（0.9.0 起，P0-3）：条目在写进 `task.reports` **之前**就按上面 `headline` / `summary` / `detail` 三个上限 `clip`，
    被截的条目记 `truncated: { headline?: 原始长度, summary: 原始长度, detail: 原始长度 }`（只在真被截时出现这个键）。
    0.8.x 只在**外发**时截，账本里存的是调用方给的原样长度——单任务体积由调用方决定是容量膨胀的根之一。
 4. 追加一条 `{at, status, headline?, summary, detail?, truncated?}` 到任务的报告列表（每任务最多 50 条，超出丢最早的）。
    **`headline` 缺省时库里不补兜底句**：兜底发生在投影层（`src/voice.js` 的 `headlineOf()`）。
    「worker 没写结论」与「系统替他编了一句」是两件不同的事实，混成一个字段就再也分不出来了。
 5. `done` / `blocked` / `failed` 会把任务结算为同名状态；`progress` 只记录，不结束任务。
-6. **计划**（PRD-01，本版未发布）：`input.plan` 在 `report()` 里交给 `normalizePlan()` 归一化
+6. **计划**（PRD-01，0.9.0 起）：`input.plan` 在 `report()` 里交给 `normalizePlan()` 归一化
    （整版替换 / 单行化 / 空文案丢弃 / 同文案最多 3 条 / 上限截断），再由 `#applyPlan()` 写 `task.plan` 与
    `planUpdatedAt`。顺序是**先应用计划、再结算**；`queued` 任务与已结算任务一律拒绝（返回 `plan_accepted:false`），
    所以终态报告自己那一版能被接受，结算之后迟到的计划不会把 `2/5` 写回去。内容完全相同视为幂等，
    不刷新 `planUpdatedAt`、不额外写盘。计划**不进报告条目**；`card()` 也不投影它，
    只有 `dispatch_inspect` 的 `detail()` 给全量步骤（见上文 `plan` 字段）。
-7. **准入分级**（本版未发布，P0-2）：决定这条报告要不要回流主会话。
+7. **准入分级**（0.9.0 起，P0-2）：决定这条报告要不要回流主会话。
    - `done` / `blocked` / `failed` / `cancelled` → **恒 `direct`**（回流）；
    - 配置 `directReportStatuses` 点名的状态（默认 `blocked` / `failed`）→ `direct`；
    - 其余（含 `progress` 与未知状态）→ **`ledger`，只入库不回流**。
@@ -708,7 +708,7 @@ worker 向派发者汇报。主会话不要调用。
    - 主会话已不在运行：只落任务表并记日志。
    - **批次成员例外**：`group` 非空的成员自己只入库，等整批结束时由批次汇总回流一条；
      但如果这一批已经汇总过、或任务被重开过，就等不到汇总了，此时它必须自己回流（否则彻底静默）。
-9. **回流文本是四段式**（本版未发布，plans/10 §四.2）。首行必须是任务短标签，
+9. **回流文本是四段式**（0.9.0 起，plans/10 §四.2）。首行必须是任务短标签，
    任务 id 只出现在末尾「细节」行：
 
    ```text
