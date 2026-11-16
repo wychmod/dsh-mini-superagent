@@ -69,7 +69,7 @@
 
 12 / 13 的代码已全部进 `main`（`203358f` 派发卡、`834efd8` 的 `/board?group=`、`f140c73` 的
 `client.ready.cards`、`f6db9c2` 报告卡正式版与派发卡实时状态）。当前实测：`npm test` **643 pass / 0 fail**，
-`node scripts/client-smoke.mjs` **817 项全过**（根 README 与落地页仍写 629 / 450，属待改的过时数字）。
+`node scripts/client-smoke.mjs` **817 项全过**。
 
 已能指认的落地面：
 
@@ -83,18 +83,19 @@
 
 发布前仍未收口（按阻塞程度排）：
 
-1. **CHANGELOG 没有卡片条目**：`## 未发布` 顶部仍是 0.9.1 的「A 类七条」，派发卡 / 报告卡 /
-   轮次尾部摘要都没有记录。npm 包会带 `CHANGELOG.md`，发布前必须补。
-2. **`docs/board.md` 仍写「report 卡尚未实现…`cards.report` 预期缺席」**，与代码相反；
-   同节的排障表也把「报告变成普通用户消息」当默认现象。属必须改的错文档。
-3. **G1 未做**：`scripts/http-smoke.mjs` 还没有 `?group=` / `?task=` / `cards` 三条用例；
-   G2 真机五条只有「`<details>` 点击被重渲染收回」这一条有真机记录，其余（单条报告、
-   轮次导航、compact、刷新去重、热重载）未逐条验收。
-4. **版本与数字未同源**：`package.json` / `VERSION` 仍是 0.9.1（已发布，不能覆盖）；
-   根 README（629 / 450）、落地页 `index.html`、包内 README、CHANGELOG 需要一起改到新版本号与
-   643 / 817，然后才能打包。
-5. **手工视觉清单未跑**：plans/12 §12.3、plans/13 §12.3 的间距、对比度、窄屏折行、portal 翻转
+1. **版本未 bump**：`package.json` / `VERSION` 仍是 0.9.1（已发布，不能覆盖）。发新版必须同步
+   `package.json`、`src/constants.js`、根 README、包内 README、`index.html`、`docs/board.md` /
+   `docs/tools.md` 的示例版本号与 CHANGELOG 标题；测试数字已同步为 643 / 817。
+2. **G1 / G2 未收口**：`scripts/http-smoke.mjs` 还没有 `?group=` / `?task=` / `cards` 三条用例
+   （单测已覆盖过滤与截断语义）；报告卡 G2 五条只有「`<details>` 点击被重渲染收回」这一条有真机记录，
+   其余（单条报告、轮次导航、compact、刷新去重、热重载）未逐条验收。
+3. **手工视觉清单未跑**：plans/12 §12.3、plans/13 §12.3 的间距、对比度、窄屏折行、portal 翻转
    仍以离线断言为准，未截图目视。
+4. **npm 登录失效**：`npm whoami` 返回 401；默认 registry 是 Tencent 镜像，publish 必须显式
+   `--registry=https://registry.npmjs.org/ --access public`。
+
+已收口（`9b10e93`）：CHANGELOG 补了派发卡 / 报告卡 / 轮次摘要条目；`docs/board.md` 不再声称报告卡未实现；
+根 README 与落地页的 629 / 450 已改成 643 / 817；包内 README 补了「会话里的两张卡」一节。
 
 ## 状态口径
 
