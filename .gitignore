@@ -34,3 +34,13 @@ Thumbs.db
 analysis/
 notes/dsh-session-failures.md
 notes/diagnosis-session-*.md
+
+# ---- 发布后本地残留（不进仓库）----
+# 零运行时依赖，不需要 lockfile；本地 npm install 会产生它
+package-lock.json
+# 本轮演示与验证用的占位文件
+demo-*.md
+# 宣传素材（本地保留）
+promo/
+# 个人笔记
+面试讲解手册.md
