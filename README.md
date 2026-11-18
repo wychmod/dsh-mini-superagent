@@ -8,11 +8,11 @@
 [![npm](https://img.shields.io/npm/v/dsh-mini-superagent?color=blue&label=npm)](https://www.npmjs.com/package/dsh-mini-superagent)
 [![runtime deps](https://img.shields.io/badge/runtime_dependencies-0-brightgreen.svg)](dsh-mini-superagent/package.json)
 
-**10** 个工具 · **643** 个单元测试 · **817** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
+**10** 个工具 · **648** 个单元测试 · **817** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
 
 > **In English**: `dsh-mini-superagent` is a task dispatch and workbench plugin for DeepSeek Harness (DSH): the main session hands a self-contained brief to an independent background sub-session, the report flows back automatically, and a sidebar Dispatch Workbench shows concurrency, queueing and progress. Pure ESM, zero runtime dependencies, 10 tools, a web board and an auditable JSON ledger. Docs live under `dsh-mini-superagent/docs/` and are not shipped in the npm package.
 
-> **版本**：当前工作区版本 0.10.0；已发布版本以 [`CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准。安装方式见「快速开始」。
+> **版本**：当前工作区版本 0.10.1；已发布版本以 [`CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准。安装方式见「快速开始」。
 
 装上之后你会得到两样东西：**10 个派发工具**，以及一块**侧边栏「派发工作台」**。前者负责把活派出去、让报告自己回来；后者负责看清并发、排队、批次进度与失败原因，并直接取消 / 重试 / 归档。
 
@@ -45,7 +45,7 @@
 | 会话卡片 | 派发卡（三阶段、4 行折叠、批次实时状态、轮次尾部摘要）+ 报告卡（四段解析、原文兜底、复制原文）；两张卡独立降级 | Web 形态 |
 | 记忆治理 | 1.5 秒通知合并窗口（上限 2 秒）、事实与投影分离、账本 1000 条 / 90 天封顶、退休留痕（13 字段摘要，不保留报告正文） | 已实现 |
 | 健康度 | `retry_health`（重试次数 / 起始时间 / 最后错误）与 `GET /board/stats` 全量聚合（不受 200 条快照上限影响） | 已实现 |
-| 质量闸门 | `npm run check:dev`（原 `check`）= 语法检查 + 643 单测 + 817 客户端离线渲染检查；GitHub Actions 跑同一条链 | 已实现 |
+| 质量闸门 | `npm run check:dev`（原 `check`）= 语法检查 + 648 单测 + 817 客户端离线渲染检查；GitHub Actions 跑同一条链 | 已实现 |
 
 > 看板路由前缀均为 `/dsh-mini-superagent`。
 
@@ -94,10 +94,10 @@ flowchart LR
 
 ### 1. 安装
 
-npm 已发布 `0.10.0`，在 DSH 里调用：
+npm 已发布 `0.10.1`，在 DSH 里调用：
 
 ```text
-plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.0")
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.1")
 ```
 
 也可以从仓库安装：先 `git clone https://github.com/wychmod/dsh-mini-superagent.git`，再把 `target` 换成本地路径 `<仓库路径>/dsh-mini-superagent`。
@@ -108,7 +108,7 @@ plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.0")
 
 ```text
 dispatch_list()
-→ {"version":"0.10.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.10.1","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
 `version` 与 `src/constants.js` 的 `VERSION` 一致；`max_workers` 等于配置里的 `maxWorkers`（默认 6）。
@@ -149,13 +149,13 @@ dispatch_launch({
 | 文档 | 内容 |
 | --- | --- |
 | [`dsh-mini-superagent/README.md`](dsh-mini-superagent/README.md) | 安装、10 个工具、典型用法、状态流转、看板、工作区、输入框控件、配置、限制 |
-| [`docs/architecture.md`](dsh-mini-superagent/docs/architecture.md) | 模块职责、数据流、设计决策、失败与降级路径 |
-| [`docs/board.md`](dsh-mini-superagent/docs/board.md) | 派发工作台与分析看板：面板结构、HTTP 路由、指标口径、鉴权 |
-| [`docs/tools.md`](dsh-mini-superagent/docs/tools.md) | 10 个工具的参数、返回值、错误码、何时用 / 何时别用 |
-| [`docs/workspaces.md`](dsh-mini-superagent/docs/workspaces.md) | 工作区模型、目录约定、解析规则、自动归档、限制与排障 |
-| [`docs/composer.md`](dsh-mini-superagent/docs/composer.md) | 输入框派发目标选择器、`@` 工作区、chip 契约与降级 |
-| [`docs/troubleshooting.md`](dsh-mini-superagent/docs/troubleshooting.md) | 排障表、日志前缀、恢复动作 |
-| [`docs/api-contracts.md`](dsh-mini-superagent/docs/api-contracts.md) | DSH 宿主 API 取证：消息构造、Agent、事件、会话控制器、工具作用域 |
+| [`docs/architecture.md`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/architecture.md) | 模块职责、数据流、设计决策、失败与降级路径 |
+| [`docs/board.md`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/board.md) | 派发工作台与分析看板：面板结构、HTTP 路由、指标口径、鉴权 |
+| [`docs/tools.md`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/tools.md) | 10 个工具的参数、返回值、错误码、何时用 / 何时别用 |
+| [`docs/workspaces.md`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/workspaces.md) | 工作区模型、目录约定、解析规则、自动归档、限制与排障 |
+| [`docs/composer.md`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/composer.md) | 输入框派发目标选择器、`@` 工作区、chip 契约与降级 |
+| [`docs/troubleshooting.md`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/troubleshooting.md) | 排障表、日志前缀、恢复动作 |
+| [`docs/api-contracts.md`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/api-contracts.md) | DSH 宿主 API 取证：消息构造、Agent、事件、会话控制器、工具作用域 |
 
 > **npm 包里不含 `docs/`**：包的 `files` 白名单只有 `src/`、`client/`、`cordis.patch.yml`、`locale/`、`icon.svg`、`README.md`、`CHANGELOG.md`、`LICENSE` 与 `package.json`。从 npm 安装后点 `docs/` 链接会 404，请到仓库查看。
 
@@ -185,15 +185,15 @@ dispatch_launch({
 
 ## Roadmap
 
-### 已发布（0.10.0，npm + GitHub Release）
+### 已发布（0.10.1，npm + GitHub Release）
 
 - 非阻塞派发、批量派发、并发队列、报告自动回流、自动归档、工作区。
 - 看板四视图 + 独立「已退休」视图 + 分析看板；`retry_health` 与 `/board/stats`。
 - 会话卡片：派发卡（批次 / 三阶段 / 实时状态 / 轮次尾部摘要）+ 报告卡（四段解析 / 原文兜底 / 复制原文），两张卡独立降级。
 - 续派（`continue_task_id`）、交接（`handoff_from`）、计划透出（`plan`）、批次依赖（`depends_on`）。
 - 记忆治理 P0/P1：通知合并窗口、事实与投影分离、账本封顶与退休留痕。
-- 质量闸门：`npm run check:dev`（643 单测 / 817 客户端检查）与 GitHub Actions CI。
-- 发布面：`dsh-mini-superagent@0.10.0` 已上 npm（`latest`），并打 `v0.10.0` tag、发 GitHub Release。
+- 质量闸门：`npm run check:dev`（648 单测 / 817 客户端检查）与 GitHub Actions CI。
+- 发布面：`dsh-mini-superagent@0.10.1` 随本次发布上 npm（`latest`），并打 `v0.10.1` tag、发 GitHub Release。
 
 ### 未做（真实缺口）
 
@@ -205,7 +205,7 @@ dispatch_launch({
 
 ## Contributing
 
-欢迎 issue 和 PR。改动前先读 [`docs/architecture.md`](dsh-mini-superagent/docs/architecture.md) 与对应 PRD；提交前在包目录跑完整的质量闸门：
+欢迎 issue 和 PR。改动前先读 [`docs/architecture.md`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/architecture.md) 与对应 PRD；提交前在包目录跑完整的质量闸门：
 
 ```bash
 cd dsh-mini-superagent

@@ -115,6 +115,29 @@ tarball integrity 与本地 pack 一致）；`v0.10.0` tag 与 GitHub Release �
 已启用并完成两次构建，线上页面与本地字节一致，0 个未闭合标签 / 重复 id / 失效锚点，6 个按钮均有
 `type`，5 个外链中 4 个 200（npmjs.com 对 curl 返回 403，属反爬，不是死链）。
 
+## 补充：0.10.1 发布前四项阻塞修复（2026-11-18）
+
+上一段记的「P0 工程收口暂缓」里，**看板路由失败隔离**这一条单独重做并发布了，但只用正确的方式做：
+
+- `registerBoardRoutes()` 给 `server.register()` 包一层 try/catch：注册抛错只 warn、返回 `undefined`，
+  不再让异常冒到 `apply()` 把 10 个工具一起带走。**保持同步注册**，没有照 `bed4950` 改成延迟注入
+  ——那正是当初 disposer 丢失（HMR 后残留僵尸路由）的来源。
+- `bed4950` 里另外三项（`src/config.js` 的 `maxWorkers` 硬上限、worker 工具面收窄、可选服务延迟注入）
+  **仍然没有回来**，这次也没有重开：配置上限那条会静默炸插件，要做得先按「有文档 + 不静默炸」重设计。
+
+同批其余三项都是发布面的事，不改运行时行为：
+
+1. 仓库根补 `LICENSE`（与包内同一份，sha256 一致）——否则 GitHub 仓库页显示不出协议类型；
+2. 包内 `README.md` 里 17 条 `docs/*.md` 相对链接改成 GitHub 绝对 URL ——`docs/` 不在 `files`
+   白名单里，那些相对链接在 npmjs.com 上全是 404；
+3. 版本号同源到 `0.10.1`（`package.json`、`src/constants.js`、两份 README、`index.html`、
+   `docs/board.md` / `docs/tools.md` 示例、`scripts/client-smoke.mjs` 的 fixture），并把 0.10.0
+   以来一直漂在 HEAD 未发布的文档订正一并收进这一版。
+
+新增 `test/board-registration.test.js`（5 条）：注册抛错时 `apply()` 不抛、工具全注册、有 warn、
+路由 disposer 不被凭空登记；正常路径与 headless 路径行为不变。**去掉那层 try/catch 时前三条会红**
+（实测：3 fail / 5）。
+
 ## 状态口径
 
 - **已落地**：能在 `src/`、`client/` 或 CHANGELOG 里指到具体实现或发布记录。

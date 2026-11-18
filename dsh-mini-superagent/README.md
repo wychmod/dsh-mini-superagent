@@ -24,10 +24,11 @@
 从 0.5.0 起，看板补了**归档视图 / 工作区筛选 / 批次聚合 / 点行跳会话**；输入框补了**派发目标选择器**与 **`@` 工作区**，
 两者都写「下一次派发到哪」，不改会话归属。
 
-> **npm 包里不含 `docs/`**：本文中指向 `docs/xxx.md` 的相对链接只在仓库里有效
-> （[github.com/wychmod/dsh-mini-superagent](https://github.com/wychmod/dsh-mini-superagent)）。
+> **npm 包里不含 `docs/`**：本文里指向 `docs/xxx.md` 的链接一律写成 GitHub 绝对 URL
+> （[github.com/wychmod/dsh-mini-superagent](https://github.com/wychmod/dsh-mini-superagent)），
+> 所以在 npmjs.com 上也点得开——相对链接在那里会 404。
 > 从 npm 装到的包只有 `src/`、`client/`、`cordis.patch.yml`、`locale/`、`icon.svg`、`README.md`、
-> `CHANGELOG.md`、`LICENSE` 与 `package.json`；点 `docs/` 链接会 404，请到仓库看。
+> `CHANGELOG.md`、`LICENSE` 与 `package.json`；要看 `docs/` 请到仓库。
 
 ---
 
@@ -64,19 +65,19 @@
 
 ## 安装
 
-插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.0` 已发布到 npm（`latest`），**按包名即可安装**。
+插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.1` 已发布到 npm（`latest`），**按包名即可安装**。
 
 ### 方式一：按包名安装（推荐）
 
 在 DSH 里调用：
 
 ```text
-plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.0")
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.1")
 ```
 
 也可以把这句话交给 DSH 里的任意会话：
 
-> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.0`，装完确认 10 个 `dispatch_*` 工具已注册。
+> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.1`，装完确认 10 个 `dispatch_*` 工具已注册。
 
 ### 方式二：从源码 / 本地目录安装
 
@@ -93,10 +94,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.10.0","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.10.1","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.0`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.1`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
@@ -139,7 +140,7 @@ Copy-Item "$env:DSH_HOME\dsh-dispatch\tasks.json" "$env:DSH_HOME\dsh-mini-supera
 worker 调用 `dispatch_launch` 不会被拦（只受 `maxTasksPerSession` 限制），所以系统提示里明确要求 worker 别调；
 见[已知限制](#已知限制)。
 
-逐条参数、返回值与错误信息见 [docs/tools.md](docs/tools.md)。
+逐条参数、返回值与错误信息见 [docs/tools.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/tools.md)。
 
 ---
 
@@ -232,7 +233,7 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 分析看板读另一条只读路由 `GET /board/analytics`（全量账本，10 秒刷新），
 按时间范围 / 状态 / 负责人 / 工作区 / 批次筛选，展示任务总量、状态分布、完成率、超时代理、按天趋势与环比。
 **账本没有人员与截止时间字段**：负责人按 `parentSessionId`（派发主会话）代理、
-逾期按「创建后超过阈值的时长」代理，两处都标「待业务确认」；详见 [docs/board.md](docs/board.md)。
+逾期按「创建后超过阈值的时长」代理，两处都标「待业务确认」；详见 [docs/board.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/board.md)。
 
 **装完/升级后必须刷新一次 GUI 页面**，图标才会出现——客户端模块在页面刷新后加载，插件已激活不影响这一点。
 
@@ -261,10 +262,10 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 - **刷新节奏**：页面隐藏时停表并中止在途请求，切回来立刻重取；面板卸载时清掉定时器与所有在途请求。
 - **主题**：颜色全部走 `var(--dsw-alias-*, fallback)`，不写死明暗两套。
 
-> 想先看效果不装宿主：打开 [`preview/board-preview.html`](preview/board-preview.html)（真实面板组件 + 假数据，
+> 想先看效果不装宿主：打开 [`preview/board-preview.html`](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/preview/board-preview.html)（真实面板组件 + 假数据，
 > 自包含单文件，只需联网取 React）。改完 `client/index.js` 后跑 `node scripts/board-preview.mjs` 重新生成。
 
-安全取舍（细节见 [docs/board.md](docs/board.md)）：
+安全取舍（细节见 [docs/board.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/board.md)）：
 
 - `GET`：本机回环（`127.0.0.1` / `localhost` / `::1`）放行；非回环必须是同源页面（`Origin` 与 `Host` 一致）。
 - `POST`：带 `Origin` 时必须同源，跨站请求 403；不带 `Origin` 的非浏览器客户端（curl/脚本）放行。
@@ -275,7 +276,7 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 `POST /board/archive`、`POST /board/target`。
 快照带 `workspaces`、`targets`、`counts.archived`、`counts.retired` 与 `memory` 块，任务卡带 `workspace_*` / `archived_*` / `group` / `input_*`。
 `memory` 是记忆治理口径（窗口、账本容量、准入计数、待读/不知道、退休数），`null` 表示宿主没提供。
-细节见 [docs/board.md](docs/board.md)。
+细节见 [docs/board.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/board.md)。
 
 **重试语义**（看板按钮，不是新工具）：
 
@@ -346,7 +347,7 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 四条硬校验，任一不满足即报错并给原因，不会静默降级成新派发：目标任务存在且未退休、属于本会话、
 子会话是本插件建的（`dispatch-*`）、工作区/cwd 一致（**续派没有自己的 `workspace` 参数**，
 一律沿用目标任务的工作区），另外还要求当前没有别的活跃任务。
-细节见 [docs/tools.md](docs/tools.md) 的「续派」一节。
+细节见 [docs/tools.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/tools.md) 的「续派」一节。
 
 
 同时给 `workspace` 和 `cwd` 时**工作区路径优先**，`cwd` 被忽略。完全不指定 `workspace` 时：
@@ -369,7 +370,7 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
   两者可以同时用：先声明依赖，等前置结算后再派一条带 `handoff_from` 的新任务。
 - 计划与依赖都不改变「不打扰会话」的前提：`progress` 仍默认只入库，看板上的计划进度不会让主会话多收消息。
 - 已知缺口：计划更新后的「计划已更新」提示没做；`card()` / `detail()` 都不投影 `task.plan`，要看完整步骤
-  目前只能读账本；`dispatch_message` 能绕过依赖把等待中的任务唤醒。逐条见 [../plans/README.md](../plans/README.md)
+  目前只能读账本；`dispatch_message` 能绕过依赖把等待中的任务唤醒。逐条见 [plans/README.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/plans/README.md)
   的「PRD-01 / PRD-02 的已知限制」。
 
 ### 自动归档
@@ -382,7 +383,7 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 - `archiveAfterHours: 0` 关闭自动归档，`archiveSweepMinutes: 0` 关闭巡检；
 - 看板有 `POST /dsh-mini-superagent/board/archive` 可手动跑一次巡检。
 
-细节见 [docs/workspaces.md](docs/workspaces.md)。
+细节见 [docs/workspaces.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/workspaces.md)。
 
 ---
 
@@ -409,7 +410,7 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
   也因为没有「只插纯文本」的返回形态，**`@中文名` 纯文本不可行**，选中一定产生 chip。
 - `inputTriggers` 服务缺席时 `@` 不出现；看板与选择器照常工作。
 
-完整契约、失败降级与限制见 [docs/composer.md](docs/composer.md)。
+完整契约、失败降级与限制见 [docs/composer.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/composer.md)。
 
 ## 会话里的两张卡
 
@@ -506,12 +507,12 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 - 任务表在 `<stateDir>/tasks.json`（默认 `$DSH_HOME/dsh-mini-superagent/tasks.json`），UTF-8，原子替换写（`tmp` → `fsync` → `rename`，另留 `.bak`），800ms 防抖。
 - 文件结构 `{version: 4, savedAt, tasks: [...], targets: {...}, retired: [...]}`；读取时**校验版本**：
   过新（含非整数）或过旧一律 fail-closed，插件不加载、**原文件一个字节不改写**（这是唯一会阻止启动的
-  读取错误，理由见 [docs/architecture.md](docs/architecture.md) 的「`version` 是账本结构的版本闸门」）；
+  读取错误，理由见 [docs/architecture.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/architecture.md) 的「`version` 是账本结构的版本闸门」）；
   其余坏文件只记日志、不阻止插件启动。
   旧文件没有 `targets` 时按空对象、没有 `retired` 时按空数组（**不迁移、不报错**）。
 - `retired` 是**退休留痕**：任务被移出活表后只剩 13 个字段（含 `retiredAt` / `retiredReason` 与 200 字摘要），
   **不搬报告正文**。它落盘是为了重启后还能回答「这条任务什么时候、为什么不见了」。
-  格式细节见 [docs/architecture.md](docs/architecture.md) §29。
+  格式细节见 [docs/architecture.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/architecture.md) §29。
 - 插件重启后读回历史任务：**还在排队、且从没启动过的任务会重新入队接着跑**（判据 `startedAt` 为空）；
   已经在跑的标 `interrupted`，因为新进程里那个 worker 可能已经做了一半，重跑会重复执行。
 - 子会话本身是普通 DSH Session，内容由 DSH 自己持久化，在侧边栏里可以直接打开。
@@ -697,7 +698,7 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 | 会话轮次分隔线（`conversation.chat.user.before`） | 0.9.0 | ✅ 注册在真实页面生效：`Slots.listSubTree` 的 occupants 出现 `dsh-mini-superagent`（`active: true`），`GET /board/selfcheck` 的 `client.ready.registered` 含 `conversation.chat.user.before`；**线的粗细/间距/主题对比度未截图目视**（ego 浏览器无 GUI 的登录态，打不开 127.0.0.1:10147），见下方「未实测」 |
 
 0.2.0 那组最后一条（并发排队）同时是修复验证：0.1.0 只在派发与插件加载时推进队列，结算后不会补 `pump()`，
-并发位满时后面的任务会一直 `queued`。这个问题是整理代码时被测出来的，修法与依据见 [docs/architecture.md](docs/architecture.md) 的「pump 的触发点」。
+并发位满时后面的任务会一直 `queued`。这个问题是整理代码时被测出来的，修法与依据见 [docs/architecture.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/architecture.md) 的「pump 的触发点」。
 
 0.4.0 的全量单测是 43 pass（13 + 19 + 11）；0.5.0 起是 50 pass（board 新增 7 个用例）。
 
@@ -727,13 +728,13 @@ profile，打不开带登录态的 GUI。「线是不是太淡」「22px 上间�
 
 | 文件 | 内容 |
 | --- | --- |
-| [docs/tools.md](docs/tools.md) | 10 个工具的参数、返回、错误、何时用/何时别用 |
-| [docs/architecture.md](docs/architecture.md) | 模块职责、数据流、设计取舍与依据 |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | 排障表、日志前缀与恢复动作 |
-| [docs/workspaces.md](docs/workspaces.md) | 工作区模型、目录约定、解析规则、自动归档、限制与排障 |
-| [docs/board.md](docs/board.md) | 派发工作台 + 分析数据看板：入口、面板结构、两条只读聚合接口、指标口径表、归档/工作区视图、跳转、重试、鉴权 |
-| [docs/composer.md](docs/composer.md) | 输入框：派发目标选择器、`@` 工作区、chip 契约与降级、未验证清单 |
-| [docs/api-contracts.md](docs/api-contracts.md) | DSH 主机 API 契约取证（消息/Agent/事件/会话控制器/工具作用域） |
+| [docs/tools.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/tools.md) | 10 个工具的参数、返回、错误、何时用/何时别用 |
+| [docs/architecture.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/architecture.md) | 模块职责、数据流、设计取舍与依据 |
+| [docs/troubleshooting.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/troubleshooting.md) | 排障表、日志前缀与恢复动作 |
+| [docs/workspaces.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/workspaces.md) | 工作区模型、目录约定、解析规则、自动归档、限制与排障 |
+| [docs/board.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/board.md) | 派发工作台 + 分析数据看板：入口、面板结构、两条只读聚合接口、指标口径表、归档/工作区视图、跳转、重试、鉴权 |
+| [docs/composer.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/composer.md) | 输入框：派发目标选择器、`@` 工作区、chip 契约与降级、未验证清单 |
+| [docs/api-contracts.md](https://github.com/wychmod/dsh-mini-superagent/blob/main/dsh-mini-superagent/docs/api-contracts.md) | DSH 主机 API 契约取证（消息/Agent/事件/会话控制器/工具作用域） |
 | [CHANGELOG.md](CHANGELOG.md) | 0.1.0（原名 dsh-dispatch）、0.2.0、0.3.0、0.4.0、0.5.0 的差异 |
 
 ---

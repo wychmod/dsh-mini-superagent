@@ -2,6 +2,27 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 0.10.1 — 2026-11-18
+
+### 修复
+
+- **看板路由注册失败不再拖垮插件**：`registerBoardRoutes()` 包住 `server.register`，
+  路由冲突或 HMR 重复注册只 warn。此前一次注册失败会让整个 `apply()` 抛错，
+  10 个工具和看板一起消失——看板起不来不该等于插件没装。
+- **npm 包内 README 的死链**：`docs/` 不在发布白名单里，README 里指向它的相对链接
+  在 npmjs.com 上全是 404。改为 GitHub 绝对 URL。
+- **仓库根补 LICENSE**：包内有 LICENSE 但仓库根没有，导致 GitHub 显示不出协议类型。
+
+### 文档
+
+- 同步 0.10.0 以来的文档订正（README 版本表述、docs 措辞、locale meta、落地页）。
+
+### 说明
+
+- 无破坏性变更、无新增运行时依赖、10 个工具与看板 API 不变。
+- 新增 `test/board-registration.test.js`（5 条），钉住「注册抛错时 `apply()` 不抛错、
+  工具照常注册、留 warn、路由 disposer 不被凭空登记」。去掉那层 try/catch 时这些用例会红。
+
 ## 0.10.0 — 2026-11-16
 
 ### 新增：派发卡与报告卡（plans/12 / 13）

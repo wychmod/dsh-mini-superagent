@@ -1027,7 +1027,19 @@ export function createBoardHandler(ctx, dispatch) {
 
 /**
  * 注册看板路由；宿主没有 webServer（headless 形态）时安静跳过。
- * @returns {(() => void) | undefined} 注销函数
+ *
+ * 为什么注册要**包一层 try/catch**（0.10.1）：`server.register()` 失败是
+ * 「看板起不来」，不是「插件不该装」。宿主在 HMR 重载时对同一条 prefix 路由
+ * 重复注册会抛错（路径已被占用），而 `apply()` 里这个调用没有防护时，异常会
+ * 一路冒到 `apply()`，于是**整个插件加载失败** —— 10 个 `dispatch_*` 工具和看板
+ * 一起消失。用户看到的是「插件没装」，实际只是面板没挂上。所以这里降级：记一条
+ * warn，返回 undefined（调用方据此不登记 disposer），工具照常工作。
+ *
+ * 注意**保持同步注册**，不要改成 `ctx.inject` 之类的延迟注入：延迟注入会让
+ * 返回的 disposer 在注入回调里才产生，而调用方早已拿到 undefined，于是卸载时
+ * 路由不会被注销——HMR 一轮就多一条重复路由，正好把上面这个问题放大成必现。
+ *
+ * @returns {(() => void) | undefined} 注销函数；注册失败或没有 webServer 时 undefined
  */
 export function registerBoardRoutes(ctx, dispatch) {
   const server = ctx.get('webServer')
@@ -1035,5 +1047,12 @@ export function registerBoardRoutes(ctx, dispatch) {
     ctx.logger?.info?.('%s 没有 webServer，跳过任务看板路由', LOG_PREFIX)
     return undefined
   }
-  return server.register({ kind: 'prefix', path: BASE, handler: createBoardHandler(ctx, dispatch) })
+  try {
+    return server.register({ kind: 'prefix', path: BASE, handler: createBoardHandler(ctx, dispatch) })
+  } catch (error) {
+    // 路由冲突/HMR 重复注册：只 warn，不让整个 apply 失败。
+    // 理由：看板起不来 ≠ 插件没装（10 个工具必须活着）。
+    ctx.logger?.warn?.('%s 看板路由注册失败，看板不可用但工具照常：%s', LOG_PREFIX, error?.message ?? error)
+    return undefined
+  }
 }
