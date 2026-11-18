@@ -10,6 +10,8 @@
 
 **10** 个工具 · **648** 个单元测试 · **817** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
 
+> 落地页与完整文档：https://wychmod.github.io/dsh-mini-superagent/
+
 > **In English**: `dsh-mini-superagent` is a task dispatch and workbench plugin for DeepSeek Harness (DSH): the main session hands a self-contained brief to an independent background sub-session, the report flows back automatically, and a sidebar Dispatch Workbench shows concurrency, queueing and progress. Pure ESM, zero runtime dependencies, 10 tools, a web board and an auditable JSON ledger. Docs live under `dsh-mini-superagent/docs/` and are not shipped in the npm package.
 
 > **版本**：当前工作区版本 0.10.1；已发布版本以 [`CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准。安装方式见「快速开始」。
@@ -94,15 +96,43 @@ flowchart LR
 
 ### 1. 安装
 
-npm 已发布 `0.10.1`，在 DSH 里调用：
+三种方式任选，**推荐第一种**（图形界面，不需要命令行）。
+
+#### 方式一：图形界面（最省事）
+
+打开 DeepSeek Harness 的插件页面，点右上角「添加插件」，输入 `dsh-mini-superagent` 即可安装；装完刷新一次 GUI 页面。不需要命令行，也不需要写 `target`。
+
+1. 打开 DeepSeek Harness 的**插件页面**
+2. 点右上角「**添加插件**」
+3. 输入 `dsh-mini-superagent`，确认安装
+
+#### 方式二：一行命令（npm）
+
+npm 已发布 `0.10.1`（latest），在 DSH 里按包名安装即可，不用 clone、不用构建、也不用 `npm install`：
 
 ```text
 plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.1")
 ```
 
-也可以从仓库安装：先 `git clone https://github.com/wychmod/dsh-mini-superagent.git`，再把 `target` 换成本地路径 `<仓库路径>/dsh-mini-superagent`。
+#### 方式三：从仓库 / 本地目录安装
 
-装完确认 **10 个 `dispatch_*` 工具**已注册，并刷新一次 GUI 页面——侧边栏图标与输入框控件要等页面刷新后才加载。
+想改代码或用本地目录安装，先 clone 再把 `target` 换成本地路径：
+
+```text
+git clone https://github.com/wychmod/dsh-mini-superagent.git
+```
+
+```text
+plugin_manager(action="install_bundle", target="<仓库路径>/dsh-mini-superagent")
+```
+
+> **环境要求**：DSH `>=0.2.1-rc.2`；Node `^22.19.0 || >=24.0.0`；零运行时依赖、无构建步骤。
+>
+> **不要和旧插件 `dsh-dispatch` 同时安装**：两者有 8 个同名工具，同一全局层重复注册会直接抛错。
+>
+> **装完刷新一次 GUI 页面**——侧边栏图标与输入框控件要等页面刷新后才加载。
+
+装完确认 **10 个 `dispatch_*` 工具**已注册。
 
 ### 2. 验证
 
