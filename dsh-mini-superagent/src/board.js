@@ -551,6 +551,9 @@ export function retiredSnapshot(dispatch) {
 /** 按 HTTP 状态把错误响应映射到错误码闭集，客户端不用再猜中文措辞。 */
 function errorCodeFor(status) {
   if (status === 400) return ERROR_CODES.BAD_ARGS
+  // 401 / 403 分开：前者是「没登录」，后者是「地址不可信」。合成一个码会让
+  // 排障脚本分不出「该去登录」还是「该把域名加进 trustedHosts」。
+  if (status === 401) return ERROR_CODES.UNAUTHENTICATED
   if (status === 403) return ERROR_CODES.FORBIDDEN
   if (status === 404) return ERROR_CODES.NOT_FOUND
   if (status === 409) return ERROR_CODES.CONFLICT
@@ -763,6 +766,45 @@ export function createBoardHandler(ctx, dispatch) {
     let pathname
     try { pathname = new URL(req.url ?? '', 'http://localhost').pathname }
     catch { return send(res, 400, { ok: false, error: '请求地址不合法' }) }
+
+    /**
+     * 宿主准入（0.10.2）：DSH 的 `connection.requestRejection` 必须是 handler 的
+     * **第一道**判断，早于任何路由分支。
+     *
+     * 为什么不能省：看板路由是 `webServer.register({ kind: 'prefix', … })` 注册的，
+     * 而 **`webServer` 只做路径分发、不做准入**。准入长在 `connection` 服务里——
+     * Host 信任清单（挡 DNS rebinding）、以及浏览器的登录凭据（cookie / 启动 token）。
+     * DSH 自己的 `/api` 对同样一个 `curl 127.0.0.1:<port>/…/board` 回 401，
+     * 而我们的路由此前回 200：本机任意进程免凭据就能读到全部任务标题、工作目录、
+     * 报告摘要，还能归档、取消、改派发目标、往会话投话。同一台机器上两种口径，
+     * 等于「DSH 说要登录，插件说不用」。
+     *
+     * 为什么和下面的 `readAllowed` / `writeAllowed` **并存而不是替换**：那是两层，
+     * 挡的东西不一样。`connection` 认的是「这台部署承认的地址 + 已登录的浏览器」，
+     * 但它对**同源页面里的脚本**是放行的（请求确实来自已登录浏览器）；
+     * `readAllowed`/`writeAllowed` 挡的正是这一档——写操作额外要求自定义头
+     * `x-dsh-mini-superagent`，跨站带自定义头会触发预检，预检过后真请求才发得出去。
+     * 删掉任何一层都会掉一档防护。
+     *
+     * 为什么用**可选链**读服务：`connection` 是 0.10.2 才声明的依赖（见 `src/index.js`
+     * 的 `inject`），而这条 handler 单独可测、也可能被旧宿主或半加载状态调到。
+     * 服务不在时静默放行，退回「只靠自建 Host 栅栏」的旧行为——不因为闸门缺席
+     * 就把整块看板打成 500。
+     *
+     * 返回值语义（DSH 侧）：`undefined` 放行、`401` / `403` 拒绝。401 与 403 的
+     * 文案分开写：前者是「没登录」，后者是「不信任这个地址」，混在一起用户会
+     * 去查错的日志。
+     */
+    const rejection = ctx.get?.('connection')?.requestRejection?.(req)
+    if (rejection !== undefined) {
+      const unauthorized = rejection === 401
+      return send(res, unauthorized ? 401 : 403, {
+        ok: false,
+        error: unauthorized
+          ? '看板需要先登录 DSH：请重新打开 dsh web 启动时打印的那个网址'
+          : '看板拒绝了来自不受信任地址的请求（Host 不在部署信任清单里）',
+      })
+    }
 
     try {
       /**

@@ -14,7 +14,7 @@
 
 > **In English**: `dsh-mini-superagent` is a task dispatch and workbench plugin for DeepSeek Harness (DSH): the main session hands a self-contained brief to an independent background sub-session, the report flows back automatically, and a sidebar Dispatch Workbench shows concurrency, queueing and progress. Pure ESM, zero runtime dependencies, 10 tools, a web board and an auditable JSON ledger. Docs live under `dsh-mini-superagent/docs/` and are not shipped in the npm package.
 
-> **版本**：当前工作区版本 0.10.1；已发布版本以 [`CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准。安装方式见「快速开始」。
+> **版本**：当前工作区版本 0.10.2；已发布版本以 [`CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准。安装方式见「快速开始」。
 
 装上之后你会得到两样东西：**10 个派发工具**，以及一块**侧边栏「派发工作台」**。前者负责把活派出去、让报告自己回来；后者负责看清并发、排队、批次进度与失败原因，并直接取消 / 重试 / 归档。
 
@@ -138,7 +138,7 @@ plugin_manager(action="install_bundle", target="<仓库路径>/dsh-mini-superage
 
 ```text
 dispatch_list()
-→ {"version":"0.10.1","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.10.2","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
 `version` 与 `src/constants.js` 的 `VERSION` 一致；`max_workers` 等于配置里的 `maxWorkers`（默认 6）。
