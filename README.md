@@ -1,22 +1,67 @@
-# dsh-mini-superagent
+<div align="center">
+  <img src="dsh-mini-superagent/icon.svg" alt="dsh-mini-superagent 插件图标" width="92" />
+  <h1>dsh-mini-superagent</h1>
+  <p><strong>DeepSeek Harness 任务派发与工作台插件</strong></p>
+  <p>把任务交给独立子会话执行，让主会话继续前进。报告自动回流，执行过程在侧边栏看得见。</p>
+  <p><strong>主会话派活 · 子会话执行 · 报告自动回来</strong></p>
+</div>
 
-**DeepSeek Harness（DSH）的任务派发与工作台插件**：主会话派活，子会话干活，报告自己回来；侧边栏「派发工作台」看并发、排队与进度。
-
-[![CI](https://github.com/wychmod/dsh-mini-superagent/actions/workflows/ci.yml/badge.svg)](https://github.com/wychmod/dsh-mini-superagent/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](dsh-mini-superagent/LICENSE)
-[![Node](https://img.shields.io/badge/node-%5E22.19.0_%7C%7C_%3E%3D24-339933.svg)](dsh-mini-superagent/package.json)
-[![npm](https://img.shields.io/npm/v/dsh-mini-superagent?color=blue&label=npm)](https://www.npmjs.com/package/dsh-mini-superagent)
-[![runtime deps](https://img.shields.io/badge/runtime_dependencies-0-brightgreen.svg)](dsh-mini-superagent/package.json)
-
-**10** 个工具 · **648** 个单元测试 · **817** 项客户端渲染检查 · **0** 运行时依赖 · **MIT**
-
-> 落地页与完整文档：https://wychmod.github.io/dsh-mini-superagent/
+<div align="center">
+  <p>
+    <a href="https://github.com/wychmod/dsh-mini-superagent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/wychmod/dsh-mini-superagent/actions/workflows/ci.yml/badge.svg" /></a>
+    <a href="dsh-mini-superagent/LICENSE"><img alt="License MIT" src="https://img.shields.io/badge/license-MIT-green.svg" /></a>
+    <a href="dsh-mini-superagent/package.json"><img alt="Node support" src="https://img.shields.io/badge/node-%5E22.19.0_%7C%7C_%3E%3D24-339933.svg" /></a>
+    <a href="https://www.npmjs.com/package/dsh-mini-superagent"><img alt="npm version" src="https://img.shields.io/npm/v/dsh-mini-superagent?color=blue&label=npm" /></a>
+    <a href="dsh-mini-superagent/package.json"><img alt="Zero runtime dependencies" src="https://img.shields.io/badge/runtime_dependencies-0-brightgreen.svg" /></a>
+  </p>
+  <p><strong>10 个派发工具 · 661 项单元测试 · 817 项客户端渲染检查 · 零运行时依赖 · MIT</strong></p>
+  <p><a href="https://wychmod.github.io/dsh-mini-superagent/">项目介绍</a> · <a href="dsh-mini-superagent/README.md">使用说明</a> · <a href="dsh-mini-superagent/docs/tools.md">工具文档</a> · <a href="https://www.npmjs.com/package/dsh-mini-superagent">npm</a></p>
+</div>
 
 > **In English**: `dsh-mini-superagent` is a task dispatch and workbench plugin for DeepSeek Harness (DSH): the main session hands a self-contained brief to an independent background sub-session, the report flows back automatically, and a sidebar Dispatch Workbench shows concurrency, queueing and progress. Pure ESM, zero runtime dependencies, 10 tools, a web board and an auditable JSON ledger. Docs live under `dsh-mini-superagent/docs/` and are not shipped in the npm package.
 
-> **版本**：当前工作区版本 0.10.2；已发布版本以 [`CHANGELOG.md`](dsh-mini-superagent/CHANGELOG.md) 为准。安装方式见「快速开始」。
+> **当前工作区版本 0.10.2；已发布版本以 CHANGELOG 为准。** npm latest 为 `0.10.2`，安装方式见「快速开始」。
 
-装上之后你会得到两样东西：**10 个派发工具**，以及一块**侧边栏「派发工作台」**。前者负责把活派出去、让报告自己回来；后者负责看清并发、排队、批次进度与失败原因，并直接取消 / 重试 / 归档。
+## 产品速览
+
+| 派发 | 执行 | 追踪 | 回流 |
+| --- | --- | --- | --- |
+| 主会话提交自包含任务简报 | 独立后台 Session 各自完成任务 | 派发工作台呈现并发、队列和计划进度 | 结果与报告自动返回发起会话 |
+
+安装后即可使用这组派发工具，并在 Web 侧边栏打开「派发工作台」。批量任务支持依赖等待，worker 有历史可沿用，完成后可继续追问、纠偏或续派。
+
+## 功能图解
+
+下图由项目图标、真实界面组件和任务示例组成。看板、任务和进度中的数值均为演示数据，不代表实际项目效果。
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="assets/readme/01-overview.png"><img src="assets/readme/01-overview.png" alt="主会话派发任务，三个独立子会话执行并将报告回流" width="420" /></a><br />
+      <strong>01 · 从派发到报告回流</strong><br />
+      <sub>主会话提交简报，多个独立 Session 执行，结果回到原会话。</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="assets/readme/02-batch-dispatch.png"><img src="assets/readme/02-batch-dispatch.png" alt="最多 16 项批量派发，默认 6 路并发，其余任务排队" width="420" /></a><br />
+      <strong>02 · 批量派发与并发队列</strong><br />
+      <sub>单批 1–16 项独立任务，默认最多 6 路并行，空位出现时队列自动补位。</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="assets/readme/03-workbench.png"><img src="assets/readme/03-workbench.png" alt="派发工作台展示并发、排队、计划进度与失败信息" width="420" /></a><br />
+      <strong>03 · 派发工作台</strong><br />
+      <sub>集中查看并发、排队、批次计划和异常状态，并可取消、重试或归档。</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="assets/readme/04-brief-template.png"><img src="assets/readme/04-brief-template.png" alt="任务简报模板：目标、约束、验收和已知事实" width="420" /></a><br />
+      <strong>04 · 交给子会话的任务简报</strong><br />
+      <sub>写明目标、约束、验收和已知事实，让任务脱离主会话历史也能执行。</sub>
+    </td>
+  </tr>
+</table>
+
+> 任务卡、批次状态和指标属于示例场景。插件提供状态追踪能力，不承诺固定耗时、效率提升或任务成功率。
 
 ## 它解决什么问题
 
@@ -47,7 +92,7 @@
 | 会话卡片 | 派发卡（三阶段、4 行折叠、批次实时状态、轮次尾部摘要）+ 报告卡（四段解析、原文兜底、复制原文）；两张卡独立降级 | Web 形态 |
 | 记忆治理 | 1.5 秒通知合并窗口（上限 2 秒）、事实与投影分离、账本 1000 条 / 90 天封顶、退休留痕（13 字段摘要，不保留报告正文） | 已实现 |
 | 健康度 | `retry_health`（重试次数 / 起始时间 / 最后错误）与 `GET /board/stats` 全量聚合（不受 200 条快照上限影响） | 已实现 |
-| 质量闸门 | `npm run check:dev`（原 `check`）= 语法检查 + 648 单测 + 817 客户端离线渲染检查；GitHub Actions 跑同一条链 | 已实现 |
+| 质量闸门 | `npm run check:dev`（原 `check`）= 语法检查 + 661 单测 + 817 客户端离线渲染检查；GitHub Actions 跑同一条链 | 已实现 |
 
 > 看板路由前缀均为 `/dsh-mini-superagent`。
 
@@ -108,10 +153,10 @@ flowchart LR
 
 #### 方式二：一行命令（npm）
 
-npm 已发布 `0.10.1`（latest），在 DSH 里按包名安装即可，不用 clone、不用构建、也不用 `npm install`：
+npm 已发布 `0.10.2`（latest），在 DSH 里按包名安装即可，不用 clone、不用构建、也不用 `npm install`：
 
 ```text
-plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.1")
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.2")
 ```
 
 #### 方式三：从仓库 / 本地目录安装
@@ -215,15 +260,15 @@ dispatch_launch({
 
 ## Roadmap
 
-### 已发布（0.10.1，npm + GitHub Release）
+### 已发布（0.10.2，npm + GitHub Release）
 
 - 非阻塞派发、批量派发、并发队列、报告自动回流、自动归档、工作区。
 - 看板四视图 + 独立「已退休」视图 + 分析看板；`retry_health` 与 `/board/stats`。
 - 会话卡片：派发卡（批次 / 三阶段 / 实时状态 / 轮次尾部摘要）+ 报告卡（四段解析 / 原文兜底 / 复制原文），两张卡独立降级。
 - 续派（`continue_task_id`）、交接（`handoff_from`）、计划透出（`plan`）、批次依赖（`depends_on`）。
 - 记忆治理 P0/P1：通知合并窗口、事实与投影分离、账本封顶与退休留痕。
-- 质量闸门：`npm run check:dev`（648 单测 / 817 客户端检查）与 GitHub Actions CI。
-- 发布面：`dsh-mini-superagent@0.10.1` 随本次发布上 npm（`latest`），并打 `v0.10.1` tag、发 GitHub Release。
+- 质量闸门：`npm run check:dev`（661 单测 / 817 客户端检查）与 GitHub Actions CI。
+- 发布面：`dsh-mini-superagent@0.10.2` 已发布到 npm（`latest`），并打 `v0.10.2` tag、发 GitHub Release。
 
 ### 未做（真实缺口）
 
