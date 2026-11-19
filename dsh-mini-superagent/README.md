@@ -94,10 +94,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.10.1","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.10.2","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.1`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.2`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。

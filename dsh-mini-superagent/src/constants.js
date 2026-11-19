@@ -7,7 +7,7 @@
 export const NAME = 'dsh-mini-superagent'
 
 /** 插件版本，会出现在 dispatch_list 与看板快照里，便于确认“跑的是哪一版”。 */
-export const VERSION = '0.10.1'
+export const VERSION = '0.10.2'
 
 /** 日志前缀。 */
 export const LOG_PREFIX = `${NAME}:`
@@ -32,6 +32,15 @@ export const BOARD_BASE = '/dsh-mini-superagent/board'
 export const ERROR_CODES = Object.freeze({
   BAD_ARGS: 'dispatch/bad-args',
   NOT_FOUND: 'dispatch/not-found',
+  /**
+   * 未通过宿主准入（0.10.2）。与 `FORBIDDEN` 是两件事，别合并：
+   * - `UNAUTHENTICATED` = HTTP 401，`connection.requestRejection` 说「没登录」
+   *   → 用户该做的是重新打开 `dsh web` 打印的那个带凭据的网址；
+   * - `FORBIDDEN` = HTTP 403，要么是同一个闸门说「Host 不在信任清单」
+   *   → 用户该做的是把域名写进 `--trusted-host`，要么是自建 Host/Origin 栅栏拒绝。
+   * 合成一个码，排障脚本就只能去读中文措辞。
+   */
+  UNAUTHENTICATED: 'dispatch/unauthenticated',
   FORBIDDEN: 'dispatch/forbidden',
   CONFLICT: 'dispatch/conflict',
   HOST_UNAVAILABLE: 'dispatch/host-unavailable',

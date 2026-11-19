@@ -4299,7 +4299,7 @@ console.log('\n派发卡 P1：实时轮询 / 退避 / 旧宿主降级 / blocked 
 /** 造一个 `/board?group=` 的响应（形状与 Host 的 `boardSnapshot()` 一致）。 */
 function cardBoardPayload(tasks) {
   return {
-    version: '0.10.1',
+    version: '0.10.2',
     generatedAt: new Date().toISOString(),
     concurrency: { running: 0, queued: 0, max: 6 },
     counts: {},
@@ -4764,7 +4764,7 @@ try {
   // 第一版响应：任务还在跑（卡片此刻的真实状态）。
   let soloStatus = 'running'
   cardBoardResponse = {
-    version: '0.10.1',
+    version: '0.10.2',
     generatedAt: new Date().toISOString(),
     concurrency: { running: 1, queued: 0, max: 6 },
     counts: {},
@@ -4799,7 +4799,7 @@ try {
    */
   soloStatus = 'done'
   cardBoardResponse = {
-    version: '0.10.1',
+    version: '0.10.2',
     generatedAt: new Date().toISOString(),
     concurrency: { running: 0, queued: 0, max: 6 },
     counts: {},

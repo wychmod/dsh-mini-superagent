@@ -2,6 +2,43 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 0.10.2 — 2026-11-19
+
+### 安全
+
+- **看板 HTTP 路由现在先过 DSH 的 `connection.requestRejection`**：插件用
+  `server.register({ kind: 'prefix', path: '/dsh-mini-superagent/board' })` 把看板挂在
+  宿主的裸 `webServer` 上，而 `webServer` 只做路径分发、**不做准入**——准入长在
+  `connection` 服务里（Host 信任清单 + 浏览器登录凭据）。此前 handler 一行都没问它，
+  于是本机任意进程 `curl 127.0.0.1:<port>/dsh-mini-superagent/board` 免凭据就能读到
+  全部任务标题 / 工作目录 / 报告摘要，也能归档、取消、改派发目标、往会话投话，
+  而 DSH 自己的 `/api` 对同样的请求回 401。
+- 闸门加在 `createBoardHandler()` 返回的 handler 最开头（解析完 pathname 之后、
+  进入任何路由分支之前），一个 handler 覆盖全部端点。`401` 回「需要先登录 DSH」、
+  `403` 回「Host 不在部署信任清单里」，与 DSH 内置路由（open-in-app、devtools CDP）
+  同一口径。`src/index.js` 的 `inject` 相应加入 `'connection'`。
+- **自建的 `readAllowed()` / `writeAllowed()` 栅栏保留**，两层叠加而不是互相替换：
+  `connection` 认「部署承认的地址 + 已登录浏览器」，但对同源页面里的脚本是放行的；
+  Host/Origin 判定 + 自定义头 `x-dsh-mini-superagent` 挡的正是那一档（以及 CSRF）。
+- **新增错误码 `dispatch/unauthenticated`**（HTTP 401），与既有的
+  `dispatch/forbidden`（403）分开。合并成一个码，排障脚本就只能去读中文措辞：
+  401 该做的是重新打开凭据网址，403 该做的是把域名写进 `--trusted-host`，
+  两者方向相反。
+- 无 `connection` 服务的 headless 宿主保持原行为：用可选链读服务，缺席时静默放行，
+  退回只靠自建栅栏，不会把整块看板打成 500。
+
+### 验证
+
+- 新增 `test/board-connection-gate.test.js`（13 条）：`403` / `401` / `undefined`（放行）/
+  服务缺席（放行）四条路径，外加「拒绝发生在任何路由分支之前（未知路径也先 403，
+  而不是先 404 泄露端点表）」、「写路由被拒时归档/取消/投递一条都不执行」、
+  「`connection` 放行不等于写操作免检（自建头仍要带）」、401/403 错误码不合并。
+- 负向验收：把 handler 开头那段闸门改成恒假，该文件的 12 条里有 6 条变红
+  （403/401 两组全部失败），说明用例真的钉住了闸门而不是恰好通过。
+- `npm test` **661 pass / 0 fail**；`node scripts/check-syntax.mjs` 21 个文件通过；
+  `node ../scripts/client-smoke.mjs` 817 项通过。
+- 无破坏性变更、无新增运行时依赖、10 个工具与看板 API 不变。
+
 ## 0.10.1 — 2026-11-18
 
 ### 修复

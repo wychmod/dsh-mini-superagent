@@ -18,8 +18,22 @@ import { registerTools } from './tools.js'
 /** 插件名，必须与 package.json 的 name 一致。 */
 export const name = NAME
 
-/** 硬依赖的服务；缺任何一个插件都不会激活，而不是半残运行。 */
-export const inject = ['tools', 'agents', 'sessionController']
+/**
+ * 硬依赖的服务；缺任何一个插件都不会激活，而不是半残运行。
+ *
+ * `connection`（0.10.2）：DSH 的请求准入服务。看板 HTTP 路由挂在裸
+ * `webServer` 上，而 `webServer` **只做路径分发、不做准入**——准入由
+ * `connection.requestRejection(req)` 负责（Host 信任清单 + 浏览器登录凭据）。
+ * DSH 内置路由（open-in-app、devtools CDP）都在 handler 第一行问它，我们此前
+ * 一行都没问，于是本机任意进程免凭据就能读到全部任务标题与报告摘要。
+ *
+ * 为什么敢写进硬依赖：`connection` 由 `@deepseek-ai/dsh-client-connection` 提供，
+ * web / sdk 两个带 `webServer` 的 bundle 都挂了它；而没有它的 headless bundle
+ * 同时也没有 `sessionController`，本插件在那种形态下本来就不激活。即便如此，
+ * 看板 handler 里仍按**可选**读它（`ctx.get('connection')?.requestRejection?.(req)`），
+ * 这样「路由存在但服务晚到/未提供」时只退回自建栅栏，不会 500。
+ */
+export const inject = ['tools', 'agents', 'sessionController', 'connection']
 
 /**
  * 插件入口。
