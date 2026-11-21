@@ -2,6 +2,47 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 0.10.3 — 2026-11-21
+
+### 修复
+
+- **`dispatch_inspect` 不再永久报 `tool "dispatch_inspect" returned invalid output:
+  value is not lossless JSON`**：任务只要有过一条**不带 `detail`** 的报告（`progress`
+  最常见），此后每次 inspect 都失败，只能看 `dispatch_list` 的摘要。
+- 根因是**写进账本的一个脏键**：`#admitEntry()` 用简写 `detail,` 构造报告条目，不带
+  `detail` 的报告于是产生一个**值为 `undefined` 的自有键** `detail: undefined`。账本和
+  单测都看不出异常，因为 `JSON.stringify` 会静默丢掉 `undefined`；但 `recent_reports`
+  把账本条目**原样**转发进工具返回值，宿主在工具边界做值遍历校验（`walkJsonValue`）
+  时拒绝 `undefined`，整次调用连带失败。
+- 修复分**写入侧**与**投影侧**两处，纵深防御而不是重复修同一处：
+  1. 写入侧：`detail,` → `...(detail === undefined ? {} : { detail })`，从根上不再产生
+     这个键；
+  2. 投影侧：新增 `projectReportEntry()`，`recent_reports` 改为
+     `reports.slice(-5).map(projectReportEntry)`，逐个剔除值为 `undefined` 的自有键。
+- **存量账本无需手工清洗**：投影侧这一层就是给已有数据兜底的——用户机器上已经落盘的
+  `tasks.json` 里就带着脏键，只改写入侧救不了它们。升级后直接可读，不用删任务、不用
+  改 `stateDir`、不用手工编辑 JSON。
+- 只剔除 `undefined`，**不剔除 `null`**：两者语义不同（「没有值」vs「存在但为空」），
+  把 `null` 一起抹掉会让 `truncated` 这类可选字段的读法失去信息。
+
+### 验证
+
+- 新增 `test/inspect-lossless-json.test.js`（7 条）：先自检宿主规则「确实拒绝
+  `undefined`、确实接受孤立代理项」；再钉住无 `detail` 的 `progress` 报告、带 `detail`
+  的报告照旧完整可读、`dispatch_list` 与 `dispatch_report` 的返回值同样过宿主校验、
+  长 `detail`（被 clip 截断）与无 `detail` 并存、`detail` 里出现 emoji（排除「长度 /
+  代理项」这个错误假设）、账本里**存量**坏形状条目也必须能读。
+- 负向验收：还原两处修复后，该文件的 7 条里有 5 条变红，说明用例真的钉住了这个形状，
+  而不是恰好通过。
+- `npm test` **668 pass / 0 fail**（基线 661，本版新增 7 条）；`node scripts/check-syntax.mjs`
+  21 个文件通过；`node ../scripts/client-smoke.mjs` 817 项通过。
+
+### 说明
+
+- 无破坏性变更、无新增运行时依赖、10 个工具与看板 API 不变；账本 `FILE_VERSION` 仍是 4。
+- 版本号同源到 `package.json`、`src/constants.js` 的 `VERSION`、两份 README、`docs/board.md`
+  与 `docs/tools.md` 的示例、`scripts/client-smoke.mjs` 的 fixture，以及落地页 `index.html`。
+
 ## 0.10.2 — 2026-11-19
 
 ### 安全
