@@ -162,10 +162,24 @@ function fakeBoard() {
   }
 }
 
+/**
+ * 看板 handler 需要的宿主上下文。
+ *
+ * 0.10.4 起准入是 fail-closed：拿不到 `connection` 服务时回 503。这组用例钉的是
+ * **自建 Host/Origin 栅栏**，所以必须给一个「准入已放行」的假宿主，否则测到的
+ * 是 503 而不是栅栏本身。
+ */
+function boardCtx() {
+  return {
+    logger: { warn() {}, info() {} },
+    get: name => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+  }
+}
+
 // ---------------------------------------------------------------- P0-1 看板准入
 
 test('P0-1 DNS rebinding：Host 与 Origin 都是攻击者域名时被拒绝', async () => {
-  const handler = createBoardHandler({ logger: { warn() {} } }, fakeBoard())
+  const handler = createBoardHandler(boardCtx(), fakeBoard())
   const result = await call(handler, {
     headers: { host: 'evil.example:9735', origin: 'http://evil.example:9735' },
   })
@@ -173,7 +187,7 @@ test('P0-1 DNS rebinding：Host 与 Origin 都是攻击者域名时被拒绝', a
 })
 
 test('P0-1 非回环 Host 不带 Origin 的 POST 被拒绝', async () => {
-  const handler = createBoardHandler({ logger: { warn() {} } }, fakeBoard())
+  const handler = createBoardHandler(boardCtx(), fakeBoard())
   const result = await call(handler, {
     method: 'POST',
     url: `${BASE}/archive`,
@@ -184,7 +198,7 @@ test('P0-1 非回环 Host 不带 Origin 的 POST 被拒绝', async () => {
 })
 
 test('P0-1 回环 Host 但 Origin 是恶意站点时被拒绝', async () => {
-  const handler = createBoardHandler({ logger: { warn() {} } }, fakeBoard())
+  const handler = createBoardHandler(boardCtx(), fakeBoard())
   const result = await call(handler, {
     headers: { host: '127.0.0.1:11586', origin: 'https://evil.example' },
   })
@@ -192,7 +206,7 @@ test('P0-1 回环 Host 但 Origin 是恶意站点时被拒绝', async () => {
 })
 
 test('P0-1 写操作必须带准入头', async () => {
-  const handler = createBoardHandler({ logger: { warn() {} } }, fakeBoard())
+  const handler = createBoardHandler(boardCtx(), fakeBoard())
   const without = await call(handler, {
     method: 'POST',
     url: `${BASE}/archive`,
@@ -211,7 +225,7 @@ test('P0-1 写操作必须带准入头', async () => {
 })
 
 test('P0-1 本机正常读看板仍然可用', async () => {
-  const handler = createBoardHandler({ logger: { warn() {} } }, fakeBoard())
+  const handler = createBoardHandler(boardCtx(), fakeBoard())
   const result = await call(handler, { headers: { host: '127.0.0.1:11586' } })
   assert.equal(result.status, 200)
 })

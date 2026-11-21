@@ -309,8 +309,12 @@ test('P1 看板截断时给出 truncated 提示', () => {
     table, targets: new Map(), workspaces: { list: () => [] },
     config: { leadSessionId: 'mas-lead' }, ctx: { agents: { get: () => undefined } },
   }
-  // 通过真实 handler 读快照
-  const handler = createBoardHandler({ logger: { warn() {} } }, dispatch)
+  // 通过真实 handler 读快照。
+  // 0.10.4 起准入 fail-closed：不给 `connection` 会直接 503，就测不到快照里的 truncated。
+  const handler = createBoardHandler({
+    logger: { warn() {} },
+    get: name => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+  }, dispatch)
   return new Promise(resolve => {
     const req = {
       method: 'GET', url: '/dsh-mini-superagent/board',

@@ -812,7 +812,11 @@ async function call(handler, options) {
 
 /** 建一个能过 readAllowed 的 handler：dispatch 只需要 stats 依赖的那几个字段。 */
 function handlerFor(dispatch) {
-  const ctx = { logger: { info() {}, warn() {} } }
+  // 0.10.4 起准入 fail-closed：没有 `connection` 服务会先回 503，测不到聚合。
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    get: name => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+  }
   return createBoardHandler(ctx, dispatch)
 }
 

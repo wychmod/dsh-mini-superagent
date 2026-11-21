@@ -29,9 +29,13 @@ export const name = NAME
  *
  * 为什么敢写进硬依赖：`connection` 由 `@deepseek-ai/dsh-client-connection` 提供，
  * web / sdk 两个带 `webServer` 的 bundle 都挂了它；而没有它的 headless bundle
- * 同时也没有 `sessionController`，本插件在那种形态下本来就不激活。即便如此，
- * 看板 handler 里仍按**可选**读它（`ctx.get('connection')?.requestRejection?.(req)`），
- * 这样「路由存在但服务晚到/未提供」时只退回自建栅栏，不会 500。
+ * 同时也没有 `sessionController`，本插件在那种形态下本来就不激活。所以「路由在、
+ * 服务不在」实际只出现在旧宿主或半加载状态。
+ *
+ * 0.10.4 起 handler 里改成 **fail-closed**：仍然按可选链读服务（不因为缺服务就抛
+ * TypeError），但缺服务 / 缺方法 / 方法抛错时**直接回 503**，不再退回只靠自建
+ * Host 栅栏的旧行为。给旧宿主的逃生阀是配置项
+ * `allowBoardWithoutConnectionGate`（默认 false）。
  */
 export const inject = ['tools', 'agents', 'sessionController', 'connection']
 

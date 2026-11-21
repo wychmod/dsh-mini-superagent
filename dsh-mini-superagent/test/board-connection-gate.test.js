@@ -1,5 +1,5 @@
 /**
- * 看板路由的宿主准入闸门（0.10.2）。
+ * 看板路由的宿主准入闸门（0.10.2 引入，0.10.4 改为 fail-closed）。
  *
  * 钉的是一个**对外可见的安全缺口**：看板路由是 `webServer.register({ kind: 'prefix' })`
  * 注册的，而 `webServer` 只做路径分发、不做准入。准入长在 `connection` 服务里
@@ -8,15 +8,18 @@
  * 免凭据能读到全部任务标题 / 工作目录 / 报告摘要，也能归档、取消、改派发目标、
  * 往会话投话。
  *
- * 这里钉五件事：
+ * 这里钉六件事：
  * 1. `requestRejection` 回 403 → **任意**路由回 403，且没往下走（快照没被读、动作没执行）；
  * 2. 回 401 → 回 401（「没登录」与「地址不可信」在文案上也要分得开）；
  * 3. 回 undefined → 正常放行，原有行为逐字段不变；
- * 4. `ctx.get('connection')` 为 undefined（headless / 旧宿主）→ 仍放行、不抛错；
- * 5. 闸门在**所有**路由分支之前——包括未知路由（404 之前也该先被拒）。
+ * 4. `ctx.get('connection')` 为 undefined / 没有 `requestRejection` 方法 / 方法抛错
+ *    （0.10.4 起 fail-closed）→ **回 503**，不是放行，也不是 500；
+ * 5. 逃生阀 `allowBoardWithoutConnectionGate: true` + 服务缺席 → 回到 0.10.3 的静默回退
+ *    （仍要过自建栅栏），且它翻不掉 401 / 403；
+ * 6. 闸门在**所有**路由分支之前——包括未知路由（404 之前也该先被拒）。
  *
- * 关键验收：去掉 handler 开头那段 `requestRejection` 检查，前两组用例会红
- * （会拿到 200 与真实数据）。
+ * 关键验收：把 fail-closed 那几行改回「服务缺失就放行」，第 4 组用例整组变红
+ * （会拿到 200 与真实数据，而不是 503）。
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -97,12 +100,15 @@ function makeTask(id, overrides = {}) {
  * 假宿主 + 假 Dispatch。
  *
  * `rejection` 决定 `connection.requestRejection` 的返回值：`undefined` 表示放行。
- * `mode: 'absent'` 时 `ctx.get('connection')` 返回 undefined（headless 形态）；
- * `service` 可直接给一个自定义形状的服务（用来测「有服务但没有这个方法」）。
+ * `mode: 'absent'` 时 `ctx.get('connection')` 返回 undefined（headless / 旧宿主形态）；
+ * `service` 可直接给一个自定义形状的服务（用来测「有服务但没有这个方法」），
+ * 传 `service: 'throws'` 则方法直接抛错（0.10.4 起这也必须 fail-closed）。
+ * `config` 覆盖 `dispatch.config`——逃生阀 `allowBoardWithoutConnectionGate` 从
+ * 那里读，与真实 `Dispatch` 把 `DEFAULTS` 合并进 `this.config` 的读法一致。
  * `calls` 记录「有没有真的往下走」——归档 / 取消 / 投递都记在这里，闸门生效时
  * 它们必须一条都没有。
  */
-function fakeHost({ rejection, mode = 'present', service } = {}) {
+function fakeHost({ rejection, mode = 'present', service, config } = {}) {
   const calls = { archive: 0, cancel: 0, message: 0, rejected: 0 }
 
   const tasks = new Map([
@@ -112,7 +118,9 @@ function fakeHost({ rejection, mode = 'present', service } = {}) {
 
   const dispatch = {
     ctx: { agents: { get: () => undefined } },
-    config: { leadSessionId: 'mas-lead' },
+    // 0.10.4：DEFAULTS 合并后的完整 config 才带逃生阀；这里默认只给必填项，
+    // 于是「配置里没有这个键」= 默认 fail-closed，正是要钉的那条路径。
+    config: { leadSessionId: 'mas-lead', ...config },
     table: { tasks, maxWorkers: 6, get: id => tasks.get(id), byWorker: () => undefined },
     clientReady: undefined,
     targets: new Map(),
@@ -129,17 +137,23 @@ function fakeHost({ rejection, mode = 'present', service } = {}) {
     async retry() { calls.cancel += 1 },
     async setTarget() { calls.target = (calls.target ?? 0) + 1; return undefined },
     async selfCheck() {
-      return { version: '0.10.2', client: { inGraph: false, path: null, ready: null } }
+      return { version: '0.10.4', client: { inGraph: false, path: null, ready: null } }
     },
   }
 
-  /** 宿主那半边 `connection` 服务的假实现：只实现我们用到的那一个方法。 */
-  const hostService = service ?? {
-    requestRejection() {
-      calls.rejected += 1
-      return rejection
-    },
-  }
+  /**
+   * 宿主那半边 `connection` 服务的假实现：只实现我们用到的那一个方法。
+   * `service: 'throws'` 单独一档——「方法在、但它抛了」与「方法不在」在
+   * 旧实现里都是「静默放行」，在 fail-closed 里都必须变成 503。
+   */
+  const hostService = service === 'throws'
+    ? { requestRejection() { throw new Error('信任清单读取失败') } }
+    : service ?? {
+      requestRejection() {
+        calls.rejected += 1
+        return rejection
+      },
+    }
 
   const ctx = {
     logger: { info() {}, warn() {} },
@@ -258,38 +272,161 @@ test('requestRejection 回 undefined：写路由照常执行，但仍要过自�
   assert.equal(noHeader.status, 403, '两层栅栏是叠加的：connection 放行不等于写操作免检')
 })
 
-/* ---------------------------------------------------------------- headless */
+/* ---------------------------------------------------------------- fail-closed（0.10.4） */
 
-test('宿主没有 connection 服务（headless）：静默放行，不抛错', async () => {
+/**
+ * 「这道门检查不了」一律 503，绝不 401 / 403 / 200。
+ *
+ * 为什么单独断言三个错误码互不相同：503 与 401 / 403 的**下一步动作**完全不同——
+ * 401 去登录、403 去查信任清单、503 去查宿主有没有 `connection` 服务。合成一个，
+ * 用户只会照着错的方向折腾。
+ */
+function assertUnavailable(result, label) {
+  assert.equal(result.status, 503, `${label}：拿不到准入依据时必须回 503，不能放行也不能打成 500`)
+  assert.equal(result.json?.ok, false, `${label}：503 体必须是 ok:false`)
+  assert.equal(result.json?.code, 'dispatch/host-unavailable',
+    `${label}：503 要用 host-unavailable，不能落到 dispatch/internal（那会让「升级宿主」被误判成「插件 bug」）`)
+  assert.equal(result.json?.tasks, undefined, `${label}：拒绝时不能泄露任务列表`)
+  assert.equal(result.headers['cache-control'], 'no-store', `${label}：拒绝响应同样不缓存`)
+  assert.match(result.json.error, /503|准入|connection/, `${label}：文案要让用户知道是「门检查不了」而不是「你没登录」`)
+  assert.doesNotMatch(result.json.error, /登录/, `${label}：503 不能套用 401 的文案——凭据没坏，是门没开`)
+}
+
+test('fail-closed：宿主没有 connection 服务 → GET /board 回 503（不是放行）', async () => {
   const host = fakeHost({ mode: 'absent' })
   const result = await call(host.handler, {})
-  assert.equal(result.status, 200, '缺服务时退回旧行为，不能打成 500')
-  assert.ok(result.json.tasks.some(task => task.task_id === 'a'))
+  assertUnavailable(result, 'GET /board')
 })
 
-test('宿主没有 connection 服务：写路由仍受自建栅栏保护（不是完全裸奔）', async () => {
+test('fail-closed：宿主没有 connection 服务 → 所有只读端点都 503', async () => {
   const host = fakeHost({ mode: 'absent' })
+  const gets = ['', '/selfcheck', '/retired', '/stats', '/analytics']
+  for (const suffix of gets) {
+    const result = await call(host.handler, { url: `${BASE}${suffix}` })
+    assertUnavailable(result, `GET ${suffix || '(根)'}`)
+  }
+})
+
+test('fail-closed：宿主没有 connection 服务 → 所有写路由都 503 且一条都没执行', async () => {
+  const host = fakeHost({ mode: 'absent' })
+  const posts = [
+    ['/archive', { task_id: 'done-1' }],
+    ['/archive-task', { task_id: 'done-1' }],
+    ['/cancel', { task_id: 'a' }],
+    ['/retry', { task_id: 'a' }],
+    ['/target', { session_id: 's1', workspace: 'w-1' }],
+    ['/client-ready', { ok: true }],
+  ]
+  for (const [suffix, body] of posts) {
+    const result = await call(host.handler, { method: 'POST', url: `${BASE}${suffix}`, body })
+    assertUnavailable(result, `POST ${suffix}`)
+  }
+  assert.equal(host.calls.archive + host.calls.cancel + host.calls.message, 0,
+    '闸门检查不了时一个写动作都不能执行——这正是 fail-closed 与「静默回退」的差别')
+})
+
+test('fail-closed：未知路由也先回 503（闸门在 404 之前）', async () => {
+  const host = fakeHost({ mode: 'absent' })
+  const result = await call(host.handler, { url: `${BASE}/nope` })
+  assertUnavailable(result, '未知路由')
+})
+
+test('fail-closed：requestRejection 不是函数（服务形状不对）→ 503', async () => {
+  const host = fakeHost({ mode: 'present', service: { requestRejection: undefined } })
+  const result = await call(host.handler, {})
+  assertUnavailable(result, 'GET /board')
+})
+
+test('fail-closed：requestRejection 不是函数 → 写路由也是 503 且没执行', async () => {
+  const host = fakeHost({ mode: 'present', service: { requestRejection: undefined } })
+  const result = await call(host.handler, { method: 'POST', url: `${BASE}/cancel`, body: { task_id: 'a' } })
+  assertUnavailable(result, 'POST /cancel')
+  assert.equal(host.calls.cancel, 0, '方法不存在时动作不能执行')
+})
+
+test('fail-closed：requestRejection 抛错 → 503（异常不等于放行）', async () => {
+  const host = fakeHost({ mode: 'present', service: 'throws' })
+  const result = await call(host.handler, {})
+  assertUnavailable(result, 'GET /board')
+  assert.match(result.json.error, /connection|准入/, '抛错也要落到「门检查不了」这一档文案')
+})
+
+test('fail-closed：ctx 完全没有 get 方法（更旧的宿主形态）→ 503，不是 TypeError', async () => {
+  const host = fakeHost({ rejection: 403 })
+  const bare = { logger: { info() {}, warn() {} } }
+  const handler = createBoardHandler(bare, { ...host.dispatch, config: { leadSessionId: 'mas-lead' } })
+  const result = await call(handler, {})
+  assertUnavailable(result, 'GET /board')
+})
+
+test('fail-closed：503 的 error_code 与 401 / 403 / 500 都不相同', async () => {
+  const unavailable = await call(fakeHost({ mode: 'absent' }).handler, {})
+  const unauthorized = await call(fakeHost({ rejection: 401 }).handler, {})
+  const forbidden = await call(fakeHost({ rejection: 403 }).handler, {})
+  const codes = new Set([unavailable.json.code, unauthorized.json.code, forbidden.json.code])
+  assert.equal(codes.size, 3, `三种拒绝必须三个码，实际：${[...codes].join(' / ')}`)
+  assert.equal(unavailable.json.code, 'dispatch/host-unavailable')
+})
+
+/* ---------------------------------------------------------------- 逃生阀 */
+
+/*
+ * 逃生阀 `allowBoardWithoutConnectionGate`（默认 false）的边界：
+ * - 它**只**把「问不到」这一档改回放行；
+ * - 它**不能**把 401 / 403 变成放行（那两档已经拿到权威结论）；
+ * - 打开后自建 `readAllowed` / `writeAllowed` 仍然生效——逃生阀退的是
+ *   `connection` 这一层，不是把看板整块拆成裸奔。
+ */
+
+test('逃生阀默认关闭：config 里没有这个键时仍然 fail-closed', async () => {
+  const host = fakeHost({ mode: 'absent' })
+  // fakeHost 默认的 config 只有 leadSessionId，等价于「用户没配这一项」。
+  assert.equal(host.dispatch.config.allowBoardWithoutConnectionGate, undefined)
+  const result = await call(host.handler, {})
+  assertUnavailable(result, 'GET /board')
+})
+
+test('逃生阀打开 + 服务缺失：回到 0.10.3 的静默回退（GET /board 放行）', async () => {
+  const host = fakeHost({ mode: 'absent', config: { allowBoardWithoutConnectionGate: true } })
+  const result = await call(host.handler, {})
+  assert.equal(result.status, 200, '逃生阀打开时缺服务应放行，而不是还回 503')
+  assert.ok(result.json.tasks.some(task => task.task_id === 'a'), '放行必须真的读到任务，否则这条用例证明不了任何事')
+})
+
+test('逃生阀打开 + 服务缺失：写路由仍受自建栅栏保护（不是完全裸奔）', async () => {
+  const host = fakeHost({ mode: 'absent', config: { allowBoardWithoutConnectionGate: true } })
+
+  // 不带自定义头：闸门缺席，但 writeAllowed 是唯一还站着的防线。
   const noHeader = await call(host.handler, {
     method: 'POST',
     url: `${BASE}/cancel`,
     headers: { 'x-dsh-mini-superagent': '' },
     body: { task_id: 'a' },
   })
-  assert.equal(noHeader.status, 403, '闸门缺席时 writeAllowed 是唯一还站着的防线，不能被一起拆掉')
+  assert.equal(noHeader.status, 403, '逃生阀退的只是 connection 这一层，自建 CSRF 栅栏不能一起被拆掉')
   assert.equal(host.calls.cancel, 0, '被自建栅栏拦下时动作不能执行')
+
+  // 带齐头：真的执行，证明 403 来自栅栏而不是别的分支。
+  const ok = await call(host.handler, { method: 'POST', url: `${BASE}/cancel`, body: { task_id: 'a' } })
+  assert.equal(ok.status, 200, '带齐 Host 与自定义头时逃生阀路径应放行')
+  assert.equal(host.calls.cancel, 1, '放行路径必须真的执行动作')
 })
 
-test('ctx.get 本身不提供 connection 键：可选链不抛错', async () => {
-  const host = fakeHost({ rejection: 403 })
-  // 模拟「ctx 没有 get 方法」这种更旧的宿主形态。
-  const bare = { logger: { info() {}, warn() {} } }
-  const handler = createBoardHandler(bare, host.dispatch)
-  const result = await call(handler, {})
-  assert.equal(result.status, 200, '没有 ctx.get 时应静默放行，而不是 TypeError')
+test('逃生阀打开也不会翻掉 401 / 403（那两档是已经拿到的权威结论）', async () => {
+  const forbiddenHost = fakeHost({ rejection: 403, config: { allowBoardWithoutConnectionGate: true } })
+  assertRefused(await call(forbiddenHost.handler, {}), 403, 'GET /board')
+
+  const unauthorizedHost = fakeHost({ rejection: 401, config: { allowBoardWithoutConnectionGate: true } })
+  assertRefused(await call(unauthorizedHost.handler, {}), 401, 'GET /board')
+
+  const postHost = fakeHost({ rejection: 403, config: { allowBoardWithoutConnectionGate: true } })
+  const post = await call(postHost.handler, { method: 'POST', url: `${BASE}/cancel`, body: { task_id: 'a' } })
+  assertRefused(post, 403, 'POST /cancel')
+  assert.equal(postHost.calls.cancel, 0, '403 不能因为逃生阀打开就执行动作')
 })
 
-test('requestRejection 不是函数（旧宿主只给了别的形状）：静默放行', async () => {
-  const host = fakeHost({ mode: 'present', service: { requestRejection: undefined } })
+test('逃生阀只在布尔 true 时生效（"true" 这类真值不算，避免 YAML 写错就静默降级）', async () => {
+  const host = fakeHost({ mode: 'absent', config: { allowBoardWithoutConnectionGate: 'true' } })
   const result = await call(host.handler, {})
-  assert.equal(result.status, 200, '服务存在但没有这个方法时，退回旧行为')
+  assertUnavailable(result, 'GET /board')
 })

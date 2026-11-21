@@ -298,19 +298,32 @@ Client 直接请求。理由：
 **退休视图的 `{ok, count, dropped, entries[]}` 形状与 `memoryStats()` 的 `{window, ledger, admission, pending, retired}`
 形状都是冻结契约，字段名不得改。**
 
-### 15. 看板准入：回环放行 + 写操作要自定义头
+### 15. 看板准入：宿主闸门（fail-closed）+ 回环放行 + 写操作要自定义头
 
 插件注册的具名路由排在 DSH 页面鉴权之前，所以看板自己做了准入（0.7.0 起，因为旧的「Origin === Host」判据
-可以被 DNS rebinding 绕过）：
+可以被 DNS rebinding 绕过）。0.10.2 把第一道判断交给宿主的 `connection.requestRejection`，
+0.10.4 起这一层 **fail-closed**（`connectionGateOf()`）：拿不到服务 / 没有方法 / 方法抛错 → `503`，
+不再退回只靠自建栅栏的旧行为。
 
-- `GET`：`Host` 的主机名是回环（`127.0.0.1` / `localhost` / `::1` / `[::1]`）放行，但若有 `Origin` 它也必须指向回环；
+- **层 1 · 宿主**：`connection.requestRejection(req)` —— Host 信任清单 + 浏览器登录凭据。
+  `undefined` 放行，`401` / `403` 拒绝，**问不到 → 503**（`dispatch/host-unavailable`）。
+  下一次单点只在 `src/board.js` 的 `connectionGateOf()`，逃生阀 `allowBoardWithoutConnectionGate`
+  （默认 `false`）也只在这一档生效，翻不掉 401 / 403。
+- **层 2 · `GET`**：`Host` 的主机名是回环（`127.0.0.1` / `localhost` / `::1` / `[::1]`）放行，但若有 `Origin` 它也必须指向回环；
   非回环 `Host` 默认拒绝，需写进 `BOARD_ALLOWED_HOSTS`，且 `Origin` 与 `Host` 一致。
-- `POST`：先满足 `GET` 的规则，**并且**带 `x-dsh-mini-superagent` 头（`BOARD_HEADER`）。
+- **层 3 · `POST`**：先满足 `GET` 的规则，**并且**带 `x-dsh-mini-superagent` 头（`BOARD_HEADER`）。
   自定义头挡不住 rebinding（同源请求不触发预检），它挡的是**同源页面之外的脚本**与简单 CSRF；
   真正的判据是 `Host`——浏览器无法伪造它。
 
-这是「不把任务标题、工作目录、报告摘要泄露给任意网页」的最低成本方案，不是完整鉴权。
-代价：非回环地址默认不可访问（远程 curl 读不到快照）；同源页面里的 XSS 仍能带着这个头发请求。
+**为什么三层并存而不是替换**：层 1 认的是「这台部署承认的地址 + 已登录浏览器」，但它对
+**同源页面里的脚本**是放行的（请求确实来自已登录浏览器）；层 2/3 挡的正是这一档。
+删任何一层都会掉一档防护。
+
+**为什么层 1 必须 fail-closed**：这是插件里唯一一处「安全判断拿不到权威依据时默认放行」的地方。
+DSH 内置路由（open-in-app、devtools CDP）在同样情形下不放行，同一台机器上两种口径等于
+「宿主说要登录，插件说不用」。代价是旧宿主 / 半加载状态下看板不可用（工具不受影响），
+所以留了配置逃生阀，并在 `cordis.patch.yml` 里注明不建议开启。
+
 细节与状态码见 [board.md](board.md)。
 
 ### 16. 客户端不打包、不编译

@@ -81,6 +81,18 @@
           - write
           - edit
 
+        # ---- 看板准入（0.10.4 起 fail-closed）----
+        # 看板 HTTP 路由的第一道判断是宿主准入 `connection.requestRejection`
+        # （Host 信任清单 + 浏览器登录凭据）。拿不到这个服务时默认**直接拒绝**（503），
+        # 而不是退回只靠插件自建的 Host/Origin 栅栏——拿不到权威依据就不放行，
+        # 与 DSH 内置路由（open-in-app、devtools CDP）同一口径。
+        #
+        # 下面是**给旧宿主的逃生阀，不建议开启**：true = 服务缺席时静默回退到
+        # 0.10.3 的行为（只靠自建栅栏）。只在「宿主确实不提供 connection、又必须
+        # 保留看板」时打开；打开后这一档请求少了 Host 信任清单与登录凭据这层。
+        # 它翻不掉 401 / 403（那两档已经拿到权威结论），也不影响 10 个 dispatch_* 工具。
+        allowBoardWithoutConnectionGate: false
+
         # ---- 工作区 ----
         # 工作区根目录；留空表示 <用户文档目录>/mini-superagent。
         # 默认工作区（mini-superagent）和每天的【派发】工作区都建在这下面。

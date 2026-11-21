@@ -7,7 +7,7 @@
 export const NAME = 'dsh-mini-superagent'
 
 /** 插件版本，会出现在 dispatch_list 与看板快照里，便于确认“跑的是哪一版”。 */
-export const VERSION = '0.10.3'
+export const VERSION = '0.10.4'
 
 /** 日志前缀。 */
 export const LOG_PREFIX = `${NAME}:`
@@ -364,6 +364,25 @@ export const DEFAULTS = {
    * 想要硬边界就把它也加进来：`['write', 'edit', 'bash', 'pwsh']`。
    */
   routerDenyTools: ['write', 'edit'],
+  /**
+   * 看板准入拿不到 `connection.requestRejection` 时是否**仍然放行**（0.10.4）。
+   *
+   * 默认 **false** = fail-closed：宿主没有 `connection` 服务、服务上没有这个方法、
+   * 或这个方法抛错时，看板路由直接回 **503**，而不是退回只靠自建
+   * `readAllowed` / `writeAllowed` 栅栏。理由见 `src/board.js` 的 `connectionGateOf()`：
+   * 拿不到权威依据就放行，是唯一一处「安全判断在没依据时默认通过」的地方，
+   * 与 DSH 内置路由（open-in-app、devtools CDP）的口径不一致；收录方
+   * （`polang233/dsh-plugin-index`）的贡献指南也明确要求这种情形直接拒绝。
+   *
+   * 设为 true = **逃生阀**：行为回到 0.10.3 的静默回退（服务缺席时用自建栅栏）。
+   * 只给「跑在旧宿主上、确实拿不到 `connection`、又必须保留看板」的部署用，
+   * 代价是那一档请求少了「Host 信任清单 + 浏览器凭据」这一层。
+   *
+   * 两个边界，别理解成「总开关」：
+   * - 它只影响**第三档**（问不到）；401 / 403 是已经问到结论，它翻不掉；
+   * - 它只影响看板这块面板；10 个 `dispatch_*` 工具从来不走这道门。
+   */
+  allowBoardWithoutConnectionGate: false,
   /**
    * 报告投递失败的退避序列（毫秒），按顺序用，用完即放弃。
    * 抽成配置只为可测：默认的 2s/4s/8s 会让「重试复用同一 id」的用例至少跑 2 秒。
