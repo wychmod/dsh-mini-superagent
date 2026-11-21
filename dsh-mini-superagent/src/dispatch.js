@@ -159,6 +159,41 @@ export function isTransient(error) {
   return TRANSIENT.test(text)
 }
 
+/**
+ * 把一个账本里的报告条目投影成**工具返回值里安全的形状**。
+ *
+ * 为什么需要这一层（纵深防御，不是重复修同一处）：`recent_reports` 早先直接
+ * `reports.slice(-5)`，等于把账本条目**原样**塞进 `dispatch_inspect` 的返回值。
+ * 于是「账本里有什么」直接决定「工具能不能用」——只要条目里有一个值为
+ * `undefined` 的自有键，宿主在工具边界做的值遍历校验就会判
+ * `value is not lossless JSON`，整个工具调用失败，而账本本身看起来完全正常
+ * （`JSON.stringify` 会静默丢掉 undefined，落盘后连痕迹都没有）。
+ *
+ * 两处必须同时成立才对：
+ * 1. 写入侧（`#admitEntry`）不再产生 `detail: undefined`——这是根因；
+ * 2. 投影侧（这里）不信任账本——历史账本、手工编辑、将来新加的字段只要漏一个，
+ *    都会重新变成「某个任务永远 inspect 不了」，而那时已经很难回溯是哪次写入。
+ *
+ * 只剔除 `undefined`，**不剔除 null**：两者的语义不同（「这个字段没有值」vs
+ * 「存在但为空」），把 null 一起抹掉会让 `truncated` 之类可选对象的读法失去信息。
+ * 也不做深拷贝：条目是 `{at, status, headline?, summary, detail?, truncated?}`
+ * 这种一层浅结构，深拷只会让「谁能改账本」变模糊。
+ *
+ * @param {object} entry 账本里的报告条目
+ * @returns {object} 可安全放进工具返回值的副本
+ */
+function projectReportEntry(entry) {
+  if (!entry || typeof entry !== 'object') return entry
+  const out = {}
+  for (const key of Object.keys(entry)) {
+    // `Object.keys` 含值为 undefined 的自有键（这正是要拦的形状），
+    // 所以这里不能按值真值判断——只按 `=== undefined` 剔除。
+    if (entry[key] === undefined) continue
+    out[key] = entry[key]
+  }
+  return out
+}
+
 export class Dispatch {
   /** 写盘 promise 链：保证同一文件不会被两次写并发覆盖。 */
   #persistChain = Promise.resolve()
@@ -2248,7 +2283,23 @@ export class Dispatch {
       status,
       ...(headline ? { headline } : {}),
       summary,
-      detail,
+      /**
+       * `detail` 必须**条件展开**，不能写成 `detail,`。
+       *
+       * 不传 `detail` 的报告（`progress` 最常见）会让这一行产生一个
+       * **自有键 `detail: undefined`**。`JSON.stringify` 会静默丢掉它，所以账本
+       * 与单测都看不出异常；但宿主在工具返回处做的是**值遍历校验**
+       * （app.asar `util/values` 的 `walkJsonValue`），`typeof v !== 'object'`
+       * 且不是 string/number/boolean 的值一律判「not lossless JSON」——
+       * `undefined` 正好落在那条分支上，整次 `dispatch_inspect` 直接失败。
+       *
+       * 实测（t-mwp82ack-1 / t-mwlmsg9q-1）：只要任务里有一条不带 `detail` 的
+       * `progress` 报告，此后 `dispatch_inspect` 永远返回
+       * `tool "dispatch_inspect" returned invalid output: value is not lossless JSON`，
+       * 而且**与长度、emoji、截断都无关**——`recent_reports` 原样转发账本条目，
+       * 那个 undefined 键被一路带到工具返回值里。
+       */
+      ...(detail === undefined ? {} : { detail }),
       // 只在真被截时出现：一个恒存在的空对象会让「是否截过」变成永远 true。
       ...(Object.keys(truncated).length ? { truncated } : {}),
     }
@@ -3554,7 +3605,7 @@ export class Dispatch {
       brief: clip(task.brief, 2000),
       cwd: task.cwd,
       ...(task.briefTruncated ? { brief_truncated_to: task.brief.length } : {}),
-      ...(reports.length ? { recent_reports: reports.slice(-5) } : {}),
+      ...(reports.length ? { recent_reports: reports.slice(-5).map(projectReportEntry) } : {}),
       ...(task.lastText ? { last_worker_text: clip(task.lastText, 3000) } : {}),
       // 计划（详情独有）：步骤数组只在这里出现。
       ...(plan ? { plan } : {}),
