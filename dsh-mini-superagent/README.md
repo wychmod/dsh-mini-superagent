@@ -65,19 +65,19 @@
 
 ## 安装
 
-插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.3` 已发布到 npm（`latest`），**按包名即可安装**。
+插件是纯 ESM，不需要构建、不需要 `npm install`。`dsh-mini-superagent@0.10.4` 已发布到 npm（`latest`），**按包名即可安装**。
 
 ### 方式一：按包名安装（推荐）
 
 在 DSH 里调用：
 
 ```text
-plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.3")
+plugin_manager(action="install_bundle", target="dsh-mini-superagent@0.10.4")
 ```
 
 也可以把这句话交给 DSH 里的任意会话：
 
-> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.3`，装完确认 10 个 `dispatch_*` 工具已注册。
+> 用 plugin_manager 的 install_bundle 安装 npm 包 `dsh-mini-superagent@0.10.4`，装完确认 10 个 `dispatch_*` 工具已注册。
 
 ### 方式二：从源码 / 本地目录安装
 
@@ -94,10 +94,10 @@ plugin_manager(action="install_bundle", target="<仓库根>/dsh-mini-superagent"
 
 ```text
 dispatch_list()
-→ {"version":"0.10.3","total":0,"running":0,"max_workers":6,"tasks":[]}
+→ {"version":"0.10.4","total":0,"running":0,"max_workers":6,"tasks":[]}
 ```
 
-`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.3`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
+`version` 与 `src/constants.js` 的 `VERSION` 一致（当前 `0.10.4`）；`max_workers` 应等于配置里的 `maxWorkers`（默认 6）。
 
 > **装完/升级后刷新一次 GUI 页面**，侧边栏才会出现「派发工作台」图标。
 > 客户端模块在页面刷新后才加载，插件本身已经激活不影响这一点。
@@ -474,6 +474,7 @@ Web 形态下，侧边栏会多一个「派发工作台」图标（原名「任�
 | `leadSessionId` | `mas-lead` | 默认主会话的固定 id；改值等于换一个新默认主会话 |
 | `restrictRouter` | `true` | 「必派发」的会话收窄 `write` / `edit`，改代码只能派下去（选回「不派发」立刻解锁，见「路由模式」） |
 | `routerDenyTools` | `["write","edit"]` | 路由模式收走哪些工具。注意 `bash` 默认保留，`echo > file` 仍能写；要硬边界就把它也加进来 |
+| `allowBoardWithoutConnectionGate` | `false` | **逃生阀，不建议开启**。看板准入拿不到宿主 `connection.requestRejection` 时默认直接回 `503`（fail-closed）；设为 `true` 则退回 0.10.3 的静默回退，只靠自建 Host/Origin 栅栏放行。它只影响「问不到」这一档，翻不掉 401 / 403，也不影响 10 个工具 |
 | `relayRetryMs` | `[2000,4000,8000]` | 报告投递失败的退避序列（毫秒），用完即放弃 |
 | `retryTransient` | `true` | worker 回合遇到瞬时故障（408/429/5xx/网络）时自动续跑 |
 | `retryBackoffMs` | `[15000,30000,60000]` | 续跑的退避序列；长度即最大重试次数 |
@@ -649,6 +650,10 @@ worker 的回合结束时，如果它的 shell job 或 subagent 还在跑，任�
 - **指标有窗口**：成功率 / 中位耗时 / 并行节省只算最近 `memoryWindowDays`（7）天 / `memoryWindowTasks`（200）条内的已结算任务，
   且排除已归档与已退休。拿它跟旧版本的数字比会不一致——先看卡片 hover 里的窗口口径。
 - **看板依赖 `webServer`**：headless 形态没有这个服务时不注册路由（日志会写「没有 webServer，跳过任务看板路由」——日志文案沿用既有字符串，未随展示名改动），面板取不到数据；工具与派发不受影响。
+- **看板准入是 fail-closed（0.10.4 起，破坏性变更）**：路由在、但宿主拿不到 `connection.requestRejection`
+  （旧宿主 / 半加载状态）时，看板回 **503**、页面显示「看板暂时不可用」；此后不再退回只靠自建 Host/Origin
+  栅栏放行。10 个 `dispatch_*` 工具不受影响。确实跑在不提供该服务的宿主上、又必须保留看板时，才设
+  `allowBoardWithoutConnectionGate: true`（不建议）。401 / 403 的含义不变（没登录 / 地址不被信任）。
 - **看板最多返回 200 条**：计数按全量算，列表只截前 200；没有分页、没有历史归档。
 - **远程访问受限**：非回环地址只能通过同源页面看看板，远程 `curl` 会被 403；这是有意的（见「派发工作台」的安全取舍）。
 - **重试有边界**：`running` / `queued` / `cancelled` 不能重试；重试沿用同一个任务 id，只把 `attempt` +1（会话无法恢复时换一个 worker 会话）。

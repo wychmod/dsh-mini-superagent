@@ -663,7 +663,15 @@ function fakeHost(tasks, { cancelThrows = false, messageThrows = false } = {}) {
       return { version: VERSION, client: { inGraph: true, path: '/x/client/index.js', ready: dispatch.clientReady ?? null } }
     },
   }
-  const ctx = { logger: { info() {}, warn() {} } }
+  /**
+   * 宿主 ctx。0.10.4 起看板准入是 fail-closed：拿不到 `connection` 服务就直接 503，
+   * 于是这组用例（钉的是快照与路由语义）永远测不到正事。这里给一个「准入放行」的
+   * 假服务；503 那条路径由 `test/board-connection-gate.test.js` 专门钉住。
+   */
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    get: name => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+  }
   return { ctx, dispatch, calls, handler: createBoardHandler(ctx, dispatch) }
 }
 

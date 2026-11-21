@@ -70,6 +70,20 @@ function makeHost({ archiveOutcome } = {}) {
   return { ctx, agents, calls, archiveOutcome }
 }
 
+/**
+ * 看板 handler 用的宿主上下文。
+ *
+ * 0.10.4 起准入 fail-closed：拿不到 `connection` 服务时回 503。这组用例钉的是
+ * **归档路由**的行为，所以必须给一个「准入已放行」的假宿主，否则测到的是 503。
+ * 真实的 `Dispatch` 自己也带 `ctx`，但 handler 拿到的是宿主 ctx，两者不是一回事。
+ */
+function boardCtx() {
+  return {
+    logger: { warn() {}, info() {} },
+    get: name => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+  }
+}
+
 /** 把两个网关换成桩：不碰真实工作区注册表与 sessionController。 */
 function stubGateways(d, host, dir) {
   d.workspaces = {
@@ -358,7 +372,7 @@ async function withBoard(fn) {
     sweepCalls += 1
     return realArchiveStale()
   }
-  const handler = createBoardHandler({ logger: { warn() {}, info() {} } }, d)
+  const handler = createBoardHandler(boardCtx(), d)
   try {
     await fn({ d, handler, sweep: () => sweepCalls })
   } finally {
@@ -419,7 +433,7 @@ test('POST /archive-task：决策 B 的失败原因经路由回成 reason（HTTP
   stubGateways(d, host, dir)
   try {
     mkTask(d, 't-kept', 'interrupted')
-    const handler = createBoardHandler({ logger: { warn() {}, info() {} } }, d)
+    const handler = createBoardHandler(boardCtx(), d)
     const result = await call(handler, { url: `${BASE}/archive-task`, body: { task_id: 't-kept' } })
     assert.equal(result.status, 200, '归档动作本身成功了，不该用 4xx/5xx 表示「会话没了」')
     assert.equal(result.json.archived, true)

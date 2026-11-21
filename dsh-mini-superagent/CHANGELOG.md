@@ -2,6 +2,67 @@
 
 本文件记录 `dsh-mini-superagent` 的版本变化。版本号遵循 SemVer；`0.x` 阶段不保证 API 稳定，但工具名与配置键在 0.2.0 已冻结（见下）。
 
+## 0.10.4 — 2026-11-21
+
+### 安全（破坏性变更）
+
+- **看板准入改为 fail-closed**：拿不到 DSH 的 `connection` 服务、或该服务上没有
+  `requestRejection` 方法、或这个方法自己抛错时，看板路由**直接回 503**，
+  不再退回只靠自建 `readAllowed` / `writeAllowed` 栅栏放行。
+- 改之前的回退是 0.10.2 刻意留下的：连不上 `connection` 时静默放行，理由是
+  「不因为闸门缺席就把整块看板打成 500」。这个选择在向
+  [`polang233/dsh-plugin-index`](https://github.com/polang233/dsh-plugin-index)
+  提交收录申请时被我们**主动披露**（Issue #601），而该仓库贡献指南的标准是
+  「拿不到 `connection` 时应直接拒绝」——于是按 fail-closed 改。
+- **为什么必须改**：这是整个插件里**唯一一处**「安全判断在拿不到权威依据时默认
+  放行」的地方。DSH 内置路由（open-in-app、devtools CDP）都先问
+  `connection.requestRejection`，我们没有理由在自己拿不到依据时给出更宽的结论。
+- **为什么回 503 而不是 401 / 403**：401（没登录）与 403（地址不被信任）都是
+  **对请求方的判断**，而这一档根本做不出判断——这是「这道门现在检查不了」，是
+  服务可用性问题。用 401 会误导用户去重开一条带凭据的网址，用 403 会误导用户去查
+  `--trusted-host`。503 的错误码是 `dispatch/host-unavailable`（**不是**
+  `dispatch/internal`），排障脚本据此能分清「升级宿主」与「插件 bug」。
+- **逃生阀 `allowBoardWithoutConnectionGate`（默认 `false`）**：只给「跑在旧宿主上、
+  确实拿不到 `connection`、又必须保留看板」的部署用，`cordis.patch.yml` 里带注释说明
+  **不建议开启**。它只影响上面那一档：401 / 403 是已经拿到的权威结论，翻不掉；
+  打开后自建 `readAllowed` / `writeAllowed` 仍然生效（退的只是一层，不是整块拆掉）。
+- 自建的 `readAllowed` / `writeAllowed` **原样保留**：它们挡的是同源页面里的脚本与
+  简单 CSRF，与 `connection`（部署承认的地址 + 已登录浏览器）是两个层次，删任何一层
+  都会掉一档防护。
+
+### 破坏性变更
+
+- **旧宿主 / 半加载状态（`connection` 尚未注入）下，看板会不可用**：页面拿到 503，
+  显示「看板暂时不可用」。10 个 `dispatch_*` 工具**完全不受影响**（它们从不走这道门）。
+  先重启 DSH（半加载会在重启后自愈）；确实是宿主不提供该服务，再考虑逃生阀。
+- 实际情况说明（不夸大）：`connection` 在 `src/index.js` 里已是**硬 inject 依赖**，
+  所以「路由在、服务不在」只出现在旧宿主与半加载窗口——这次改动的真实价值是
+  **纵深防御**与对齐收录方的明确要求，不是修一个日常可复现的洞。
+
+### 验证
+
+- 扩展 `test/board-connection-gate.test.js`（13 → 23 条），新增覆盖：服务缺失 /
+  `requestRejection` 不是函数 / 方法抛错 / 连 `ctx.get` 都没有 → **503**；
+  逃生阀打开 + 服务缺失 → 放行（回到 0.10.3 行为）；逃生阀翻不掉 401 / 403；
+  逃生阀只在布尔 `true` 时生效。503 一组**同时覆盖只读端点与全部写路由**，
+  并断言闸门在 404 之前。
+- 为 fail-closed 的连带影响，给其它直接调 `createBoardHandler()` 的用例补了
+  「准入放行」的假宿主（`board.test.js` / `stats.test.js` / `analytics.test.js` /
+  `p0-regression.test.js` / `p1-regression.test.js` / `archive-task.test.js`）——
+  它们钉的是快照与路由语义，不该被准入挡住。
+- 负向验收：把 `connectionGateOf()` 的 fail-closed 改回「问不到就放行」（即 0.10.3
+  的静默回退）后，**11 条变红**（fail-closed 组 9 条 + 逃生阀组 2 条），改回后全绿。
+- `npm test` **678 pass / 0 fail**（基线 668，本版新增 10 条）；
+  `node scripts/check-syntax.mjs` 21 个文件通过。
+
+### 说明
+
+- 无其它行为变更、无新增运行时依赖，10 个工具与看板 API 形状不变；
+  账本 `FILE_VERSION` 仍是 4。
+- 版本号同源到 `package.json`、`src/constants.js` 的 `VERSION`、两份 README、
+  `docs/board.md` 与 `docs/tools.md` 的示例、`scripts/client-smoke.mjs` 的 fixture，
+  以及落地页 `index.html`。
+
 ## 0.10.3 — 2026-11-21
 
 ### 修复

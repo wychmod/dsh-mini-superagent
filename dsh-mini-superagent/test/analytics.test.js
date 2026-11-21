@@ -85,7 +85,12 @@ function fakeRes() {
 }
 
 async function call(url, dispatch, headers) {
-  const handler = createBoardHandler({ logger: { warn() {} } }, dispatch)
+  // 0.10.4 起看板准入 fail-closed：不给 `connection` 会直接 503，
+  // 于是测不到「参数归一」这件正事。这里给一个准入已放行的假宿主。
+  const handler = createBoardHandler({
+    logger: { warn() {} },
+    get: name => (name === 'connection' ? { requestRejection: () => undefined } : undefined),
+  }, dispatch)
   const res = fakeRes()
   await handler(fakeReq(url, headers), res)
   return { status: res.status, body: res.body ? JSON.parse(res.body) : undefined }

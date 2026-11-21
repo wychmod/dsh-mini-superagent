@@ -557,6 +557,13 @@ function errorCodeFor(status) {
   if (status === 403) return ERROR_CODES.FORBIDDEN
   if (status === 404) return ERROR_CODES.NOT_FOUND
   if (status === 409) return ERROR_CODES.CONFLICT
+  /*
+   * 503 是「闸门检查不了」（0.10.4 起 fail-closed），不是内部错误：用
+   * `dispatch/host-unavailable` 而不是 `dispatch/internal`，排障脚本才能区分
+   * 「宿主没给 connection 服务」与「看板 handler 自己抛错了」——两者的下一步
+   * 完全不同（升级/重启宿主 vs 报插件 bug）。
+   */
+  if (status === 503) return ERROR_CODES.HOST_UNAVAILABLE
   return ERROR_CODES.INTERNAL
 }
 
@@ -733,6 +740,55 @@ function writeAllowed(req) {
   return hasBoardHeader(req)
 }
 
+/**
+ * 问一次宿主准入，并把「问不到」与「问到了结论」区分开（0.10.4 起 fail-closed）。
+ *
+ * 三种结果是**三个不同的东西**，不能压成两个：
+ *
+ * | 情况 | 结果 | 语义 |
+ * | --- | --- | --- |
+ * | 服务在、方法在、回了 `undefined` | `{ rejection: undefined }` | 放行（正常路径） |
+ * | 服务在、方法在、回了 401 / 403 | `{ rejection: 401 \| 403 }` | 拒绝，且原因明确 |
+ * | 服务不在 / 没有方法 / 方法抛错 | `{ unavailable: true, reason }` | **这道门检查不了** |
+ *
+ * 为什么第三档不能等价于「放行」：拿不到权威依据就放行，正是 0.10.2–0.10.3 在
+ * 收录申请里被点名的那处回退（见 `polang233/dsh-plugin-index` Issue #601）。
+ * 这里返回 `unavailable` 而不是直接回一个状态码，是为了让调用方决定 503 / 逃生阀，
+ * 也让这个判断本身可单测。
+ *
+ * 逃生阀 `allowBoardWithoutConnectionGate`（默认 `false`）只在第三档生效：
+ * 打开时返回 `{ rejection: undefined }`，行为回到 0.10.3 的静默回退。
+ * 它**不能**把 401/403 变成放行——那两档我们已经拿到了权威结论。
+ *
+ * @param {any} ctx 宿主上下文（只有 `get` 会被用到）
+ * @param {import('node:http').IncomingMessage} req
+ * @param {any} config `dispatch.config`（已与 DEFAULTS 合并）
+ * @returns {{ rejection: number | undefined } | { unavailable: true, reason: string }}
+ */
+function connectionGateOf(ctx, req, config) {
+  const service = typeof ctx?.get === 'function' ? ctx.get('connection') : undefined
+  const reject = service?.requestRejection
+
+  /** 第三档：要么按逃生阀旧行为放行，要么交给调用方回 503。 */
+  const unavailable = reason => (config?.allowBoardWithoutConnectionGate === true
+    ? { rejection: undefined }
+    : { unavailable: true, reason })
+
+  if (typeof reject !== 'function') {
+    return unavailable(service ? '`connection` 上没有 `requestRejection` 方法' : '宿主没有 `connection` 服务')
+  }
+
+  try {
+    return { rejection: reject.call(service, req) }
+  } catch (error) {
+    /*
+     * 方法抛错同样归第三档：此刻我们**没有**得到「放行」这个结论，只得到了一个
+     * 异常。按异常放行等于让一次内部故障变成一次准入通过。
+     */
+    return unavailable(`\`requestRejection\` 抛错：${String(error?.message ?? error)}`)
+  }
+}
+
 /** 会话 id 的合法形状：DSH 的 sessionId 是 `session-<uuid>`，默认主会话是配置里的固定 id。 */
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,120}$/
 
@@ -762,6 +818,14 @@ function isKnownSession(dispatch, sessionId) {
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
  */
 export function createBoardHandler(ctx, dispatch) {
+  /**
+   * 「闸门检查不了」这条 warn 只记一次。
+   *
+   * 看板每 2 秒轮询一次，逐请求 warn 会把日志刷满，反而看不出真正的原因；
+   * 而这件事一旦发生就不会自愈（缺服务是宿主形态问题），记一条足够定位。
+   */
+  let gateUnavailableWarned = false
+
   return async function boardHandler(req, res) {
     let pathname
     try { pathname = new URL(req.url ?? '', 'http://localhost').pathname }
@@ -786,16 +850,48 @@ export function createBoardHandler(ctx, dispatch) {
      * `x-dsh-mini-superagent`，跨站带自定义头会触发预检，预检过后真请求才发得出去。
      * 删掉任何一层都会掉一档防护。
      *
-     * 为什么用**可选链**读服务：`connection` 是 0.10.2 才声明的依赖（见 `src/index.js`
-     * 的 `inject`），而这条 handler 单独可测、也可能被旧宿主或半加载状态调到。
-     * 服务不在时静默放行，退回「只靠自建 Host 栅栏」的旧行为——不因为闸门缺席
-     * 就把整块看板打成 500。
+     * **0.10.4 起改为 fail-closed**（此前是静默回退）：拿不到 `connection` 服务、
+     * 或服务上没有 `requestRejection` 方法、或这个方法自己抛错时，**不再退回**
+     * 自建 Host 栅栏放行，而是直接回 **503**。
+     *
+     * 为什么 503 而不是 401 / 403：
+     * - 401 =「你没登录」、403 =「你不被信任」，两者都是**对请求方的判断**，而这里
+     *   根本做不出判断——这是「这道门现在检查不了」，是服务可用性问题；
+     * - 用 401 会误导用户去重开一条带凭据的网址（凭据没坏，门没开）；
+     *   用 403 会误导用户去查 `--trusted-host`（信任清单也没问题）；
+     * - 503 与 DSH 内置路由（open-in-app、devtools CDP）在服务缺席时的语义一致：
+     *   **安全判断拿不到权威依据时，不放行**。
+     *
+     * 为什么这是**破坏性变更**：旧宿主 / 半加载状态（`connection` 尚未注入）
+     * 下看板会不可用。给一个显式逃生阀 `allowBoardWithoutConnectionGate`
+     * （默认 `false`，即默认 fail-closed），打开后行为回到 0.10.3 的静默回退。
+     * 它只影响看板这块面板；10 个 `dispatch_*` 工具完全不受影响。
      *
      * 返回值语义（DSH 侧）：`undefined` 放行、`401` / `403` 拒绝。401 与 403 的
      * 文案分开写：前者是「没登录」，后者是「不信任这个地址」，混在一起用户会
      * 去查错的日志。
      */
-    const rejection = ctx.get?.('connection')?.requestRejection?.(req)
+    const gate = connectionGateOf(ctx, req, dispatch.config)
+    if (gate.unavailable) {
+      if (!gateUnavailableWarned) {
+        gateUnavailableWarned = true
+        ctx.logger?.warn?.(
+          '%s 看板准入拿不到 `connection.requestRejection`（%s），按 fail-closed 回 503；'
+          + '10 个 dispatch_* 工具不受影响。该宿主确实没有这个服务、又必须保留看板时，'
+          + '才把 `allowBoardWithoutConnectionGate` 设为 true（不建议，会退回只靠自建栅栏）。',
+          LOG_PREFIX,
+          gate.reason,
+        )
+      }
+      return send(res, 503, {
+        ok: false,
+        error: '看板暂时不可用：宿主没有提供请求准入服务（`connection`），无法判断这次请求是否可信，'
+          + '按 fail-closed 拒绝。派发工具不受影响。'
+          + '若重启 DSH 后仍然如此，说明该宿主不提供这个服务——'
+          + '确认要保留看板时，才把 `allowBoardWithoutConnectionGate` 设为 true（不建议）。',
+      })
+    }
+    const rejection = gate.rejection
     if (rejection !== undefined) {
       const unauthorized = rejection === 401
       return send(res, unauthorized ? 401 : 403, {

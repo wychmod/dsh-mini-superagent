@@ -136,7 +136,9 @@
 
 请求体上限 64 KiB，必须是合法 JSON（`/archive` 不需要 body）。
 
-**准入分档**：只读端点（`GET /board`、`GET /board/retired`、`GET /board/stats`、
+**准入分档**：所有端点先过宿主准入 `connection.requestRejection`（0.10.4 起
+**fail-closed**：拿不到这个服务就回 `503`，见「鉴权与暴露面」）。过了这一层之后，
+只读端点（`GET /board`、`GET /board/retired`、`GET /board/stats`、
 `GET /board/analytics`、`GET /selfcheck`）走 `readAllowed`，
 写端点走 `writeAllowed`（= 读的规则 + 自定义头）。**`GET /board/retired` 不要求 `x-dsh-mini-superagent` 写头**：
 它只读、不含正文、只回答「这条任务什么时候因为什么被移出账本」，把它当写操作对待会让 `curl`、
@@ -240,7 +242,7 @@ dispatch.clientReady = {
 
 ```json
 {
-  "version": "0.10.3",
+  "version": "0.10.4",
   "generatedAt": "2026-11-05T10:42:07.000Z",
   "concurrency": { "running": 2, "queued": 1, "max": 6 },
   "counts": { "total": 7, "running": 2, "queued": 1, "done": 2, "blocked": 1, "failed": 1, "cancelled": 0, "ended": 0, "interrupted": 0, "archived": 2, "retired": 3 },
@@ -268,7 +270,7 @@ dispatch.clientReady = {
   所以那 200 条是**过滤后**的 200 条，不是全量的前 200 条。
 - `truncated`：任务总数超过 200 时为 `{shown, total}`，否则 `null`。**这是给界面的提示**——没有它的时候「总计 500 / 列表 200」看起来像数据丢了。
   带 `?group=` / `?task=` 时按**过滤后**的条数判断（客户端问的是「我这次的列表被截了多少」）。
-- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.10.3`）。
+- `version` 来自 `src/constants.js` 的 `VERSION`（当前 `0.10.4`）。
 - `memory`：记忆治理口径，**形状逐字冻结**为 `memoryStats()` 的返回值。五块的含义：
   - `window`：指标窗口（最近 `days` 天 / `tasks` 条，`since` 是窗口起点 ISO 串，
     `count` 是窗口**实际命中**的条数——未套 `tasks` 上限，按 `updated_at`（没有则 `settled_at`）
@@ -968,8 +970,27 @@ Host 聚合是纯内存遍历（不读盘、不发网络），
 ## 鉴权与暴露面
 
 0.7.0 起不再只靠 Host/Origin 的相等比较，因为那个判据可以被 DNS rebinding 绕过。
+0.10.2 起第一道判断交给宿主的 `connection.requestRejection`（Host 信任清单 + 浏览器登录凭据），
+0.10.4 起这一层**fail-closed**：拿不到它就不放行。
 
-没有 token、没有登录态，准入靠两条：**Host 必须是真正在监听的地址**，写操作另需**自定义头**。
+准入一共三层，从外到内：
+
+| 层 | 谁判断 | 挡什么 | 拿不到依据时（0.10.4） |
+| --- | --- | --- | --- |
+| 1 | 宿主 `connection.requestRejection` | 部署不承认的 Host（DNS rebinding）、没有浏览器登录凭据 | **503**（不再静默回退） |
+| 2 | 本插件 `readAllowed` | 回环 Host 之外的地址；回环 Host 但 `Origin` 不是回环 | 不适用（这是纯本地判断） |
+| 3 | 本插件 `writeAllowed` | 同源页面之外的脚本、简单 CSRF（要求自定义头） | 不适用 |
+
+返回值语义（第 1 层）：`undefined` 放行、`401` 没登录、`403` 地址不可信、
+**`503` 这道门检查不了**（服务缺失 / 没有方法 / 方法抛错）。这三档的排障方向不同，
+错误码也分开：`dispatch/unauthenticated` / `dispatch/forbidden` / `dispatch/host-unavailable`。
+
+逃生阀 `allowBoardWithoutConnectionGate`（默认 `false`）只在第 1 层「问不到」时生效：
+打开后回到 0.10.3 的静默回退，第 2、3 层照旧。它翻不掉 401 / 403。
+**不建议开启**，理由见 `cordis.patch.yml` 的注释与 CHANGELOG 0.10.4。
+
+没有 token、没有登录态（第 2、3 层的口径不变）：**Host 必须是真正在监听的地址**，
+写操作另需**自定义头**。
 
 | 操作 | 规则 |
 | --- | --- |
